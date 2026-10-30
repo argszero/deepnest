@@ -1,0 +1,11 @@
+[package]
+name = "deepnest-command-scan"
+description = "Reads a shell command's text for what a write fence cannot see: the read-direction escapes, and stopping deepnest itself"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+deepnest-sandbox = { path = "../sandbox" }

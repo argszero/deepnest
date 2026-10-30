@@ -3,12 +3,23 @@
 version = 4
 
 [[package]]
+name = "deepnest-command-scan"
+version = "0.1.0"
+dependencies = [
+ "deepnest-sandbox",
+]
+
+[[package]]
 name = "deepnest-llm"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "deepnest-sandbox"
+version = "0.1.0"
 
 [[package]]
 name = "itoa"
