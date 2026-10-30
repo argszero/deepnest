@@ -1,0 +1,21 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Node / front end
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Local app data and runtimes unpacked by deepnest
+/.deepnest/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
