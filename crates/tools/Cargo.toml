@@ -1,0 +1,16 @@
+[package]
+name = "deepnest-tools"
+description = "The agent's hands: the file, search and shell tools, each going through the sandbox fence"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+deepnest-llm = { path = "../llm" }
+deepnest-sandbox = { path = "../sandbox" }
+deepnest-command-scan = { path = "../command_scan" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+regex = "1"
