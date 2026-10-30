@@ -1,0 +1,169 @@
+# deepnest 设计
+
+**状态：v1 的设计定稿。** 这份文档就是写代码所依据的可执行规格。凡与它冲突之处，以宿主的决定记录为准；下面每条决定都标注了出处。
+
+全文使用的出处标记：
+
+- **`宿主 HH:MM`** —— 宿主 2026-10-30 在该时刻拍板，不再翻案。
+- **`实现自决, ref: <路径>`** —— 写这份文档时确定，并指明 EMRG 中作为先例的代码。若那段代码给出的论据相反，可以改。
+
+---
+
+## 1. v1 是什么
+
+本地优先的应用生成器：一个自包含的二进制（约 140 MB），双击后在浏览器打开页面；每个生成出来的应用是一个目录加一个专属 agent。**v1 一次交付约定的全部边界**（`宿主 20:42`），不是先做最小闭环、后续补。
+
+三个平台同时出：macOS arm64、Windows x64、Linux x64（`宿主 20:56`）。平台后端从第一行就抽象，共享代码里不许有 macOS 形状的假设。
+
+## 2. 进程拓扑
+
+**只有一个监听端口，其余全部内部化**（`宿主 20:45`）。
+
+```
+浏览器 ──► 127.0.0.1:4270  （唯一对外暴露的端口）
+              │
+              ├── /                     控制面板
+              ├── /app/<slug>/          应用 <slug>，转发
+              └── /api/…                控制面板自己的接口
+                      │
+                      └──► 127.0.0.1:<临时端口>   应用自己的服务
+```
+
+- 应用真实监听的端口每次启动重新分配，不出进程、不对外、不稳定、不持久化。
+- 转发层往每个 `/app/<slug>/` 的响应里注入悬浮球，所以 agent 把应用页面整块重写也不会把它弄丢；为此它也改应用设的 CSP。
+- 因此转发层负责：注入 `<base href>`、重写绝对路径、重写 `Location` 头、给 Cookie 加 `Path` 前缀、WebSocket 升级、SSE 不缓冲。
+
+单实例准入**就是那个 bind 本身** —— 内核拒绝第二个 bind，所以没有可伪造的 PID 文件、没有竞态（`实现自决, ref: emrg/server/daemon.py::_create_fixed_port_socket`）。POSIX 只设 `SO_REUSEADDR`、绝不 `SO_REUSEPORT`；Windows 用 `SO_EXCLUSIVEADDRUSE`。bind 失败但后面没有活着的监听者 ⇒ TIME_WAIT 残留，有界重试，不要直接失败。
+
+随机令牌写入 `~/.deepnest/deepnest.token`（权限 `0600`），并由 keepalive 定时重写，外部误删能自愈（`实现自决, ref: emrg/server/daemon.py::serve`）。回环地址不是安全边界：令牌加 `Host`/`Origin` 校验才是挡 CSRF 与 DNS rebinding 的东西。
+
+## 3. 数据布局
+
+```
+~/.deepnest/
+├── config.toml              模型端点：base_url / key / model      （宿主 20:18）
+├── deepnest.token           0600，控制面板令牌，每次运行重写
+├── skills/<name>/SKILL.md   已安装的 skill                        （宿主 20:26）
+├── skills/.state.json       managed: true 才允许更新器刷新
+├── toolchain/               解包出来的 Rust 与 bun，首启原子解包
+├── apps/<slug>/
+│   ├── src/                 应用自己的源码
+│   ├── app.sqlite           WAL、busy_timeout、单写者
+│   ├── target/              编译产物
+│   └── .agent/
+│       ├── history.jsonl    对话，逐轮可重放
+│       └── memory/*.md      长期记忆 + MEMORY.md 索引
+└── logs/
+```
+
+两条规矩在这里很重：
+
+- **agent 的状态放在应用目录内部**，于是删应用就一起删掉它的对话与记忆，备份应用也一起备份（`宿主 20:58` —— 记忆属于「EMRG 同等能力」，不是可选功能）。
+- **agent 的对话不存进 `app.sqlite`。** 那个库属于用户的应用，第二个写者正是 WAL 实测里已经记下的 `database is locked` 故障。
+
+## 4. 模块
+
+每个模块是一个 crate，自带测试。上层不伸手进另一个模块的内部。
+
+### `crates/llm` —— 模型访问 `（宿主 20:18）`
+
+对用户给的 `base_url` + `key` + `model` 说 OpenAI 兼容协议。流式、退避重试，以及**不把 400 误判成上下文过长**的错误降级 —— 这个坑 EMRG 踩过，不许再踩一遍（`实现自决, ref: emrg/server/llm.py`）。没有厂商分支。
+
+### `crates/sandbox` —— 一套策略与两个执行者 `（宿主 19:03、19:05）`
+
+三档：`read-only`、`workspace-write`、`danger-full-access`。围栏是**操作系统级**的，不是进程内查路径：macOS 用 Seatbelt、Linux 用 `bwrap`、Windows 用 ACL 加受限令牌。
+
+同一个函数 `writable_roots()` 同时喂给文件工具的拒绝口和 OS 策略，所以两者不可能给出两个答案（`实现自决, ref: emrg/sandbox/roots.py`）。可写面恰好是：应用目录、工具链目录、临时目录。
+
+提权是**跳表、一次一跳、逐次批准**：工具调用携带申请的档位与理由，宿主在网页上批准，会话默认档不动。`read-only` 可一跳直达 `danger-full-access`；`danger-full-access` 无处可去；不构成放宽的申请直接拒（`实现自决, ref: emrg/sandbox/escalation.py`）。
+
+受保护文件在任何档位都不可写，判定按设备号+inode 而不是字符串比较：`config.toml`、`deepnest.token`、skill 状态文件（`实现自决, ref: emrg/sandbox/policy.py::same_file`）。
+
+Windows 后端在体量上远超其它两个（EMRG：ACL、FFI、受限令牌、spawn 合计约 3.2k 行）。`windows` crate 省掉的是手写 FFI，不是 ACL 与令牌的逻辑。排期按这一块估，不按平均值估。
+
+### `crates/command_scan` —— 围栏看不见的那一层 `（宿主 19:03）`
+
+命令文本扫描器，守两类东西：读方向的外泄，以及围栏无法表达的那一条禁令 —— **agent 不许停掉或重启 deepnest 自身**。做法是切词、展开嵌套命令、识别 wrapper（`eval`、`-exec`、`builtin cd`），再判断某个词是否处于命令位（`实现自决, ref: emrg/tools/command_scan.py`）。
+
+### `crates/tools` —— agent 的手 `（宿主 20:20）`
+
+`bash`、`read`、`write`、`edit`、`glob`、`grep`、`subagent`。不是精简子集：宿主定的是每应用 agent 具备接近完整的 EMRG 能力，包括启停这个应用、看日志、操作浏览器、截图。浏览器操作与截图**来自 browser-harness skill，不由核心内建**（`宿主 20:23`，`宿主 20:48` 再确认）—— 核心只负责在默认浏览器里打开应用页。
+
+shell 结果明确携带沙箱判定，区分「runner 没起来」与「沙箱拒绝」，超时杀进程组，被拒时追加提权提示（`实现自决, ref: emrg/tools/bash_tool_v2.py`）。
+
+### `crates/agent` —— 工具循环
+
+轮次循环、流式拼装、工具派发、对话持久化、记忆写入。记忆分两层：`history.jsonl` 存对话，另一层是带 frontmatter 的 Markdown 条目加一个 `MEMORY.md` 索引（一行一条，退休改 `status` 不删）。进提示词的只有索引，正文由 agent 用 read 工具自己读（`实现自决, ref: emrg/memory.py`、`emrg/session.py`）。
+
+系统提示词**重写一份**。agent 的行为质量大半在这份上，EMRG 的不能照抄 —— 但 EMRG 已经付过学费的三处故障可以便宜地避开：压缩按字符数而不是按条数、工具循环在轮次取消时能停下、400 不被当成上下文过长。
+
+### `crates/skills` —— Anthropic Agent Skills
+
+加载器读两个根目录（`~/.deepnest/skills/`、`<应用>/.agent/skills/`）和两种布局（`<name>.md`、`<name>/SKILL.md`）；同名时应用级遮蔽用户级。渐进披露：进提示词的只有 `name` + `description` + `path`。没有 `description` 的文件不加载（`实现自决, ref: emrg/skills/loader.py`）。
+
+随二进制内置的那份推荐目录本身就是一份普通 skill 文件，额外带一个 `skills:` 列表（`name`、`description`、`repo`、`install`、`dest`、`check`），`dest` 指向 `~/.deepnest/skills/`。头两条是 `browser-harness` 与 `baoyu-design`（`宿主 20:26`）。安装状态在 `.state.json`：只有 `managed: true` 的条目允许更新器刷新，其余算宿主改过，永不动（`实现自决, ref: emrg/skills/installer.py`）。
+
+### `crates/apps` —— 应用生命周期
+
+模板、编译、启动、停止、重启、日志、端口分配。模板注入 **WAL + `busy_timeout` + 单写者约定**，不交给每个生成出来的应用自己决定 —— 实测里第二写者在 `timeout=0` 时立刻失败，`busy_timeout=5000` 时等 1817 ms 成功。
+
+前端用 bun 打包，**不做 HMR**。刷新由「这一版完成」信号触发，绝不由文件变更触发，否则会刷出半成品页（`宿主 18:49`、`实现自决`）。
+
+模板同时钉住转发层契约：资源引用用相对路径，应用必须能跑在路径前缀下。
+
+### `crates/gateway` —— 唯一的门
+
+§2 描述的那个路由。最难的不是路由，而是**不对应用撒谎**：头重写、流处理、WebSocket 升级要透明到普通 axum 或 Express 应用在 `/app/<slug>/` 下不改一行就能跑。
+
+### `crates/web` —— 控制面板
+
+首启：模型端点表单。之后：应用列表、新建应用、带悬浮球的应用页。提权审批在这里弹窗，一次一跳，批准记录本身就是审计日志（`宿主 20:20`）。
+
+### `crates/packaging` —— 单文件
+
+zstd 压缩的工具链载荷首次启动**原子**解包 —— 先解到临时目录再改名，半套工具链永不被当成完整的。C 工具链不自带：首次编译前检查 Xcode CLT / VS C++ Build Tools 并引导安装。
+
+macOS 签名并公证（`宿主 20:48`）。自带工具链里的每个 Mach-O 必须在**打包前**就签好，因为首启解包不会补签名，而 hardened runtime 下未签名的子进程会被拒。Windows 不签名（`宿主 20:56`）—— 首次运行 SmartScreen 会警告，README 与首启页面都如实说明，而不是教用户盲绕安全提示。
+
+## 5. 不许漂移的接口
+
+三处边界占据了未来大半的返工成本，在此固定：
+
+```rust
+trait SandboxBackend {              // darwin | linux | win32 —— 启动时选定
+    fn fence(&self, roots: &WritableRoots, cmd: &Command) -> Launched;
+}
+
+trait Tool {                        // 每个工具一个实现，拒绝形状统一
+    async fn call(&self, args: Value, ctx: &ToolCtx) -> ToolResult;
+}
+
+struct MemoryStore { /* 条目 + 索引；正文永不进提示词 */ }
+```
+
+应用目录布局与 `/app/<slug>/` 路径契约同样固定：这两处之上坐的是用户的数据和用户的 URL，晚改就是一次迁移。
+
+## 6. 施工顺序
+
+一个周期一个模块，每个都带测试落地：
+
+1. `crates/llm` —— 流式、重试、降级。
+2. `crates/sandbox` + `crates/command_scan` —— 三档、三后端、一份策略源。
+3. `crates/tools` —— 八个工具，全部走围栏。
+4. `crates/agent` —— 循环、持久化、记忆。
+5. `crates/apps` —— 模板、编译、生命周期、日志。
+6. `crates/gateway` + `crates/web` —— 唯一的门、面板、悬浮球。
+7. `crates/skills` —— 加载器、目录、安装器。
+8. `crates/packaging` —— 载荷、首启解包、签名。
+
+## 7. 不可让步
+
+- 三平台后端从第一行抽象（`宿主 20:56`）。
+- 沙箱三档且 OS 级围栏，提权逐次（`宿主 19:03`）。
+- 应用目录布局与单端口路径契约（§2、§3）。
+- 每个模块带测试落地。
+- deepnest 是单个二进制；应用是目录（`宿主 18:55`）。
+
+## 8. v1 不做
+
+远程中转（`宿主 18:49`）、定时任务、技能市场、除一个 OpenAI 兼容端点外的多 provider、超出 `subagent` 工具的子 agent 扇出。
