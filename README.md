@@ -10,7 +10,9 @@ One binary, one double-click, one page in your browser. You describe the app you
 
 ## The idea
 
-**Every app is a directory.** Source, configuration, the SQLite database and build output live together under `~/.deepnest/`. There is no remote build server in v1, no cloud account, no data leaving the machine.
+**Every app is a directory.** Source, configuration, the SQLite database and build output live together under `~/.deepnest/`. There is no remote build server and no cloud account: everything is built on your machine, and your apps run there.
+
+One thing does leave the machine, and it is worth saying plainly: the agent needs a model, and you supply it. What you type and the code the agent writes go to **the endpoint you configure yourself**. They go nowhere else.
 
 **Every app has its own agent.** Inside the page runs a floating dialog. You tell it what the app should do; it generates and modifies the code; the browser view refreshes live. One app, one directory, one agent.
 
@@ -60,6 +62,8 @@ deepnest checks for them before the first build and walks you through installing
 ## Documentation
 
 English is the default for everything in this repository. A Chinese translation of this page lives in [README.zh.md](README.zh.md).
+
+The design v1 is built against — module boundaries, data layout, the port model, and where each decision came from — is in [docs/design.md](docs/design.md) ([中文](docs/design.zh.md)).
 
 ## License
 
