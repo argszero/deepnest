@@ -1,0 +1,10 @@
+[package]
+name = "deepnest-sandbox"
+description = "deepnest file-effect policy and its per-platform enforcers: three modes, one writable-root derivation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
