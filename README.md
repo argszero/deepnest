@@ -63,4 +63,4 @@ English is the default for everything in this repository. A Chinese translation 
 
 ## License
 
-Not decided yet.
+MIT — see [LICENSE](LICENSE).

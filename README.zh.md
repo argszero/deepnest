@@ -63,4 +63,4 @@ deepnest 会在第一次编译前检查，缺什么就引导你装什么，而�
 
 ## 许可证
 
-尚未确定。
+MIT，见 [LICENSE](LICENSE)。
