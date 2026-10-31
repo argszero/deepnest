@@ -1,4 +1,4 @@
-//! The deepnest binary: the smallest thing that turns five library crates into a program.
+//! The deepnest binary: the smallest thing that turns the library crates beside it into a program.
 //!
 //! Nothing that shipped before this crate could be started. This one **starts**: it reads the
 //! one file the user must supply, writes the token that guards the panel, takes the single
@@ -20,17 +20,21 @@
 //!   is a file that heals after an external deletion instead of locking the panel out until the
 //!   next restart.
 //!
-//! What this crate deliberately is **not**: an HTTP server. [`http`] speaks exactly the one
-//! request it needs to, on one connection, and closes. A real server is `crates/gateway`'s job,
-//! and it comes with routing, header rewriting and WebSocket upgrade — a different problem than
-//! proving the process starts and proves it on three platforms.
+//! What this crate deliberately is **not**: an HTTP server. It routes, and the layer underneath —
+//! the parser, the response type, and the forward that serves an app under `/app/<slug>/` — is
+//! [`deepnest_gateway`], re-exported here as [`http`]. The split is not decoration: a forwarded
+//! answer carries the app's own content type and headers, so the response type has to hold them,
+//! and a type that can hold an arbitrary header belongs with the code that forwards them.
 
 pub mod config;
 pub mod home;
-pub mod http;
 pub mod router;
 pub mod server;
 pub mod token;
+
+/// The HTTP layer itself, which lives in the gateway: choosing it is that crate's decision, and a
+/// response the gateway forwards carries headers this binary never writes.
+pub use deepnest_gateway::http;
 
 pub use config::{Config, ConfigError, Llm};
 pub use home::{home, prepare_home, HOME_ENV};

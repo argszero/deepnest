@@ -60,8 +60,14 @@ by name what it does not answer:
   `create` answers `201` and returns the directory and the file list, because the client's next
   question is always where it went. `build` is the slow one: it runs the toolchain, takes tens of
   seconds on a warm cache, and holds the connection that asked for it.
-- `GET /app/<slug>/` → `404` naming `crates/gateway`. A bare `404` on a correctly spelled path
-  reads like a bug in the path.
+- `GET /app/<slug>/…` and `HEAD` — the app itself, forwarded to the loopback port it is running
+  on. Not behind the token: this is the page a browser navigates to, and a link that demands an
+  `Authorization` header is a link that never opens. What bounds it is that the only thing it can
+  reach is an app's own port on this machine. An app that is not running answers `503` naming the
+  `POST` that starts it; one that vanished between the state check and the connect answers `502`
+  and names the app's log; a slug that is not an app answers `404`. `POST` and `DELETE` to an app
+  answer `405` with `Allow: GET, HEAD`, because this layer carries no request body and forwarding
+  one without it would tell the app a request arrived that said nothing.
 - Anything else → `404` JSON; a method it does not serve → `405` with
   `Allow: GET, HEAD, POST, DELETE`; a request that declares a body → `411`. Nothing in this build
   reads a body: answering "done" to a request whose content it never saw is worse than refusing
@@ -73,8 +79,11 @@ Three deviations from §2, each deliberate, each to be closed by the crate that 
   refuses a second bind with `WSAEADDRINUSE`, which is the admission this needs. Setting it
   explicitly needs a raw winsock call, and that hardening belongs with the packaging work rather
   than being claimed here.
-- **The HTTP layer is hand-written**, one request per connection: choosing the real server stack
-  is `crates/gateway`'s decision, and this crate should not make it by accident.
+- **The HTTP layer is hand-written**, one request per connection — and it now lives in
+  `crates/gateway`, which is where the choice was meant to be made. It moved because a forwarded
+  answer carries the app's own content type and headers, so the response type has to be able to
+  hold them; a type that can is the gateway's business, not the binary's. The binary re-exports it
+  (`pub use deepnest_gateway::http`), so a name that reads `crate::http` still resolves.
 - **Nothing opens the browser yet.** Opening a placeholder page on every start is worth exactly
   as much as the panel behind it.
 
@@ -208,6 +217,23 @@ What none of it does: build in the background, or report progress while it runs.
 
 The router described in §2. Its hardest requirement is not routing but **not lying to the app**: header rewriting, stream handling and WebSocket upgrade have to be transparent enough that an ordinary axum or Express app runs unchanged under `/app/<slug>/`.
 
+**What has landed: the forward, and the HTTP layer under it** (`decided in implementation`, 2026-10-31). `/app/<slug>/…` reaches the app's loopback port, and the app is told it is being served from `/`. Five decisions:
+
+- **The prefix comes off the path and nothing else does.** The app sees `/api/items`; it never learns it lives under `/app/notes`. That is what makes an ordinary app work unchanged — it wrote `/api/items` and that is what arrives — and it is why the generated template's contract (relative asset URLs) is a contract at all.
+- **The Host the app sees is its own port.** A framework that builds absolute URLs from the `Host` header would otherwise send the browser to the panel's port, where the same path means something else entirely.
+- **A page gets a `<base href>` naming its prefix, unless it declared one.** Without it, `/app/notes` and `/app/notes/` resolve a relative `./main.js` to two different places. With it, the answer is independent of how the address bar spelled the request. A page that already declares a base has made a decision about its own URLs, and the forward does not overrule it.
+- **`Location` and `Set-Cookie` are rewritten; nothing else is.** A redirect to `/login` leaves the prefix and lands on deepnest's own 404. A cookie with `Path=/` is sent to every route on the port, the panel's API included, so it is confined to the prefix — added when absent, because a cookie with no `Path` gets `/` from the browser anyway. Everything else is passed through untouched: a proxy that rewrites headers it does not understand is a proxy that breaks the app it was meant to leave alone.
+- **A chunked body is decoded, not forwarded as framing.** A Node or axum app answers a page it did not measure with `Transfer-Encoding: chunked`; passing those bytes on with the header stripped would hand the browser the chunk sizes as content.
+
+What this slice does **not** do, each named because each is a different piece of work:
+
+- **No WebSocket upgrade, and no streaming.** The hand-written layer reads one request per connection and answers once, so an upgrade has nowhere to go and an SSE endpoint answers only when it ends. Both are the next slice, and both change the connection model rather than adding to it.
+- **No floating dialog injection, and so no CSP rewrite.** The dialog is injected into every `/app/<slug>/` response precisely so that an agent rewriting the app's page wholesale cannot delete it; rewriting the app's CSP before there is a dialog to inject would loosen a policy for nothing.
+- **No `POST` to an app.** A body cannot be forwarded by a layer that never reads one, and forwarding the request without it would report success for content the app never saw.
+- **The shutdown sequence that runs the apps down** is still not written; it belongs with the real server loop, and this slice did not build one.
+
+The forward is a `Forwarder` trait, for the same reason `Spawner` and `Prober` are: what the router has to get right is *which app a request is sent to*, and a test of that decision should not depend on the kernel handing a real app the port the supervisor allocated.
+
 ### `crates/web` — the control panel
 
 First run: the model endpoint form. After that: app list, app creation, and the app page with the floating dialog. Escalation approvals are modal here, one hop at a time, and the approval itself is the audit record (`host 20:20`).
@@ -256,7 +282,9 @@ One module per cycle, each landing with its tests:
    contract (slug, manifest, discovery, log tail, `GET /api/apps`), the process lifecycle (port
    allocation, start/stop/restart), and the template and the build (`POST /api/apps/<slug>/create`
    and `/build`). All three are wired into the binary, so this is not a module that sits unread.
-7. `crates/gateway` + `crates/web` — the single door, the panel, the dialog.
+7. `crates/gateway` + `crates/web` — the single door, the panel, the dialog. **In progress**: the
+   gateway's forward and the HTTP layer under it are in, wired into the binary; the WebSocket
+   upgrade, streaming, the dialog injection and the panel remain.
 8. `crates/skills` — loader, catalog, installer.
 9. `crates/packaging` — payload, first-run unpack, signing.
 

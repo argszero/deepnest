@@ -1,0 +1,10 @@
+[package]
+name = "deepnest-gateway"
+description = "The single door: the hand-written HTTP layer, and the forward that serves an app under /app/<slug>/ without lying to it"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]

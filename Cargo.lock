@@ -22,6 +22,7 @@ name = "deepnest"
 version = "0.1.0"
 dependencies = [
  "deepnest-apps",
+ "deepnest-gateway",
  "getrandom",
  "serde",
  "serde_json",
@@ -54,6 +55,10 @@ version = "0.1.0"
 dependencies = [
  "deepnest-sandbox",
 ]
+
+[[package]]
+name = "deepnest-gateway"
+version = "0.1.0"
 
 [[package]]
 name = "deepnest-llm"
