@@ -38,6 +38,7 @@ pub mod rebuild;
 pub mod router;
 pub mod server;
 pub mod token;
+pub mod updates;
 
 /// The HTTP layer itself, which lives in the gateway: choosing it is that crate's decision, and a
 /// response the gateway forwards carries headers this binary never writes.

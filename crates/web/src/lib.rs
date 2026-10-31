@@ -624,6 +624,26 @@ mod tests {
     }
 
     #[test]
+    fn the_panel_asks_for_the_update_check_outside_the_markup() {
+        // The check is a request per skill to somebody else's server, so the page must not be
+        // waiting on it: the script asks after the markup is already readable, and the answer is
+        // appended rather than rendered. Both halves are asserted, because either one alone would
+        // pass while the panel still blocked on a network it does not need.
+        assert!(
+            SCRIPT.contains("/api/skills/updates"),
+            "the panel never asks whether a newer skill release exists"
+        );
+        assert!(
+            !PAGE.contains("/api/skills/updates"),
+            "the update check is rendered into the markup, which makes the page wait for a network"
+        );
+        assert!(
+            PAGE.contains("id=\"skills-section\""),
+            "the script appends into a section the markup does not have"
+        );
+    }
+
+    #[test]
     fn the_script_calls_the_routes_the_server_has() {
         // Cheap guard against a script and a router drifting apart: every path the script fetches
         // is one this repository serves.

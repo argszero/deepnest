@@ -244,4 +244,48 @@
     appsBox.textContent = "";
     appsBox.appendChild(element("p", "bad", "Cannot read the app list: " + (error.message || error)));
   });
+
+  // ---- skill updates -------------------------------------------------------------------------
+
+  // Asked for after the page is already readable, and never rendered into the markup: this is one
+  // request per installed skill to somebody else's server, so on a machine with no network it takes
+  // until that request fails. A page that waited for it would hide the app list — and stopping a
+  // runaway app — behind a question about updates.
+  function refreshUpdates() {
+    var section = document.getElementById("skills-section");
+    if (!section) {
+      return;
+    }
+    api("/api/skills/updates")
+      .then(function (report) {
+        var lines = [];
+        (report.skills || []).forEach(function (skill) {
+          if (skill.state === "newer") {
+            lines.push(skill.name + ": release " + skill.version + " is published.");
+          } else if (skill.state === "unknown") {
+            lines.push(
+              skill.name + ": " + skill.version + " is published; no installed version is recorded, " +
+                "so there is nothing to compare it with yet."
+            );
+          } else if (skill.state === "unchecked") {
+            // Said out loud rather than left blank: a missing line and "up to date" would look the
+            // same, which is the reading the four-state check exists to prevent.
+            lines.push(skill.name + ": could not check — " + (skill.detail || "no reason given") + ".");
+          }
+        });
+        if (!lines.length) {
+          return;
+        }
+        var note = element("p", "note", lines.join(" "));
+        note.id = "skills-updates";
+        section.appendChild(note);
+      })
+      .catch(function () {
+        // The check is a courtesy, and a page that reported its failure in red would be shouting
+        // about the least important thing on it. The skills themselves are already listed above,
+        // read from disk with no network at all.
+      });
+  }
+
+  refreshUpdates();
 })();
