@@ -35,6 +35,11 @@
 //! A save takes effect in this process rather than at the next start. The model name is behind a
 //! lock for exactly that reason: a first-run form whose answer is "restart me" is asking the user
 //! to do something the program does not need.
+//!
+//! `/dialog.js` and `/dialog.css` are the floating dialog that `crates/gateway` injects into every
+//! page an app answers. They are served without the token for a reason the panel's script does not
+//! have: the page that loads them belongs to the app, whose own script shares this origin, so a
+//! token written there would be a token the app could read and spend.
 
 use std::fmt::{self, Write as _};
 use std::path::PathBuf;
@@ -241,6 +246,19 @@ impl Router {
                 200,
                 "text/javascript; charset=utf-8",
                 deepnest_web::SCRIPT.as_bytes().to_vec(),
+            )),
+            // The app page's dialog, from `crates/web`. Both are named by the markup
+            // `deepnest_gateway::dialog` injects, and both are served without the token: the page
+            // that loads them cannot carry one, because the app's own script shares the origin.
+            "/dialog.js" => Answer::Full(Response::new(
+                200,
+                "text/javascript; charset=utf-8",
+                deepnest_web::DIALOG_SCRIPT.as_bytes().to_vec(),
+            )),
+            "/dialog.css" => Answer::Full(Response::new(
+                200,
+                "text/css; charset=utf-8",
+                deepnest_web::DIALOG_STYLE.as_bytes().to_vec(),
             )),
             "/api/health" => Answer::Full(Response::json(200, self.health())),
             "/api/config" => {
@@ -1014,6 +1032,42 @@ mod tests {
     fn a_request_without_host_is_refused() {
         let request = parse("GET / HTTP/1.1\r\n").unwrap();
         assert_eq!(router().respond(&request).complete().status, 400);
+    }
+
+    #[test]
+    fn the_dialog_the_gateway_injects_is_served_from_here() {
+        // Two things a later rename would break silently: the paths the injected markup names are
+        // the paths this router answers, and both are served without the token — the page that
+        // loads them is the app's, and the app's own script shares this origin.
+        assert_eq!(
+            deepnest_gateway::dialog::SCRIPT_PATH,
+            deepnest_web::DIALOG_SCRIPT_PATH
+        );
+        assert_eq!(
+            deepnest_gateway::dialog::STYLE_PATH,
+            deepnest_web::DIALOG_STYLE_PATH
+        );
+
+        let router = router();
+        let unwrapped = router
+            .respond(&get(
+                deepnest_gateway::dialog::SCRIPT_PATH,
+                "127.0.0.1:4270",
+            ))
+            .complete();
+        assert_eq!(unwrapped.status, 200);
+        assert_eq!(unwrapped.content_type, "text/javascript; charset=utf-8");
+        let script = body(&unwrapped);
+        assert!(script.contains("deepnest-dialog"), "{script}");
+        // The dialog carries no control token: the app's script would be able to read it.
+        assert!(!script.contains("deepnest-token"), "{script}");
+
+        let styled = router
+            .respond(&get(deepnest_gateway::dialog::STYLE_PATH, "127.0.0.1:4270"))
+            .complete();
+        assert_eq!(styled.status, 200);
+        assert_eq!(styled.content_type, "text/css; charset=utf-8");
+        assert!(body(&styled).contains("#deepnest-dialog"));
     }
 
     #[test]

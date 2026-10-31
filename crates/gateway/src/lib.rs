@@ -24,13 +24,18 @@
 //! conversation, and it is why the listening loop in the binary is no longer one connection at a
 //! time.
 //!
-//! What this does **not** do yet, and what each one is:
+//! **The floating dialog is injected here, and the app's CSP moves with it** (`decided in
+//! implementation`, 2026-10-31). [`dialog`] adds the dialog to every `text/html` answer and widens
+//! the policy that would otherwise refuse its script — because a ball that a browser refuses to
+//! draw is the same as no ball, except that the page looks fine.
 //!
-//! - **No floating dialog, and so no CSP rewrite.** The dialog is injected into every
-//!   `/app/<slug>/` response so that an agent rewriting the app's page wholesale cannot delete it;
-//!   until there is a dialog to inject, rewriting the app's CSP would be loosening a policy for
-//!   nothing.
+//! What this does **not** do yet, and what it is:
+//!
+//! - **No escalation prompt inside the dialog.** The jump table is `crates/sandbox`'s and the
+//!   request arrives from the agent, which is not in the binary yet. The dialog is the place that
+//!   prompt will appear; today it tells the user which app they are looking at and gets them home.
 
+pub mod dialog;
 pub mod http;
 pub mod proxy;
 pub mod rewrite;
