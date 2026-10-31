@@ -182,6 +182,10 @@ fn a_certificate_the_seam_does_not_trust_is_refused_and_says_so() {
         "{}",
         error.body
     );
+    // The join, which the wording assertions above let through: the platform's sentence ends in a
+    // full stop and so does the one that follows it.
+    assert!(!error.body.contains(".."), "{}", error.body);
+    assert!(error.body.ends_with('.'), "{}", error.body);
 }
 
 #[test]
@@ -216,6 +220,35 @@ fn a_certificate_for_another_name_is_refused_for_that_reason() {
         "{}",
         error.body
     );
+    assert!(!error.body.contains(".."), "{}", error.body);
+    assert!(error.body.ends_with('.'), "{}", error.body);
+}
+
+#[test]
+fn a_handshake_that_fails_for_another_reason_still_ends_its_sentence() {
+    // A listener that answers in HTTP to a client expecting TLS: the record layer rejects it before
+    // any certificate is looked at, which is the third of the three messages — and the only one whose
+    // detail is the end of the sentence rather than the middle, so it is where a missing full stop
+    // would show instead of a doubled one.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        if let Ok((mut sock, _)) = listener.accept() {
+            let _ = sock.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
+            let _ = sock.flush();
+        }
+    });
+
+    let error = TlsHttp::with_connector(trusting(LOOPBACK_CERT))
+        .post(&request(&format!("https://127.0.0.1:{port}/v1")))
+        .unwrap_err();
+    assert!(
+        error.body.contains("failed before any request was sent"),
+        "{}",
+        error.body
+    );
+    assert!(error.body.ends_with('.'), "{}", error.body);
+    assert!(!error.body.contains(".."), "{}", error.body);
 }
 
 #[test]
