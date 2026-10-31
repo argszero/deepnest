@@ -165,7 +165,8 @@ impl Policy {
 
     /// Whether `path` names one of the protected files.
     ///
-    /// Identity first (`same_file`: device and inode, so a hard link or a symlink is caught),
+    /// Identity first (`same_file`: device and inode on unix, volume serial and file index on
+    /// Windows — so a hard link or a symlink is caught on both),
     /// spelling second — because a protected file that does not exist yet has no identity, and
     /// a mode that could write it once it appears is not a protected file at all.
     pub fn is_protected(&self, path: impl AsRef<Path>) -> bool {
@@ -327,10 +328,12 @@ mod tests {
         let token = scratch.home.join("deepnest.token");
         fs::write(&token, b"tok").unwrap();
         let alias = scratch.home.join("innocent-looking.conf");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&token, &alias).unwrap();
-        #[cfg(not(unix))]
-        fs::copy(&token, &alias).unwrap();
+        // A hard link: the alias that needs no privilege on any platform and is the same file by
+        // identity, which is the property under test. This test used `fs::copy` on non-unix,
+        // which produces a *different* file — so it could not have detected a spelling-based
+        // identity check, and did not: Windows compared canonical spellings until the CI matrix
+        // ran this.
+        fs::hard_link(&token, &alias).unwrap();
 
         let policy = scratch.policy(Mode::DangerFullAccess);
         assert!(!policy.is_writable(&alias), "spelling is not identity");

@@ -621,8 +621,10 @@ mod tests {
     #[test]
     fn a_path_with_a_quote_cannot_escape_the_sbpl_literal() {
         let scratch = Scratch::new("quote");
+        // Not created: a directory name containing `"` cannot exist on Windows, and the thing
+        // under test is the escape in the profile string, not the disk. `canonical_path` resolves
+        // the part that exists and keeps the rest as spelled.
         let hostile = scratch.base.join("odd\"name)/*");
-        fs::create_dir_all(&hostile).unwrap();
         let policy = Policy::from_roots(
             Mode::WorkspaceWrite,
             &hostile,

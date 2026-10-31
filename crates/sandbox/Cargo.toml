@@ -8,3 +8,4 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+same-file = "1"

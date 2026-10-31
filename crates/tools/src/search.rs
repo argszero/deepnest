@@ -9,6 +9,10 @@
 //!   friends are skipped because a grep over them answers with a dependency's code; a hidden
 //!   *file* such as `.env` is searched, because that is exactly the file a caller looks for.
 //!
+//! - **Paths are reported with `/` on every platform**, and matching happens in that form. A
+//!   glob is written with `/`, so comparing it against a `src\main.rs` spelling makes the
+//!   pattern silently match nothing on Windows — which is what it did until this was fixed.
+//!
 //! The glob syntax is a deliberate subset — `*`, `**`, `?` and `[...]` — because a partial
 //! implementation of a larger one is a tool that silently matches nothing. Anything outside the
 //! subset is matched literally, and the patterns this crate accepts are the ones its tests pin.
@@ -109,12 +113,19 @@ fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_PROBE_BYTES).any(|byte| *byte == 0)
 }
 
-/// The path as the caller should see it: relative to the base when it is under it.
+/// The path as the caller should see it: relative to the base when it is under it, and with
+/// `/` separators on every platform.
+///
+/// The separator is normalized rather than left to the platform for two reasons, and the second
+/// is a bug this fixed: globs are written with `/` — that is the syntax this tool documents —
+/// so a `src/*.rs` pattern matched nothing on Windows while the path it was compared against was
+/// spelled `src\main.rs`. And an agent that reads `src/main.rs` here gains nothing from being
+/// handed `src\main.rs` there, while Windows accepts `/` in a path anyway.
 fn display_path(path: &Path, base: &Path) -> String {
-    path.strip_prefix(base)
-        .unwrap_or(path)
+    let relative = path.strip_prefix(base).unwrap_or(path);
+    relative
         .to_string_lossy()
-        .into_owned()
+        .replace(std::path::MAIN_SEPARATOR, "/")
 }
 
 /// Translate the glob subset into a regex, whole-string anchored.
