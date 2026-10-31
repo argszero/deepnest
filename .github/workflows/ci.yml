@@ -1,0 +1,58 @@
+name: CI
+
+# Three platforms, because deepnest ships on three platforms and every backend in it is
+# platform-conditional: the sandbox has a Seatbelt, a bwrap and an ACL path, the token file's
+# mode is a unix idea, and the listener sets a socket option on unix and nothing on Windows.
+# A green run on one OS says nothing about the other two, and the first place the difference
+# would otherwise show up is a user's machine.
+#
+# The three checks are the ones this repository has been run by hand since the first crate:
+# format, clippy with warnings as errors, and the test suite. `--locked` makes CI read the
+# committed `Cargo.lock` instead of quietly resolving a newer dependency than the one tested
+# locally.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing must not cancel the other two: the whole point of the matrix is
+      # seeing all three results.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache the build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --locked

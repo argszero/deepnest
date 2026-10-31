@@ -37,6 +37,39 @@ Single-instance admission is **the bind itself** on the fixed loopback port — 
 
 A random token is written to `~/.deepnest/deepnest.token` (mode `0600`) and re-asserted on a keepalive so an external deletion self-heals (`impl, ref: emrg/server/daemon.py::serve`). Loopback is not a security boundary: the token plus `Host`/`Origin` validation is what stops CSRF and DNS rebinding.
 
+### What the binary serves today `(decided in implementation, 2026-10-31)`
+
+`crates/deepnest` is the binary, and it lands **before** `crates/apps` on purpose: five library
+crates that read well and nothing that starts leaves the first integration failure to packaging,
+which is the most expensive place to meet it. It answers three routes on the one port, and says
+by name what it does not answer:
+
+- `GET /` — the panel. Until `crates/web` exists it is a placeholder that reports what is
+  configured and states plainly that the real panel is not here yet.
+- `GET /api/health` — liveness as JSON. The one `/api/` route without the token check: it carries
+  no user data, and making the simplest probe require a `0600` read is the wrong trade.
+- `GET /app/<slug>/` → `404` naming `crates/gateway`. A bare `404` on a correctly spelled path
+  reads like a bug in the path.
+- Anything else → `404` JSON; a method other than `GET`/`HEAD` → `405` with `Allow: GET, HEAD`.
+
+Three deviations from §2, each deliberate, each to be closed by the crate that owns it:
+
+- **`SO_EXCLUSIVEADDRUSE` is not set on Windows.** The default — neither option — already
+  refuses a second bind with `WSAEADDRINUSE`, which is the admission this needs. Setting it
+  explicitly needs a raw winsock call, and that hardening belongs with the packaging work rather
+  than being claimed here.
+- **The HTTP layer is hand-written**, one request per connection: choosing the real server stack
+  is `crates/gateway`'s decision, and this crate should not make it by accident.
+- **Nothing opens the browser yet.** Opening a placeholder page on every start is worth exactly
+  as much as the panel behind it.
+
+`config.toml` is one `[llm]` table: `base_url`, `api_key`, `model`. §3 spells the second `key`;
+both spellings are accepted, because the design and EMRG's own config name the same thing
+differently and a user migrating one to the other should not learn it from a parse error. A
+missing file is **first run** and the binary starts anyway; a file that exists and does not parse
+**stops startup**, because a typo reported at the first request is a typo reported far from its
+cause.
+
 ## 3. Data layout
 
 ```
@@ -162,10 +195,14 @@ One module per cycle, each landing with its tests:
 2. `crates/sandbox` + `crates/command_scan` — three modes, three backends, one policy source.
 3. `crates/tools` — the eight tools, all going through the fence.
 4. `crates/agent` — the loop, persistence, memory.
-5. `crates/apps` — template, build, lifecycle, logs.
-6. `crates/gateway` + `crates/web` — the single door, the panel, the dialog.
-7. `crates/skills` — loader, catalog, installer.
-8. `crates/packaging` — payload, first-run unpack, signing.
+5. `crates/deepnest` — the binary, plus the three-platform CI matrix. It comes **before** the app
+   lifecycle so that "does this even start, on all three platforms?" is answered while the answer
+   is still cheap. From here on every module either lands wired into the binary or says in its PR
+   why it does not.
+6. `crates/apps` — template, build, lifecycle, logs.
+7. `crates/gateway` + `crates/web` — the single door, the panel, the dialog.
+8. `crates/skills` — loader, catalog, installer.
+9. `crates/packaging` — payload, first-run unpack, signing.
 
 ## 7. Non-negotiables
 
