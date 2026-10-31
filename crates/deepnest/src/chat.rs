@@ -27,17 +27,20 @@
 //!   `POST /api/apps/<slug>/build` followed by `restart` — two routes that already exist. A build
 //!   inside this request would hold one HTTP connection for a minute of `bun install`, which is a
 //!   longer request than any browser waits for.
-//! - **An escalation request is not offered as an approval.** The sandbox refuses, and the refusal
-//!   comes back as a tool result the model reads; the modal that would grant it is the next piece
-//!   of this, and it needs a person in front of the page.
+//! - **An escalation request waits for the page that asked the question.** A call may carry
+//!   `request_mode` and `justification`; `crates/agent` puts that in front of whoever is attached as
+//!   its [`Approver`], and this module hands it [`crate::escalation::Requests::approver`]. So the
+//!   turn blocks for as long as a person takes to answer — up to
+//!   [`crate::escalation::ANSWER_TIMEOUT`] — and the widened policy belongs to that one call. The
+//!   session's own mode is the one the prompt states, before and after, whatever was approved.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use deepnest_agent::{
-    prompt::system_prompt, Agent, AgentError, AgentPaths, Cancellation, MemoryStore, Model,
-    PromptContext, Session, TurnOutcome,
+    prompt::system_prompt, Agent, AgentError, AgentPaths, Approver, Cancellation, MemoryStore,
+    Model, PromptContext, Session, TurnOutcome,
 };
 use deepnest_apps::{manifest, Slug};
 use deepnest_llm::ToolDefinition;
@@ -98,12 +101,17 @@ pub fn message_from(body: &[u8]) -> Result<String, String> {
 /// it in the prompt and in the policy. The app is checked for a manifest first: an agent pointed at
 /// a directory that is not an app would edit whatever is there, and "no such app" is a better
 /// answer than a turn spent on the wrong directory.
+///
+/// `approver` is who a call's widening request is put in front of. `None` is a real answer and not a
+/// degraded one: an agent with nobody to ask refuses to widen and says so, which is what a test and
+/// any caller without a page behind it should get.
 pub fn answer(
     model: Arc<dyn Model>,
     home: &Path,
     app_dir: &Path,
     slug: &Slug,
     message: &str,
+    approver: Option<Arc<dyn Approver>>,
 ) -> Reply {
     if let Err(error) = manifest::load(app_dir) {
         return Reply::error(
@@ -130,8 +138,9 @@ pub fn answer(
     };
 
     // `workspace-write` and not a mode from a config file yet: there is one mode an app's agent may
-    // run in, and it is the one that keeps the writes inside this app. Widening it is a decision
-    // with a prompt attached, and there is no prompt yet (`this module's header`).
+    // run in, and it is the one that keeps the writes inside this app. This value is the *session*
+    // default, and the only thing that ever widens is a per-call grant built from it — never a
+    // write back to it.
     let policy = Policy::for_app(Mode::WorkspaceWrite, home, slug.as_str(), None);
     let writable: Vec<String> = writable_roots(&policy)
         .iter()
@@ -179,13 +188,16 @@ pub fn answer(
         })
         .collect();
 
-    let agent = Agent::new(
+    let mut agent = Agent::new(
         model,
         tools,
         ToolContext::new(policy, app_dir),
         session,
         system,
     );
+    if let Some(approver) = approver {
+        agent = agent.with_approver(approver);
+    }
 
     let outcome = match agent.run_turn(message, &Cancellation::new()) {
         Ok(outcome) => outcome,
@@ -353,6 +365,7 @@ mod tests {
             &scratch.app_dir(),
             &scratch.slug(),
             "what is on the list?",
+            None,
         );
         assert_eq!(reply.status, 200, "{}", reply.body);
         assert_eq!(reply.body["text"], "Bread, milk.");
@@ -401,6 +414,7 @@ mod tests {
             &scratch.app_dir(),
             &scratch.slug(),
             "write the list",
+            None,
         );
         assert_eq!(reply.status, 200, "{}", reply.body);
         assert_eq!(reply.body["changed"], true, "{}", reply.body);
@@ -424,6 +438,7 @@ mod tests {
             &stray,
             &Scratch::slug_of("stray"),
             "hello",
+            None,
         );
         assert_eq!(reply.status, 404, "{}", reply.body);
         assert!(
@@ -446,6 +461,7 @@ mod tests {
             &scratch.app_dir(),
             &scratch.slug(),
             "something the provider will not answer",
+            None,
         );
         // The loop reads a refusal as an answer about the content and stops, and the route reports
         // it as the user's request to change — not as this server failing.
@@ -477,6 +493,7 @@ mod tests {
             &scratch.app_dir(),
             &scratch.slug(),
             "hello",
+            None,
         );
 
         let seen = model.seen.lock().unwrap();

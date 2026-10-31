@@ -43,7 +43,7 @@ pub use backend::{
     available_backend, AclEntry, AclPlan, Confinement, Invocation, Platform, SandboxBackend,
     SandboxError,
 };
-pub use escalation::{EscalationRefusal, Grant, RankedMode};
+pub use escalation::{EscalationRefusal, EscalationRequest, Grant, RankedMode};
 pub use mode::Mode;
 pub use policy::{Policy, PolicyError};
 pub use roots::{canonical_path, same_file, RootKind, WritableRoot};

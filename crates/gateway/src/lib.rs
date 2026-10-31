@@ -31,9 +31,11 @@
 //!
 //! What this does **not** do yet, and what it is:
 //!
-//! - **No escalation prompt inside the dialog.** The jump table is `crates/sandbox`'s and the
-//!   request arrives from the agent, which is not in the binary yet. The dialog is the place that
-//!   prompt will appear; today it tells the user which app they are looking at and gets them home.
+//! **The escalation prompt is in the dialog, and this crate is only the carrier.** The jump table
+//! is `crates/sandbox`'s, the question is `crates/agent`'s, and the wait is the binary's; what the
+//! gateway does is inject the page the prompt appears on and widen the app's policy far enough for
+//! its script to load. So the prompt inherits the same rule as the ball: an app that rewrites its
+//! own page cannot remove it, and an app whose policy says `script-src 'none'` still gets it.
 
 pub mod dialog;
 pub mod http;

@@ -26,6 +26,7 @@
 //! loop is testable with no network and no HTTP adapter — the adapter itself belongs to
 //! `crates/gateway`.
 
+pub mod approve;
 pub mod memory;
 pub mod prompt;
 pub mod runner;
@@ -34,6 +35,7 @@ pub mod turn;
 
 use std::path::{Path, PathBuf};
 
+pub use approve::{Answer, Approver};
 pub use memory::{MemoryEntry, MemoryStore};
 pub use prompt::PromptContext;
 pub use runner::LoopRunner;

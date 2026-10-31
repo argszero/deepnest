@@ -9,10 +9,12 @@
 // 1. **It never holds the control token.** The app's own script shares this origin, so a token
 //    written into this page is a token the app can read and spend — and the control token spends
 //    on every route there is.
-// 2. **It calls exactly one route**, `POST /api/apps/<slug>/chat`, and it brings no credential of
-//    its own: the browser attaches a cookie the server minted when it served this page, scoped to
-//    that one path. So the box works on a page whose app is stopped or mid-rewrite, and a page that
-//    cannot present that cookie gets a `401` and says so instead of failing silently.
+// 2. **It calls two routes and brings no credential of its own**: `POST /api/apps/<slug>/chat`, and
+//    `GET`/`POST /api/apps/<slug>/escalation` — the second is how a widening request reaches the
+//    person in front of the page. For each, the browser attaches a cookie the server minted when it
+//    served this page, scoped to that one path, and the two are different values. So the box works
+//    on a page whose app is stopped or mid-rewrite, and a page that cannot present that cookie gets
+//    a `401` and says so instead of failing silently.
 //
 // The residual, stated where it is made rather than left implied: the app's own script can make
 // that same request, so an app can spend its own agent turns. It cannot spend another app's, reach
@@ -88,6 +90,34 @@
   answer.setAttribute("role", "status");
   answer.setAttribute("aria-live", "polite");
 
+  // The widening request. It appears only while a turn is waiting for one, which is why it is a
+  // block that starts hidden rather than something the user opens: there is nothing to open when
+  // nobody is asking, and a permanent button that says "approve" would be a button with no object.
+  var asked = document.createElement("div");
+  asked.id = "deepnest-dialog-asked";
+  asked.hidden = true;
+
+  var askedWhat = document.createElement("p");
+  askedWhat.id = "deepnest-dialog-asked-what";
+
+  var askedWhy = document.createElement("p");
+  askedWhy.id = "deepnest-dialog-asked-why";
+
+  var allow = document.createElement("button");
+  allow.type = "button";
+  allow.id = "deepnest-dialog-allow";
+  allow.textContent = "Allow for this call";
+
+  var refuse = document.createElement("button");
+  refuse.type = "button";
+  refuse.id = "deepnest-dialog-refuse";
+  refuse.textContent = "No";
+
+  asked.appendChild(askedWhat);
+  asked.appendChild(askedWhy);
+  asked.appendChild(allow);
+  asked.appendChild(refuse);
+
   form.appendChild(input);
   form.appendChild(send);
 
@@ -99,6 +129,7 @@
   panel.appendChild(title);
   panel.appendChild(note);
   panel.appendChild(form);
+  panel.appendChild(asked);
   panel.appendChild(answer);
   panel.appendChild(link);
   root.appendChild(panel);
@@ -123,6 +154,83 @@
     } else {
       answer.classList.remove("bad");
     }
+  }
+
+  // The question route: one path, one cookie, and nothing about it needs the control token.
+  function askingRoute() {
+    return "/api/apps/" + encodeURIComponent(slug) + "/escalation";
+  }
+
+  // Polling rather than a stream: a turn holds its own connection open while it waits, the answer
+  // is one bit, and a poll every second costs this server nothing — where a second streaming
+  // adapter would be another thing to get wrong on a page the app may have rewritten.
+  var polling = null;
+
+  function stopPolling() {
+    if (polling !== null) {
+      clearInterval(polling);
+      polling = null;
+    }
+    asked.hidden = true;
+  }
+
+  function pollForAQuestion() {
+    fetch(askingRoute(), { credentials: "same-origin" })
+      .then(function (response) {
+        // A `401` here is the same reading as on the box: the cookie is gone. It is not worth a
+        // line under the answer — the box will say it when the turn ends — so the question simply
+        // does not appear.
+        return response.ok ? response.json() : null;
+      })
+      .then(function (body) {
+        var pending = body && body.pending;
+        if (!pending) {
+          asked.hidden = true;
+          return;
+        }
+        // Both halves in the user's terms: what is being asked for, and why. `textContent`
+        // throughout — the justification is the model's words.
+        askedWhat.textContent =
+          "This needs " + pending.to + " instead of " + pending.from + ", for one call.";
+        askedWhy.textContent = pending.justification;
+        asked.hidden = false;
+      })
+      .catch(function () {
+        // A poll that failed is a poll that failed. The turn's own request is what reports a
+        // server that has gone away.
+      });
+  }
+
+  function startPolling() {
+    if (polling !== null) {
+      return;
+    }
+    pollForAQuestion();
+    polling = setInterval(pollForAQuestion, 700);
+  }
+
+  function answerTheQuestion(approved) {
+    allow.disabled = true;
+    refuse.disabled = true;
+    fetch(askingRoute(), {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approve: approved })
+    })
+      .then(function () {
+        // Whether it landed or not, the question is no longer this box's to show: the turn either
+        // woke with the answer or stopped waiting, and the next poll would be about a request that
+        // is already gone.
+        asked.hidden = true;
+      })
+      .catch(function () {
+        asked.hidden = true;
+      })
+      .then(function () {
+        allow.disabled = false;
+        refuse.disabled = false;
+      });
   }
 
   function ask(text) {
@@ -151,6 +259,9 @@
 
     send.disabled = true;
     say("Asking…", false);
+    // The turn may stop and ask a question before it answers, so the poll starts with the
+    // question already possible rather than after the first answer.
+    startPolling();
 
     ask(text)
       .then(function (response) {
@@ -167,6 +278,7 @@
       })
       .then(function (result) {
         send.disabled = false;
+        stopPolling();
         if (result.status === 200 && result.body && typeof result.body.text === "string") {
           var text = result.body.text;
           if (result.body.changed) {
@@ -190,8 +302,17 @@
       })
       .catch(function () {
         send.disabled = false;
+        stopPolling();
         say("The request did not reach deepnest. Is it still running?", true);
       });
+  });
+
+  allow.addEventListener("click", function () {
+    answerTheQuestion(true);
+  });
+
+  refuse.addEventListener("click", function () {
+    answerTheQuestion(false);
   });
 
   ball.addEventListener("click", function () {
