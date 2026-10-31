@@ -3,10 +3,11 @@
 //! A skill is a Markdown file with a header, holding instructions the agent can choose to follow.
 //! This crate is the half that reads them and the half that knows which ones exist: [`loader`] finds
 //! the files and [`frontmatter`] reads their headers, [`catalog`] holds the list of optional skills
-//! that ship inside the binary, [`installer`] puts one of them in place, and [`state`] records which
-//! installed skills deepnest may refresh. What is still not written is the update check — comparing
-//! an installed version against the package's releases, which needs an HTTP client this crate does
-//! not have; [`installer`] says why that half can wait.
+//! that ship inside the binary, [`installer`] puts one of them in place, [`state`] records which
+//! installed skills deepnest may refresh, and [`release`] compares an installed version against the
+//! version the package last published. The check's request is a seam and the socket behind it is
+//! still missing — this workspace has no TLS client — so what lands today is the decision and every
+//! way of reading an answer; [`release`] says exactly where that line is.
 //!
 //! The rule the whole crate is shaped by is **progressive disclosure**: only a skill's name, its
 //! one-line description and the path to its file reach the prompt. The instructions are read by the
@@ -38,6 +39,7 @@ pub mod catalog;
 pub mod frontmatter;
 pub mod installer;
 pub mod loader;
+pub mod release;
 pub mod state;
 
 pub use catalog::{Catalog, Entry, Rejected, BUNDLED, CATALOG_FILE};
@@ -50,4 +52,5 @@ pub use loader::{
     app_root, load, summary, user_root, Loaded, Skill, Skipped, Source, APP_DIR, SKILL_FILE,
     USER_DIR,
 };
+pub use release::{check, Releases, Verdict, Version, Why, GITHUB_RELEASE};
 pub use state::{Installed, State, STATE_FILE};

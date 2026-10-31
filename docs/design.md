@@ -249,7 +249,46 @@ The catalog that ships inside the binary is itself an ordinary skill file carryi
 
 **The bundled catalog is a floor, not a source of truth.** `catalog::ensure` writes it only when the file is absent, which covers a fresh install and an upgrade whose file was deleted, and never overwrites a catalog the user curated.
 
-**Still to come: the release check.** Comparing an installed version against a package's releases is a `GET` of a release list, and the seam that now exists for model calls is a `POST` returning an `LlmError` — reusing it would put a skills concern inside the model client's vocabulary. This crate opens its own one-request seam when the check lands, beside the agent that would act on an update.
+**The release check has landed, with its request still a seam** (`decided in implementation`,
+2026-10-31). `crates/skills::release` answers "is there a newer release than the one on disk?" — one
+request, one comparison — and `Releases` is the seam the request goes through. It returns the
+answer's *body*, not a parsed release, for the same reason `Publisher` returns a program's stdout:
+every way a body can be wrong is decided in code a test drives with a string. The socket is what is
+missing, and it is missing for a reason already recorded above: GitHub answers over TLS and this
+workspace has no TLS client. `release_url` states the endpoint as part of the contract, so the
+transport that lands later has no shape left to invent. Five decisions:
+
+- **`GET` was not borrowed from the model client, and does not need to be.** The seam is this
+  crate's own, returns `io::Result<String>` and takes an `owner/name` — a skills question in a
+  skills vocabulary, as promised when the model client's `POST` seam was deliberately not reused.
+- **Four answers, because "no" and "I could not tell" are not the same answer.** `UpToDate` (nothing
+  to do), `Newer` (refresh and record what you adopted), `Unknown` (the newest release is known and
+  what is installed is not — a refresh adopts it and becomes comparable), `CannotTell` (with a `Why`
+  naming the missing piece). Collapsing the fourth into the first is how an update check silently
+  stops offering updates; it is the branch that keeps a broken check from reading as a healthy one.
+- **A version is dotted numbers behind an optional `v`, and three shapes are refused rather than
+  guessed.** Date tags (`2026-10-31`) compared as numbers read as `2026 > 1`, so a repository tagging
+  by date would offer an update on every check for ever; pre-releases need a rule set of their own
+  and guessing wrong updates somebody to a beta they never asked for; and a recorded version the same
+  rules reject is a file somebody edited. All three yield no update, which is the safe direction —
+  installing by hand still works, and `CannotTell` says so.
+- **Comparison is numeric per component, padding the shorter side with zeros.** `0.9` is older than
+  `0.10` — a string comparison says the opposite, and that bug only appears at the tenth release.
+  `1.0` equals `1.0.0`. A release *older* than what is installed is not an update: the state file can
+  be ahead of the latest release when somebody installed from a branch, and stepping back is a
+  downgrade nobody asked for.
+- **A skill the user brought is refused before the network is asked.** `managed` is the gate in
+  `state`, and here it is checked first, because there is nothing to ask about a file no update may
+  touch. The check takes `Option<&Installed>` and tolerates `None`, so a caller cannot reach an
+  unmanaged file by passing a different shape of argument.
+
+**Why installing still records no version, and where one comes from.** `<program> skill` says
+nothing about which version it is publishing, so `installer` records provenance and leaves `version`
+absent rather than inventing a number the whole comparison depends on. A version arrives the only
+way one can be known: the release check reads what the package published, and `Newer` and `Unknown`
+are the two verdicts `adoptable()` returns — what a refresh adopts and then records through
+`record_update`. That is also the path by which every skill installed before this slice becomes
+comparable on its first refresh.
 
 **What has landed since: the install itself** (`decided in implementation`, 2026-10-31). `installer` drives the one side effect the catalog describes — for `install: self-publishing`, it runs the package and takes the skill file it prints — and records the result. Five decisions came with it:
 
@@ -257,7 +296,7 @@ The catalog that ships inside the binary is itself an ordinary skill file carryi
 - **A file deepnest did not write is never overwritten, and both halves of provenance are consulted.** The state file says whether deepnest put this file there and the disk says whether anything is there at all; either alone is a way to lose somebody's work, because a state file can be missing and a file can be deleted. A name the state file records as the user's is refused even with an empty path, and a file the state file does not account for is refused as unknown provenance — the same reading a missing `managed` field gets. The reference writes `dest/<name>.md` over whatever is there.
 - **The published header must declare the name the catalog asked for.** The reference writes the file under the *published* name and records state under the *catalog* name, so the update loop then looks up a skill that is not there under that name. Here a disagreement is a refusal naming both.
 - **Nothing is recorded that is not on disk.** The file is written first and the state second, so an interrupted install leaves an unrecorded file — which the next install refuses to overwrite, the safe direction — rather than a managed entry pointing at nothing. `install` updates the state and the caller writes it, which keeps this crate's file-writing in one place.
-- **No version is invented.** The reference records `version: "unknown"` when its release check fails; the state model already has the better answer for "the source did not say", which is an absent field, and a refresh keeps whatever version was there rather than clearing it.
+- **No version is invented.** The reference records `version: "unknown"` when its release check fails; the state model already has the better answer for "the source did not say", which is an absent field, and a refresh keeps whatever version was there rather than clearing it. A real version comes from `release`'s check, which is the only place one can be learned.
 
 The `Publisher` is a trait for the same reason `Runner`, `Spawner`, `Probe` and `Prober` are: every refusal worth testing happens *after* a program has run, and a test that ran a real one would measure whatever that program does on the machine running the suite. The real one waits as long as the package takes — a limit worth naming, and one whose fix goes behind this seam rather than into the logic.
 
@@ -480,8 +519,9 @@ One module per cycle, each landing with its tests:
    is now in the binary.
 8. `crates/skills` — loader, catalog, installer. **In progress**: the loader (two roots, two
    layouts, shadowing, skip reporting, the prompt summary), the bundled catalog, the `.state.json`
-   that says which skills may be refreshed, and the install path for a self-publishing package have
-   landed; the release check that would notice a newer version — an HTTP client — remains.
+   that says which skills may be refreshed, the install path for a self-publishing package, and the
+   release check with its own one-request seam have landed; what remains is the socket under that
+   seam, since GitHub answers over TLS and this workspace has no TLS client.
 9. `crates/packaging` — payload, first-run unpack, signing. **In progress**: the toolchain
    directory contract has landed (where a payload unpacks, the marker that makes a directory whole,
    and the sweep that removes what an interrupted unpack left behind), and so has the C toolchain
