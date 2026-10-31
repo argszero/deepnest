@@ -126,6 +126,29 @@ fn the_panel_and_the_health_route_answer_over_a_real_socket() {
 }
 
 #[test]
+fn the_dialog_assets_answer_over_a_real_socket_without_the_token() {
+    // The app page that loads them cannot carry the control token — its app's own script shares
+    // the origin — so these two routes answer without one, like `/panel.js`.
+    let scratch = Scratch::new("dialog");
+    let (running, _token) = start(&scratch, Some("deepseek-flash"));
+    let addr = running.addr();
+
+    let script = get(addr, "/dialog.js", "");
+    assert!(script.starts_with("HTTP/1.1 200 OK"), "{script}");
+    assert!(script.contains("Content-Type: text/javascript"), "{script}");
+    assert!(script.contains("deepnest-dialog"), "{script}");
+    // Nothing about the control token reaches a page the app's script can read.
+    assert!(!script.contains("deepnest-token"), "{script}");
+
+    let style = get(addr, "/dialog.css", "");
+    assert!(style.starts_with("HTTP/1.1 200 OK"), "{style}");
+    assert!(style.contains("Content-Type: text/css"), "{style}");
+    assert!(style.contains("#deepnest-dialog"), "{style}");
+
+    running.shutdown();
+}
+
+#[test]
 fn the_token_gate_is_enforced_end_to_end() {
     // The unit tests call the router directly; this one goes through the socket, the header parse
     // and the write path, because that is where an auth check stops being a check.

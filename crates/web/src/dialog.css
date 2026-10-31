@@ -1,0 +1,101 @@
+/* The floating dialog's stylesheet.
+ *
+ * The one rule that matters: every selector here starts with `all: initial`, so the app's own CSS
+ * — a reset with `* { margin: 0 }`, a `button { background: transparent }`, whatever a stylesheet
+ * written for a different page does — cannot restyle or hide the ball. The app owns its page; this
+ * element is the one thing on it that deepnest owns.
+ *
+ * It is a separate file rather than inline styles because the app's Content-Security-Policy may
+ * say `style-src 'none'`, and the gateway widens that to `'self'` — a policy that allows this file
+ * and not a page full of `style` attributes.
+ */
+
+#deepnest-dialog,
+#deepnest-dialog * {
+  all: initial;
+}
+
+#deepnest-dialog {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 2147483647;
+  display: block;
+  box-sizing: border-box;
+  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #f4f4f6;
+  text-align: left;
+  direction: ltr;
+}
+
+#deepnest-dialog-ball {
+  display: grid;
+  box-sizing: border-box;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 50%;
+  background: #1e1e23;
+  color: #f4f4f6;
+  font: 700 15px/1 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  cursor: pointer;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+}
+
+#deepnest-dialog-ball:hover {
+  background: #2b2b32;
+}
+
+#deepnest-dialog-ball:focus-visible,
+#deepnest-dialog-link:focus-visible {
+  outline: 2px solid #7aa7ff;
+  outline-offset: 2px;
+}
+
+#deepnest-dialog-panel {
+  display: block;
+  box-sizing: border-box;
+  position: absolute;
+  right: 0;
+  bottom: 2.9rem;
+  width: 15rem;
+  padding: 0.85rem 0.95rem;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
+  background: #1e1e23;
+  color: #f4f4f6;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+
+#deepnest-dialog-panel[hidden] {
+  display: none;
+}
+
+#deepnest-dialog-title {
+  display: block;
+  margin: 0 0 0.3rem;
+  font: 600 14px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #ffffff;
+  overflow-wrap: anywhere;
+}
+
+#deepnest-dialog-note {
+  display: block;
+  margin: 0 0 0.6rem;
+  font: 12px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: rgba(244, 244, 246, 0.68);
+}
+
+#deepnest-dialog-link {
+  display: inline-block;
+  font: 600 13px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #9dbbff;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+#deepnest-dialog-link:hover {
+  color: #c2d4ff;
+}

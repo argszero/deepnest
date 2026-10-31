@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use crate::dialog;
 use crate::http::{Method, Request, Response};
 use crate::rewrite::{self, is_hop_by_hop};
 
@@ -591,11 +592,28 @@ fn adapt(target: &Target, head: &Head, answer_body: Vec<u8>) -> Response {
         .unwrap_or("application/octet-stream")
         .to_string();
 
+    // Only a page can carry a dialog, and only a dialog that went in is worth loosening a policy
+    // for: `injected` is the whole reason the CSP rewrite below is conditional.
     let mut body = answer_body;
+    let mut injected = false;
     if content_type.to_ascii_lowercase().starts_with("text/html") {
         if let Ok(page) = std::str::from_utf8(&body) {
-            if let Some(rewritten) = rewrite::inject_base(&prefix, page) {
-                body = rewritten.into_bytes();
+            // Two rewrites of the same text, and the second sees the first one's output: the base
+            // has to be ahead of every URL, and the dialog after everything the app rendered.
+            let based = rewrite::inject_base(&prefix, page);
+            let candidate = based.as_deref().unwrap_or(page);
+            match dialog::inject(&target.slug, candidate) {
+                Some(rewritten) => {
+                    body = rewritten.into_bytes();
+                    injected = true;
+                }
+                // The page already carries a dialog: keep the base if there was one, and loosen
+                // nothing.
+                None => {
+                    if let Some(rewritten) = based {
+                        body = rewritten.into_bytes();
+                    }
+                }
             }
         }
     }
@@ -609,6 +627,15 @@ fn adapt(target: &Target, head: &Head, answer_body: Vec<u8>) -> Response {
             response = response.header(name.clone(), rewrite::location(&prefix, value));
         } else if name.eq_ignore_ascii_case("set-cookie") {
             response = response.header(name.clone(), rewrite::set_cookie(&prefix, value));
+        } else if name.eq_ignore_ascii_case("content-security-policy") {
+            // Only for the page the dialog reached, and only ever widened: an app that said
+            // nothing about scripts keeps saying nothing, because an absent policy restricts
+            // nothing and inventing one would.
+            if injected {
+                response = response.header(name.clone(), dialog::policy(value));
+            } else {
+                response = response.header(name.clone(), value.clone());
+            }
         } else {
             response = response.header(name.clone(), value.clone());
         }
@@ -696,6 +723,15 @@ mod tests {
             seen
         });
         (addr, handle)
+    }
+
+    /// One response header, by case-insensitive name.
+    fn header(response: &Response, name: &str) -> Option<String> {
+        response
+            .headers
+            .iter()
+            .find(|(field, _)| field.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.clone())
     }
 
     fn forward_to(addr: SocketAddr, request: &Request) -> Result<Answer, ForwardError> {
@@ -808,6 +844,83 @@ mod tests {
         let (addr, _handle) = serving(answer);
         let response = forward_to(addr, &get("/app/notes/")).unwrap().complete();
         assert_eq!(response.body, b"hello world");
+    }
+
+    #[test]
+    fn an_html_page_carries_the_dialog_and_a_policy_that_allows_it() {
+        // The pair the design asks for: the ball goes in every page an app answers, and the app's
+        // own policy is widened by exactly what the ball needs to load.
+        let answer = b"HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\n\
+                       content-security-policy: default-src 'none'\r\n\r\n\
+                       <html><body><p>hi</p></body></html>";
+        let (addr, _handle) = serving(answer);
+        let response = forward_to(addr, &get("/app/notes/")).unwrap().complete();
+        let body = String::from_utf8(response.body.clone()).unwrap();
+
+        assert!(
+            body.contains(r#"<meta name="deepnest-app" content="notes">"#),
+            "{body}"
+        );
+        assert!(
+            body.contains(r#"<script src="/dialog.js" defer></script>"#),
+            "{body}"
+        );
+        assert!(
+            body.contains(r#"<link rel="stylesheet" href="/dialog.css">"#),
+            "{body}"
+        );
+        // And the base is still there, ahead of it.
+        assert!(body.contains("<base href=\"/app/notes/\">"), "{body}");
+
+        assert_eq!(
+            header(&response, "content-security-policy").as_deref(),
+            Some("default-src 'none'; script-src 'self'; style-src 'self'")
+        );
+    }
+
+    #[test]
+    fn a_non_page_carries_neither_the_dialog_nor_a_widened_policy() {
+        // A JSON answer cannot hold a dialog, so its policy must not move either: loosening one
+        // for a dialog the page does not carry is loosening it for nothing.
+        let answer = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                       content-security-policy: script-src 'none'\r\n\r\n{\"items\":[]}";
+        let (addr, _handle) = serving(answer);
+        let response = forward_to(addr, &get("/app/notes/api/items"))
+            .unwrap()
+            .complete();
+        assert_eq!(response.body, b"{\"items\":[]}");
+        assert_eq!(
+            header(&response, "content-security-policy").as_deref(),
+            Some("script-src 'none'")
+        );
+    }
+
+    #[test]
+    fn an_app_that_set_no_policy_is_not_given_one() {
+        // An absent policy restricts nothing, so inventing one would only take things away.
+        let answer =
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\n\r\n<html><body></body></html>";
+        let (addr, _handle) = serving(answer);
+        let response = forward_to(addr, &get("/app/notes/")).unwrap().complete();
+        assert_eq!(header(&response, "content-security-policy"), None);
+        // The dialog is still injected: the two decisions are separate.
+        assert!(String::from_utf8_lossy(&response.body).contains("/dialog.js"));
+    }
+
+    #[test]
+    fn a_page_that_already_carries_the_dialog_keeps_its_policy() {
+        // The second hop's case: nothing was injected, so nothing is loosened.
+        let answer = b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\n\
+                       content-security-policy: script-src 'none'\r\n\r\n\
+                       <html><body><meta name=\"deepnest-app\" content=\"notes\"></body></html>";
+        let (addr, _handle) = serving(answer);
+        let response = forward_to(addr, &get("/app/notes/")).unwrap().complete();
+        assert_eq!(
+            header(&response, "content-security-policy").as_deref(),
+            Some("script-src 'none'")
+        );
+        let body = String::from_utf8(response.body.clone()).unwrap();
+        assert_eq!(body.matches("deepnest-app").count(), 1, "{body}");
     }
 
     #[test]

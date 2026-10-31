@@ -254,9 +254,17 @@ The router described in §2. Its hardest requirement is not routing but **not ly
 
 **What that forced on the server loop.** One connection at a time was the right size for a panel that answered one request and closed; it is the wrong size for a socket that stays open, because the accept loop — and the token keepalive with it — would sit behind the first tab that opened one. Each connection now runs on its own thread, bounded at 64 (a connection past the bound is refused by name, not queued), and `shutdown` closes the sockets instead of waiting for a stream that never ends. The end-to-end check for this is a browser-shaped one: an idle connection that has sent nothing must not delay the next request, and a `GET /app/notes/ws` that has upgraded must not stop `GET /api/health` from answering.
 
+**The floating dialog is injected at the last hop, and the policy moves with it** (`decided in implementation`, 2026-10-31). `crates/gateway::dialog` adds the dialog to every `text/html` answer an app gives, and widens the app's `Content-Security-Policy` by exactly what the dialog needs to load. Four decisions:
+
+- **The dialog belongs to deepnest, so it is injected where the agent cannot reach it.** An agent rewrites the app's page whenever the user asks for something, so anything it wrote into the page it can also delete. Injecting at the forward means the ball survives every rewrite — and the ball is the only way back to the control panel from a page the user is looking at.
+- **A page with no policy is not given one.** An absent `Content-Security-Policy` restricts nothing, so writing one would only take things away. The rewrite is for apps that set a policy, which are the apps that are doing it right.
+- **A directive that has to be invented carries what `default-src` already allowed.** `default-src 'unsafe-inline'` with no `script-src` permits inline script; answering it with `script-src 'self'` would narrow the app's policy while claiming to widen it. And `'none'` is replaced rather than joined: it is only legal alone, and a policy listing it with others is one browsers resolve by ignoring it.
+- **Only a page that actually took the dialog has its policy moved.** A `text/html` answer whose body already carries one — an app that ships its own, or a second hop — keeps the policy it sent. Loosening a policy for a dialog the page does not carry is loosening it for nothing.
+
+The dialog's own assets are `crates/web`'s, served at `/dialog.js` and `/dialog.css`, and **it carries no control token**: the app's own script shares this origin, so a token written into an app's page is a token the app could read and spend. That is also why the dialog fetches nothing — everything it shows is either in the markup the gateway wrote or is the panel the browser loads itself.
+
 What is **not** in this slice, each named because each is a different piece of work:
 
-- **No floating dialog injection, and so no CSP rewrite.** The dialog is injected into every `/app/<slug>/` response precisely so that an agent rewriting the app's page wholesale cannot delete it; rewriting the app's CSP before there is a dialog to inject would loosen a policy for nothing.
 - **No `POST` to an app.** A body cannot be forwarded by a layer that never reads one, and forwarding the request without it would report success for content the app never saw.
 - **The shutdown sequence that runs the apps down** is still not written. The accept loop it belongs with now exists; the call that stops every app on the way out does not, and a killed deepnest still leaves its apps running.
 - **A stream that ends while the browser lingers holds its thread** until the browser closes its socket. The bound is `MAX_CONNECTIONS`; the alternative — a timeout on an idle WebSocket — would break the one connection type this slice exists for.
@@ -270,10 +278,16 @@ that are not apps and why, app creation, the five verbs per app, and an `Open` l
 `/app/<slug>/`. One HTML page, one stylesheet, one script: no CSS framework, no icon set, no
 bundler, because a panel that needs a build step is a panel nobody reads in the repository.
 
-**Still to come**: the app page with the floating dialog, and escalation approvals — modal here,
-one hop at a time, the approval itself the audit record (`host 20:20`). Both wait on the gateway
-injecting the dialog into every `/app/<slug>/` response, so an agent rewriting the app's own page
-cannot delete it, and on an agent being in the binary at all.
+The app page's floating dialog is this crate's bytes: `dialog.js` draws the ball and `dialog.css`
+isolates it from whatever stylesheet the app ships (`all: initial` on every selector, so a reset
+written for a different page cannot hide it). The split with `crates/gateway` is deliberate — the
+gateway decides *where* the dialog goes and what policy it needs, which is rewriting, while the ball
+is a page a person clicks in, which is this crate's.
+
+**Still to come**: escalation approvals inside that dialog — modal here, one hop at a time, the
+approval itself the audit record (`host 20:20`). It waits on an agent being in the binary at all:
+until a tool call can ask for a wider tier, there is nothing to approve, and the dialog says what it
+can rather than offering a button that does nothing.
 
 ### `crates/packaging` — the single file
 
@@ -320,9 +334,10 @@ One module per cycle, each landing with its tests:
    allocation, start/stop/restart), and the template and the build (`POST /api/apps/<slug>/create`
    and `/build`). All three are wired into the binary, so this is not a module that sits unread.
 7. `crates/gateway` + `crates/web` — the single door, the panel, the dialog. **In progress**: the
-   gateway's forward, the HTTP layer under it, the WebSocket upgrade, unbuffered streaming and the
-   panel are in, and the binary serves connections concurrently; the dialog injection and the
-   escalation UI remain.
+   gateway's forward, the HTTP layer under it, the WebSocket upgrade, unbuffered streaming, the panel
+   and the dialog injection with its CSP rewrite are in, and the binary serves connections
+   concurrently; the escalation prompt inside the dialog remains, and it needs the agent in the
+   binary first.
 8. `crates/skills` — loader, catalog, installer.
 9. `crates/packaging` — payload, first-run unpack, signing.
 

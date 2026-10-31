@@ -37,15 +37,40 @@
 //! how many apps are on disk. A reader with script off gets a page that is true and slightly stale
 //! rather than a blank one, and a script that fails to load leaves something readable behind.
 //!
+//! ## The app page's dialog
+//!
+//! This crate also owns the bytes of the floating dialog that `crates/gateway` injects into every
+//! page an app answers ([`DIALOG_SCRIPT`], [`DIALOG_STYLE`]). The split is deliberate: the gateway
+//! decides *where* the dialog goes and what policy it needs — that is rewriting, and it is the
+//! gateway's job — while the ball itself is a page a person clicks in, which is this crate's.
+//!
+//! The dialog carries no token and fetches nothing. The app's own script shares this origin, so a
+//! token written into an app's page would be a token the app could read and spend; the panel's own
+//! token is safe in the panel because the panel is deepnest's page and the app's is not.
+//!
 //! ## What is not here yet
 //!
-//! The floating dialog and escalation approvals are `crates/gateway`'s and the agent's work: the
-//! dialog has to be injected into every `/app/<slug>/` response so an agent rewriting the app's page
-//! cannot delete it, and there is no agent in the binary to escalate to yet. The panel links to an
-//! app's page and does not pretend to be a conversation with it.
+//! Escalation approvals — modal here, one hop at a time, the approval itself the audit record
+//! (`host 20:20`) — wait on an agent being in the binary at all: there is nothing to escalate to
+//! yet, so the dialog says what it can and offers no button that does nothing.
 
 /// Where the panel's script is served.
 pub const SCRIPT_PATH: &str = "/panel.js";
+
+/// Where the app page's dialog script is served.
+///
+/// The pair below is what `deepnest_gateway::dialog` names in the markup it injects; this crate
+/// holds the bytes, and `the_dialog_the_gateway_names_is_served_here` pins the two together.
+pub const DIALOG_SCRIPT_PATH: &str = "/dialog.js";
+
+/// Where the app page's dialog stylesheet is served.
+pub const DIALOG_STYLE_PATH: &str = "/dialog.css";
+
+/// The app page's dialog script.
+pub const DIALOG_SCRIPT: &str = include_str!("dialog.js");
+
+/// The app page's dialog stylesheet.
+pub const DIALOG_STYLE: &str = include_str!("dialog.css");
 
 /// What `GET /` is allowed to load.
 ///
