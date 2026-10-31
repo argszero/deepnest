@@ -6,12 +6,12 @@
 //! crate owns what ends up there: where an unpacked toolchain lives ([`toolchain::dir`]), what
 //! makes one whole ([`Status::Ready`]), and what an unpack that was killed halfway leaves behind.
 //!
-//! **What lands first is the contract, not the unpack.** Decompressing the payload needs the
-//! payload, which this build does not carry yet, and the steps that do need it — the zstd unpack
-//! itself and macOS signing — can each be written against the shape below without changing a byte
-//! of it. The order is the same one `crates/apps` took: the directory contract first, because it is
-//! the part users' disks hold once it ships, and the thing that reads it is written against it
-//! rather than the other way round.
+//! **The contract landed first, and the unpack has now been written against it.** Decompressing
+//! the payload needs the payload, which this build does not carry yet, so [`unpack`] is written
+//! against the shape below and changes none of it: it fills a [`Staging`] and calls
+//! [`Staging::adopt`], which is the only door into `toolchain/`. What is still missing is the
+//! archive itself and the signature over it — both belong to the release pipeline, not to this
+//! crate's logic.
 //!
 //! [`cc`] is the other half of what a machine needs: the C toolchain deepnest deliberately does not
 //! carry, checked **before the first build** rather than discovered by a compiler halfway through
@@ -26,6 +26,8 @@
 
 pub mod cc;
 pub mod toolchain;
+pub mod unpack;
 
 pub use cc::{check, requirement, Finding, Kind, Probe, Report, Requirement, StdProbe};
 pub use toolchain::{staging, status, sweep, Staging, Status, DIR_NAME, MARKER, PAYLOAD, VERSION};
+pub use unpack::{unpack, Refusal, UnpackError, Unpacked};
