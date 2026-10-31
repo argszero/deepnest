@@ -76,7 +76,9 @@ by name what it does not answer:
   there is `404` — "no app named that" is a different answer from any failure to start one.
   `create` answers `201` and returns the directory and the file list, because the client's next
   question is always where it went. `build` is the slow one: it runs the toolchain, takes tens of
-  seconds on a warm cache, and holds the connection that asked for it.
+  seconds on a warm cache, and holds the connection that asked for it. It answers `412` **before
+  the first step** when the machine has no C toolchain — the check the README promises, made where
+  the build is asked for rather than by a compiler a minute into it.
 - `GET /app/<slug>/…` and `HEAD` — the app itself, forwarded to the loopback port it is running
   on. Not behind the token: this is the page a browser navigates to, and a link that demands an
   `Authorization` header is a link that never opens. What bounds it is that the only thing it can
@@ -321,7 +323,14 @@ zstd-compressed toolchain payload unpacked on first run **atomically** — into 
 - **The marker names the payload, not the version.** A version directory can outlive the build that filled it — two development builds both call themselves `0.1.0`, and a restore can put an older one back over an upgrade — so a directory carrying a different payload is reported and replaced, where a bare version comparison would have called it ready and left the user running last week's compiler.
 - **An interrupted unpack is swept, not resumed.** Half of one payload is not something to continue from; the process that owns the port removes the leftovers at startup and names them, because the port is the single-instance admission — it is what proves no other deepnest can be filling a staging directory at that moment.
 
-**Still to come: the payload itself.** Unpacking a zstd archive into a `Staging` and publishing it, the C toolchain deepnest deliberately does not bundle (README already promises the check before the first build, so that one is a promise to keep rather than a decision to take), and signing every bundled Mach-O before packing. All three are written against the contract above and change none of it: the unpack fills `Staging::dir` and calls `Staging::adopt`, and nothing else may write inside `toolchain/`.
+**What has landed since: the C toolchain check** (`decided in implementation`, 2026-10-31). The README already promised that deepnest *checks for them before the first build and walks you through installing what is missing*; that promise is now kept, in [`cc`]. Four decisions came with it:
+
+- **The answer is three readings, not a boolean.** Ready, missing, and *the check itself could not be answered* are separate because the actions are: build, install the named thing, or go and look at a broken probe. Collapsing the third into "missing" tells a user to install something they may already have.
+- **Two of the three refuse the build.** An unanswerable check fails closed, like every other reading in this crate: a build started on "cannot tell" spends a minute of the user's time to arrive at the same refusal from a compiler, and says less when it gets there. The route answers `412` and reports that no step ran.
+- **macOS asks `xcode-select -p`, not a fixed path.** The tools sit in `/Library/Developer/CommandLineTools` by default, a full Xcode puts them elsewhere, and `-s` can put them anywhere at all — a path check would answer "missing" for a machine that compiles C perfectly well, and a false "missing" stops a build that would have worked. The same reasoning makes Windows ask `vswhere` rather than look for `cl.exe` on `PATH`: outside a developer prompt those tools are never on it.
+- **The fix is a command to paste or a page to open.** "Install a C toolchain" is not guidance; `xcode-select --install` is. This is the half of the promise that is about the user rather than about correctness, and a test keeps every platform's fix actionable.
+
+**Still to come: the payload and the signature.** Unpacking a zstd archive into a `Staging` and publishing it, and signing every bundled Mach-O before packing. Both are written against the contract above and change none of it: the unpack fills `Staging::dir` and calls `Staging::adopt`, and nothing else may write inside `toolchain/`.
 
 macOS ships signed and notarized (`host 20:48`). Every Mach-O inside the bundled toolchain must be **signed before packing**, because first-run unpacking does not re-sign, and an unsigned child process is refused under hardened runtime. Windows ships unsigned (`host 20:56`) — SmartScreen will warn on first run, and both README and the first-run page say so plainly rather than teaching users to bypass security prompts blindly.
 
@@ -373,9 +382,10 @@ One module per cycle, each landing with its tests:
    that says which skills may be refreshed have landed; the installer that fetches what the catalog
    names — a subprocess for a self-publishing package, an HTTP client for release tags — remains.
 9. `crates/packaging` — payload, first-run unpack, signing. **In progress**: the toolchain
-   directory contract has landed — where a payload unpacks, the marker that makes a directory
-   whole, and the sweep that removes what an interrupted unpack left behind. The zstd unpack, the
-   C toolchain check and signing remain.
+   directory contract has landed (where a payload unpacks, the marker that makes a directory whole,
+   and the sweep that removes what an interrupted unpack left behind), and so has the C toolchain
+   check, wired into the `build` route as a `412` before any step runs. The zstd unpack and signing
+   remain.
 
 ## 7. Non-negotiables
 
