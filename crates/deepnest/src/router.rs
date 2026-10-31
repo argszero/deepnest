@@ -1042,6 +1042,23 @@ mod tests {
         String::from_utf8(response.body.clone()).unwrap()
     }
 
+    /// What the person on the other end actually reads: the `error` field, decoded.
+    ///
+    /// A refusal quotes the toolchain advice verbatim, and on Linux and Windows that advice names
+    /// a workload in quotes — `"Desktop development with C++"`. Those arrive JSON-escaped, so
+    /// comparing the raw body against the message it carries fails on exactly the platforms whose
+    /// advice matters most.
+    fn error_text(response: &Response) -> String {
+        let raw = body(response);
+        match serde_json::from_str::<Value>(&raw) {
+            Ok(value) => value
+                .get("error")
+                .and_then(Value::as_str)
+                .map_or(raw.clone(), ToString::to_string),
+            Err(_) => raw,
+        }
+    }
+
     #[test]
     fn the_root_serves_the_panel_on_both_spellings_of_loopback() {
         let router = router();
@@ -1951,7 +1968,7 @@ mod tests {
             builder.steps()
         );
 
-        let answer = body(&response);
+        let answer = error_text(&response);
         assert!(
             answer.contains(deepnest_packaging::requirement().name),
             "{answer}"
@@ -1989,7 +2006,7 @@ mod tests {
             "an unanswerable check must not let the plan start: {:?}",
             builder.steps()
         );
-        let answer = body(&response);
+        let answer = error_text(&response);
         assert!(answer.contains("could not tell"), "{answer}");
         assert!(answer.contains("xcode-select -p"), "{answer}");
     }
