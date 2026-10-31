@@ -465,6 +465,23 @@ mod tests {
     use super::*;
     use crate::state;
 
+    /// A path rooted at this host's filesystem root: `/var/tmp/skills` on unix, `C:\var\tmp\skills`
+    /// on Windows.
+    ///
+    /// A test that spells out `/var/tmp/skills` is absolute on unix and merely drive-relative on
+    /// Windows, so it measures the platform rather than the rule being tested. `resolve_dest`
+    /// refuses a relative path by design, which is why the literal made this suite red on Windows
+    /// alone.
+    #[cfg(windows)]
+    fn an_absolute_path(rest: &str) -> PathBuf {
+        PathBuf::from(format!("C:\\{}", rest.replace('/', "\\")))
+    }
+
+    #[cfg(not(windows))]
+    fn an_absolute_path(rest: &str) -> PathBuf {
+        PathBuf::from(format!("/{rest}"))
+    }
+
     struct Scratch {
         base: PathBuf,
     }
@@ -984,9 +1001,11 @@ mod tests {
             Some(home.join(".deepnest").join("skills"))
         );
         assert_eq!(resolve_dest("~", home), Some(home.to_path_buf()));
+        // Not under `~`, so it stands as written and is not joined onto `home`.
+        let outside = an_absolute_path("var/tmp/skills");
         assert_eq!(
-            resolve_dest("/var/tmp/skills", home),
-            Some(PathBuf::from("/var/tmp/skills"))
+            resolve_dest(outside.to_str().unwrap(), home),
+            Some(outside.clone())
         );
     }
 
