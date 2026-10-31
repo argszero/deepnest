@@ -1,0 +1,10 @@
+[package]
+name = "deepnest-skills"
+description = "Anthropic Agent Skills as deepnest reads them: two roots, two layouts, and only a name and a description in the prompt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
