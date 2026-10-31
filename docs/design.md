@@ -211,7 +211,7 @@ On the build side, three:
 
 An install with no apps has no `apps/` directory at all, and the listing reports that as "none yet" rather than as a fault. That is now the whole of `crates/apps`: the directory contract, the process lifecycle, the template and the build.
 
-What none of it does: build in the background, or report progress while it runs. A build occupies the request that asked for it, and this binary serves one connection at a time, so the panel waits. Showing progress while the panel stays live belongs to `crates/gateway`, with the real server loop.
+What none of it does: build in the background, or report progress while it runs. A build occupies the thread that asked for it — the panel's own tab waits, which is what a synchronous request means — while the rest of the door stays open. Reporting progress *to that tab* is a streaming answer, and the gateway now has one.
 
 ### `crates/gateway` — the single door
 
@@ -225,12 +225,21 @@ The router described in §2. Its hardest requirement is not routing but **not ly
 - **`Location` and `Set-Cookie` are rewritten; nothing else is.** A redirect to `/login` leaves the prefix and lands on deepnest's own 404. A cookie with `Path=/` is sent to every route on the port, the panel's API included, so it is confined to the prefix — added when absent, because a cookie with no `Path` gets `/` from the browser anyway. Everything else is passed through untouched: a proxy that rewrites headers it does not understand is a proxy that breaks the app it was meant to leave alone.
 - **A chunked body is decoded, not forwarded as framing.** A Node or axum app answers a page it did not measure with `Transfer-Encoding: chunked`; passing those bytes on with the header stripped would hand the browser the chunk sizes as content.
 
-What this slice does **not** do, each named because each is a different piece of work:
+**An answer is not always a body** (`decided in implementation`, 2026-10-31). A WebSocket upgrade and an SSE stream both begin with a head and then continue for as long as the user is there, so the forward returns one of two things: a complete response, or the app's connection, copied as the bytes arrive. Four decisions:
 
-- **No WebSocket upgrade, and no streaming.** The hand-written layer reads one request per connection and answers once, so an upgrade has nowhere to go and an SSE endpoint answers only when it ends. Both are the next slice, and both change the connection model rather than adding to it.
+- **The choice is made from the head alone.** `101` is a tunnel and `text/event-stream` is a stream; the body of either has no end, so reading on to find out would be reading until the browser gave up on it.
+- **A streamed head is not rewritten.** Its `Transfer-Encoding: chunked` is the framing of everything after it, so those bytes go out exactly as the app wrote them. The rewrites above belong to answers with a body; a body that never ends has no `Location` or `Set-Cookie` to move, and a length this layer invented would cut the stream off.
+- **A handshake is the one request whose hop-by-hop headers must survive.** `Connection: Upgrade` and `Upgrade: websocket` are the message, not metadata about it — an app that does not receive them answers `400` instead of `101`. So a handshake crosses whole (`Sec-WebSocket-Key`, `Sec-WebSocket-Version`, `Sec-WebSocket-Protocol`, `Origin`), the only header changed is `Host`, for the usual reason, and nothing is appended: `Connection: close` would end the upgrade before it began.
+- **The connection is copied, not polled.** One thread per direction, each writing one socket and no other. A single thread would have to wait on both, and an upgraded connection is idle in both directions at once.
+
+**What that forced on the server loop.** One connection at a time was the right size for a panel that answered one request and closed; it is the wrong size for a socket that stays open, because the accept loop — and the token keepalive with it — would sit behind the first tab that opened one. Each connection now runs on its own thread, bounded at 64 (a connection past the bound is refused by name, not queued), and `shutdown` closes the sockets instead of waiting for a stream that never ends. The end-to-end check for this is a browser-shaped one: an idle connection that has sent nothing must not delay the next request, and a `GET /app/notes/ws` that has upgraded must not stop `GET /api/health` from answering.
+
+What is **not** in this slice, each named because each is a different piece of work:
+
 - **No floating dialog injection, and so no CSP rewrite.** The dialog is injected into every `/app/<slug>/` response precisely so that an agent rewriting the app's page wholesale cannot delete it; rewriting the app's CSP before there is a dialog to inject would loosen a policy for nothing.
 - **No `POST` to an app.** A body cannot be forwarded by a layer that never reads one, and forwarding the request without it would report success for content the app never saw.
-- **The shutdown sequence that runs the apps down** is still not written; it belongs with the real server loop, and this slice did not build one.
+- **The shutdown sequence that runs the apps down** is still not written. The accept loop it belongs with now exists; the call that stops every app on the way out does not, and a killed deepnest still leaves its apps running.
+- **A stream that ends while the browser lingers holds its thread** until the browser closes its socket. The bound is `MAX_CONNECTIONS`; the alternative — a timeout on an idle WebSocket — would break the one connection type this slice exists for.
 
 The forward is a `Forwarder` trait, for the same reason `Spawner` and `Prober` are: what the router has to get right is *which app a request is sent to*, and a test of that decision should not depend on the kernel handing a real app the port the supervisor allocated.
 
@@ -283,8 +292,8 @@ One module per cycle, each landing with its tests:
    allocation, start/stop/restart), and the template and the build (`POST /api/apps/<slug>/create`
    and `/build`). All three are wired into the binary, so this is not a module that sits unread.
 7. `crates/gateway` + `crates/web` — the single door, the panel, the dialog. **In progress**: the
-   gateway's forward and the HTTP layer under it are in, wired into the binary; the WebSocket
-   upgrade, streaming, the dialog injection and the panel remain.
+   gateway's forward, the HTTP layer under it, the WebSocket upgrade and unbuffered streaming are
+   in, and the binary serves connections concurrently; the dialog injection and the panel remain.
 8. `crates/skills` — loader, catalog, installer.
 9. `crates/packaging` — payload, first-run unpack, signing.
 

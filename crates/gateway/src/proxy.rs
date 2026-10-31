@@ -3,9 +3,18 @@
 //! The app's server listens on a loopback port of its own, allocated per start and never
 //! persisted. This module turns a request that arrived on deepnest's port into one for that app,
 //! and the app's answer back into one the browser can use under the prefix.
+//!
+//! **An answer is not always a body** (`decided in implementation`, 2026-10-31). A WebSocket
+//! upgrade and an SSE stream are both a head followed by bytes that stop when someone leaves, and
+//! reading either of them to the end is reading it forever: the browser would receive the first
+//! byte of its live connection only after it had given up on it. So the forward no longer promises
+//! "all the bytes"; it answers one of two things — a complete response, or the connection itself
+//! ([`Answer`]). Everything below the decision is unchanged: an app that answers and closes is
+//! still read whole, still decoded if it chunked its body, still adapted to the prefix.
 
 use std::io::{self, Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpStream};
+use std::thread;
 use std::time::Duration;
 
 use crate::http::{Method, Request, Response};
@@ -17,8 +26,14 @@ use crate::rewrite::{self, is_hop_by_hop};
 /// answers — so a connection that takes seconds is a connection that is not coming.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How long the app gets to send its answer, and to take it.
+/// How long the app gets to send its answer head, and an ordinary body, and to take one.
+///
+/// It does **not** apply to a connection once it is handed over: an idle WebSocket is a working
+/// WebSocket, and a stream that says nothing for a minute is not broken.
 const IO_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The largest answer head accepted from an app, in bytes.
+const MAX_ANSWER_HEAD: usize = 64 * 1024;
 
 /// Where an app is: what it is called, and the port it is on right now.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +88,140 @@ impl std::fmt::Display for ForwardError {
 
 impl std::error::Error for ForwardError {}
 
+/// What an app answered.
+///
+/// One variant per kind of answer, and the second one exists because a proxy that can only carry
+/// bodies cannot carry a conversation.
+#[derive(Debug)]
+pub enum Answer {
+    /// A complete answer: read whole, adapted to the prefix, written as one response.
+    Full(Response),
+    /// A head and a live connection to the app, passed on as the bytes arrive.
+    Stream(Stream),
+}
+
+impl Answer {
+    /// The complete answer.
+    ///
+    /// # Panics
+    ///
+    /// When this answer is a connection. A caller that can only take a body has to ask first, and
+    /// silently dropping a stream would report success for bytes nobody received.
+    #[track_caller]
+    pub fn complete(self) -> Response {
+        match self {
+            Self::Full(response) => response,
+            Self::Stream(_) => panic!("this answer is a connection, not a body"),
+        }
+    }
+}
+
+/// Why an answer is being passed through instead of read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamKind {
+    /// `101 Switching Protocols`. From here the connection is a tunnel in both directions.
+    Upgrade,
+    /// `text/event-stream`. The app has more to say and no way to say when it is done.
+    Events,
+}
+
+/// An app's response head, and the connection it arrived on.
+///
+/// The head is kept as bytes rather than as a [`Response`] on purpose: its framing headers —
+/// `Transfer-Encoding: chunked`, `Connection` — are the framing of everything that follows, and a
+/// `Response` would rewrite them into a length that does not exist.
+#[derive(Debug)]
+pub struct Stream {
+    head: Vec<u8>,
+    /// Bytes the app sent past its head while the head was being read. They are the first bytes of
+    /// the stream, and dropping them would lose the beginning of the conversation.
+    pending: Vec<u8>,
+    upstream: TcpStream,
+    kind: StreamKind,
+}
+
+impl Stream {
+    /// A connection to hand over, with the head the browser gets first.
+    pub fn new(upstream: TcpStream, head: Vec<u8>, kind: StreamKind) -> Self {
+        Self {
+            head,
+            pending: Vec::new(),
+            upstream,
+            kind,
+        }
+    }
+
+    pub fn kind(&self) -> StreamKind {
+        self.kind
+    }
+
+    /// The bytes the browser receives first.
+    pub fn head(&self) -> &[u8] {
+        &self.head
+    }
+
+    /// Write the head, then copy bytes both ways until either side stops.
+    ///
+    /// Two threads, one per direction, because a single one would have to poll both sockets and a
+    /// WebSocket is idle in both directions at once: a thread that waits for the browser cannot
+    /// hear the app. Each direction writes its own socket and no other, so no lock is needed.
+    pub fn pump(self, client: &mut TcpStream, head_only: bool) -> io::Result<()> {
+        // From here on, silence is normal. A stream with no timeout ends when a side closes it, or
+        // when the server shuts the connection down.
+        let _ = self.upstream.set_read_timeout(None);
+        let _ = self.upstream.set_write_timeout(None);
+        let _ = client.set_read_timeout(None);
+        let _ = client.set_write_timeout(None);
+
+        client.write_all(&self.head)?;
+        if head_only {
+            // `HEAD` promised no body, so the head is the whole answer.
+            let _ = client.shutdown(Shutdown::Write);
+            return Ok(());
+        }
+        if !self.pending.is_empty() {
+            client.write_all(&self.pending)?;
+        }
+        client.flush()?;
+
+        let mut app_reader = self.upstream.try_clone()?;
+        let mut app_writer = self.upstream;
+        let mut client_reader = client.try_clone()?;
+        let mut client_writer = client.try_clone()?;
+
+        let upward = thread::spawn(move || {
+            let result = copy(&mut client_reader, &mut app_writer);
+            // The app is told the conversation is over, so a server waiting for its next request
+            // is not left holding a socket whose peer already left.
+            let _ = app_writer.shutdown(Shutdown::Write);
+            result
+        });
+
+        let downward = copy(&mut app_reader, &mut client_writer);
+        // Same in this direction: half-close the browser's side so its reader sees the end of the
+        // stream instead of waiting for a byte that will never come.
+        let _ = client_writer.shutdown(Shutdown::Write);
+        let upward = upward.join().unwrap_or(Ok(()));
+        downward.and(upward)
+    }
+}
+
+/// Copy until `from` ends, reporting the first failure.
+fn copy(from: &mut TcpStream, to: &mut TcpStream) -> io::Result<()> {
+    let mut buffer = [0u8; 8192];
+    loop {
+        match from.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(count) => {
+                to.write_all(&buffer[..count])?;
+                to.flush()?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// How a request reaches an app.
 ///
 /// A trait for the reason every other seam here is one: the behaviour worth testing in the router is
@@ -80,7 +229,7 @@ impl std::error::Error for ForwardError {}
 /// test that needed a running app on the exact port the supervisor allocated would be measuring the
 /// kernel's port allocator.
 pub trait Forwarder: Send + Sync {
-    fn forward(&self, target: &Target, request: &Request) -> Result<Response, ForwardError>;
+    fn forward(&self, target: &Target, request: &Request) -> Result<Answer, ForwardError>;
 }
 
 /// The real forward: the one in this module.
@@ -88,14 +237,20 @@ pub trait Forwarder: Send + Sync {
 pub struct StdForwarder;
 
 impl Forwarder for StdForwarder {
-    fn forward(&self, target: &Target, request: &Request) -> Result<Response, ForwardError> {
+    fn forward(&self, target: &Target, request: &Request) -> Result<Answer, ForwardError> {
         forward(target, request)
     }
 }
 
 /// Forward one request to the app and return its answer, adapted to the prefix.
-pub fn forward(target: &Target, request: &Request) -> Result<Response, ForwardError> {
-    let head = upstream_request(target, request);
+pub fn forward(target: &Target, request: &Request) -> Result<Answer, ForwardError> {
+    let upgrade = is_upgrade(request);
+    let head = if upgrade {
+        upstream_handshake(target, request)
+    } else {
+        upstream_request(target, request)
+    };
+
     // The connect is attempted separately from the exchange, and the separation is the point: "the
     // app is not listening" and "the app stopped mid-answer" want different words and different
     // next steps, and a single `io::Result` collapses them into one.
@@ -107,27 +262,57 @@ pub fn forward(target: &Target, request: &Request) -> Result<Response, ForwardEr
         port: target.port,
         source,
     })?;
-    let raw = write_and_read(&mut stream, head.as_bytes()).map_err(ForwardError::Io)?;
-    let answer = parse_response(&raw)?;
-    Ok(adapt(target, answer))
+    let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
+    stream
+        .write_all(head.as_bytes())
+        .map_err(ForwardError::Io)?;
+    if !upgrade {
+        // Half-close: an ordinary request has nothing more to send, so the app is told the request
+        // is complete and can answer. A handshake is the opposite — the connection is about to
+        // carry traffic both ways, and closing it would end the upgrade before it began.
+        stream.shutdown(Shutdown::Write).map_err(ForwardError::Io)?;
+    }
+
+    let (raw_head, pending) = read_head(&mut stream).map_err(ForwardError::Io)?;
+    let head = parse_head(&raw_head)?;
+
+    // The decision is made on the head alone, because the body of a stream has no end to read to.
+    if let Some(kind) = stream_kind(&head) {
+        return Ok(Answer::Stream(Stream {
+            head: raw_head,
+            pending,
+            upstream: stream,
+            kind,
+        }));
+    }
+
+    let raw = read_all(&mut stream, pending).map_err(ForwardError::Io)?;
+    let body = complete(&head, raw)?;
+    Ok(Answer::Full(adapt(target, &head, body)))
 }
 
-/// The request the app receives.
+/// Whether this request asks to stop speaking request/response.
+///
+/// Both headers are required, in the spellings RFC 9110 allows: `Upgrade: websocket` on its own is
+/// a hint, and `Connection` may carry a list (`keep-alive, Upgrade`).
+pub fn is_upgrade(request: &Request) -> bool {
+    request.header("upgrade").is_some()
+        && request.header("connection").is_some_and(|value| {
+            value
+                .to_ascii_lowercase()
+                .split(',')
+                .any(|token| token.trim() == "upgrade")
+        })
+}
+
+/// The request the app receives for an ordinary exchange.
 ///
 /// The app's own path, its own headers, and `Connection: close` — this forward reads one answer and
 /// then stops, so asking the app to hold the connection open would only leave a socket waiting for
 /// a second request that never comes.
 fn upstream_request(target: &Target, request: &Request) -> String {
-    let path = rewrite::upstream_path(&target.prefix(), &request.path);
-    let mut head = String::with_capacity(256);
-    head.push_str(request.method.as_str());
-    head.push(' ');
-    head.push_str(&path);
-    if !request.query.is_empty() {
-        head.push('?');
-        head.push_str(&request.query);
-    }
-    head.push_str(" HTTP/1.1\r\n");
+    let mut head = request_line(target, request);
     // The app must see itself, not deepnest's port: a framework that builds absolute URLs from the
     // Host header would otherwise send the browser to the panel.
     head.push_str(&format!("host: 127.0.0.1:{}\r\n", target.port));
@@ -144,41 +329,115 @@ fn upstream_request(target: &Target, request: &Request) -> String {
     head
 }
 
+/// The request the app receives when the client asked to upgrade.
+///
+/// Deliberately **not** [`upstream_request`] with a flag. For an ordinary request `Connection` and
+/// `Upgrade` are hop-by-hop and stripping them is correct; for a handshake they *are* the message,
+/// and an app that does not receive them answers `400` instead of `101`. So everything crosses —
+/// including `Sec-WebSocket-Key`, `Sec-WebSocket-Version`, `Sec-WebSocket-Protocol` and `Origin`,
+/// which the app needs verbatim to compute `Sec-WebSocket-Accept` and to check where the browser
+/// came from — and the only header changed is `Host`, for the usual reason.
+fn upstream_handshake(target: &Target, request: &Request) -> String {
+    let mut head = request_line(target, request);
+    head.push_str(&format!("host: 127.0.0.1:{}\r\n", target.port));
+    for (name, value) in &request.headers {
+        // `Host` is replaced above. `Content-Length` describes a body this layer never read, and a
+        // handshake has none: forwarding `0` is harmless but forwarding a stale number is not.
+        if name.eq_ignore_ascii_case("host") || name.eq_ignore_ascii_case("content-length") {
+            continue;
+        }
+        head.push_str(name);
+        head.push_str(": ");
+        head.push_str(value);
+        head.push_str("\r\n");
+    }
+    head.push_str("\r\n");
+    head
+}
+
+/// The request line, with the prefix stripped and the query kept.
+fn request_line(target: &Target, request: &Request) -> String {
+    let path = rewrite::upstream_path(&target.prefix(), &request.path);
+    let mut head = String::with_capacity(320);
+    head.push_str(request.method.as_str());
+    head.push(' ');
+    head.push_str(&path);
+    if !request.query.is_empty() {
+        head.push('?');
+        head.push_str(&request.query);
+    }
+    head.push_str(" HTTP/1.1\r\n");
+    head
+}
+
 /// The whole exchange against an address: connect, send, read. What a test points at a real app.
 pub fn exchange(addr: SocketAddr, head: &[u8]) -> io::Result<Vec<u8>> {
     let mut stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)?;
-    write_and_read(&mut stream, head)
-}
-
-/// Send `head` on an open connection, read everything the app says back.
-fn write_and_read(stream: &mut TcpStream, head: &[u8]) -> io::Result<Vec<u8>> {
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     stream.write_all(head)?;
     // Half-close: the app is told the request is complete, and can still answer.
-    stream.shutdown(std::net::Shutdown::Write)?;
-    let mut raw = Vec::new();
+    stream.shutdown(Shutdown::Write)?;
+    read_all(&mut stream, Vec::new())
+}
+
+/// Read the answer head, and keep whatever arrived after it.
+///
+/// Split from [`read_all`] because the head is the last thing this layer may read: past it, an
+/// answer is either a body with a length or a connection with none.
+fn read_head(stream: &mut TcpStream) -> io::Result<(Vec<u8>, Vec<u8>)> {
+    let mut buffer: Vec<u8> = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 8192];
+    loop {
+        if let Some(end) = buffer
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|at| at + 4)
+        {
+            let rest = buffer.split_off(end);
+            return Ok((buffer, rest));
+        }
+        if buffer.len() > MAX_ANSWER_HEAD {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the app's answer head is larger than any real head",
+            ));
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "the app closed before finishing its answer head",
+                ))
+            }
+            Ok(count) => buffer.extend_from_slice(&chunk[..count]),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Read to the end of the connection, starting from bytes already in hand.
+fn read_all(stream: &mut TcpStream, mut raw: Vec<u8>) -> io::Result<Vec<u8>> {
     let mut chunk = [0u8; 8192];
     loop {
         match stream.read(&mut chunk) {
-            Ok(0) => break,
+            Ok(0) => return Ok(raw),
             Ok(count) => raw.extend_from_slice(&chunk[..count]),
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error),
         }
     }
-    Ok(raw)
 }
 
-/// An HTTP response as the app sent it.
+/// An answer head, as the app sent it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Answer {
+struct Head {
     status: u16,
     headers: Vec<(String, String)>,
-    body: Vec<u8>,
 }
 
-impl Answer {
+impl Head {
     fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
@@ -187,18 +446,17 @@ impl Answer {
     }
 }
 
-fn parse_response(raw: &[u8]) -> Result<Answer, ForwardError> {
+fn parse_head(raw: &[u8]) -> Result<Head, ForwardError> {
     let split = raw
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
         .ok_or(ForwardError::Malformed(
             "the answer ended before its headers did",
         ))?;
-    let head = std::str::from_utf8(&raw[..split])
+    let text = std::str::from_utf8(&raw[..split])
         .map_err(|_| ForwardError::Malformed("the answer's head is not text"))?;
-    let body = &raw[split + 4..];
 
-    let mut lines = head.split("\r\n");
+    let mut lines = text.split("\r\n");
     let status_line = lines
         .next()
         .ok_or(ForwardError::Malformed("the answer had no status line"))?;
@@ -221,26 +479,46 @@ fn parse_response(raw: &[u8]) -> Result<Answer, ForwardError> {
         headers.push((name.trim().to_string(), value.trim().to_string()));
     }
 
-    let mut answer = Answer {
-        status,
-        headers,
-        body: body.to_vec(),
-    };
+    Ok(Head { status, headers })
+}
 
+/// Whether this answer is a connection rather than a body.
+///
+/// Two shapes, and neither can be recognised from anything but the head: a `101` is a tunnel, and
+/// `text/event-stream` is a stream whose end is the user closing the tab. Reading on to find out
+/// would be reading until the browser is gone.
+fn stream_kind(head: &Head) -> Option<StreamKind> {
+    if head.status == 101 && head.header("upgrade").is_some() {
+        return Some(StreamKind::Upgrade);
+    }
+    if head.header("content-type").is_some_and(|value| {
+        value
+            .trim()
+            .to_ascii_lowercase()
+            .starts_with("text/event-stream")
+    }) {
+        return Some(StreamKind::Events);
+    }
+    None
+}
+
+/// The body of an answer that has one, framed as a body.
+fn complete(head: &Head, mut body: Vec<u8>) -> Result<Vec<u8>, ForwardError> {
     // A body with no length is delimited by the end of the connection, and that is what arrived.
     // A chunked body is not: its framing is part of the bytes, so it has to be decoded before
     // anything downstream can treat it as a body.
-    if answer
+    if head
         .header("transfer-encoding")
         .is_some_and(|value| value.to_ascii_lowercase().contains("chunked"))
     {
-        answer.body = decode_chunked(&answer.body)?;
-    } else if let Some(length) = answer.header("content-length").and_then(|v| v.parse().ok()) {
+        return decode_chunked(&body);
+    }
+    if let Some(length) = head.header("content-length").and_then(|v| v.parse().ok()) {
         // Trust the announced length over the connection: an app that closes early has still told
         // us how much it meant to send, and a truncated body is a broken answer either way.
-        answer.body.truncate(length);
+        body.truncate(length);
     }
-    Ok(answer)
+    Ok(body)
 }
 
 /// Undo HTTP's chunked framing.
@@ -272,14 +550,14 @@ fn decode_chunked(raw: &[u8]) -> Result<Vec<u8>, ForwardError> {
 }
 
 /// The app's answer, as the browser must see it under the prefix.
-fn adapt(target: &Target, answer: Answer) -> Response {
+fn adapt(target: &Target, head: &Head, answer_body: Vec<u8>) -> Response {
     let prefix = target.prefix();
-    let content_type = answer
+    let content_type = head
         .header("content-type")
         .unwrap_or("application/octet-stream")
         .to_string();
 
-    let mut body = answer.body;
+    let mut body = answer_body;
     if content_type.to_ascii_lowercase().starts_with("text/html") {
         if let Ok(page) = std::str::from_utf8(&body) {
             if let Some(rewritten) = rewrite::inject_base(&prefix, page) {
@@ -288,28 +566,29 @@ fn adapt(target: &Target, answer: Answer) -> Response {
         }
     }
 
-    let mut response = Response::new(answer.status, content_type, body);
-    for (name, value) in answer.headers {
-        if is_hop_by_hop(&name) || name.eq_ignore_ascii_case("content-type") {
+    let mut response = Response::new(head.status, content_type, body);
+    for (name, value) in &head.headers {
+        if is_hop_by_hop(name) || name.eq_ignore_ascii_case("content-type") {
             continue;
         }
         if name.eq_ignore_ascii_case("location") {
-            response = response.header(name, rewrite::location(&prefix, &value));
+            response = response.header(name.clone(), rewrite::location(&prefix, value));
         } else if name.eq_ignore_ascii_case("set-cookie") {
-            response = response.header(name, rewrite::set_cookie(&prefix, &value));
+            response = response.header(name.clone(), rewrite::set_cookie(&prefix, value));
         } else {
-            response = response.header(name, value);
+            response = response.header(name.clone(), value.clone());
         }
     }
     response
 }
 
-/// Only `HEAD` and `GET` reach an app through this forward today.
+/// Only `HEAD` and `GET` reach an app through this layer.
 ///
 /// The hand-written layer reads one request per connection and no body, so a `POST` cannot be
 /// forwarded faithfully: its content would be dropped on the floor and the app would be told a
-/// request arrived that said nothing. Until the connection model changes, an app's state changes
-/// are its own to serve, not this door's to mangle.
+/// request arrived that said nothing. A `GET` is no longer one answer, though — it may become a
+/// WebSocket tunnel or an event stream — which is why the method list is here and the shape of the
+/// answer is not.
 pub fn can_forward(method: Method) -> bool {
     matches!(method, Method::Get | Method::Head)
 }
@@ -318,7 +597,7 @@ pub fn can_forward(method: Method) -> bool {
 mod tests {
     use super::*;
     use std::net::TcpListener;
-    use std::thread;
+    use std::sync::mpsc;
 
     fn get(path: &str) -> Request {
         Request {
@@ -329,26 +608,51 @@ mod tests {
         }
     }
 
+    fn handshake(path: &str) -> Request {
+        Request {
+            method: Method::Get,
+            path: path.to_string(),
+            query: String::new(),
+            headers: vec![
+                ("host".to_string(), "127.0.0.1:4270".to_string()),
+                ("connection".to_string(), "keep-alive, Upgrade".to_string()),
+                ("upgrade".to_string(), "websocket".to_string()),
+                (
+                    "sec-websocket-key".to_string(),
+                    "dGhlIHNhbXBsZSBub25jZQ==".to_string(),
+                ),
+                ("sec-websocket-version".to_string(), "13".to_string()),
+                ("origin".to_string(), "http://127.0.0.1:4270".to_string()),
+            ],
+        }
+    }
+
+    /// Read a request head from an accepted connection.
+    fn read_head_of(stream: &mut TcpStream) -> Vec<u8> {
+        let mut seen = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(count) => {
+                    seen.extend_from_slice(&chunk[..count]);
+                    if seen.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        seen
+    }
+
     /// An app that answers every request with the same bytes, and one request read.
     fn serving(answer: &'static [u8]) -> (SocketAddr, thread::JoinHandle<Vec<u8>>) {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut seen = Vec::new();
-            let mut chunk = [0u8; 1024];
-            loop {
-                match stream.read(&mut chunk) {
-                    Ok(0) => break,
-                    Ok(count) => {
-                        seen.extend_from_slice(&chunk[..count]);
-                        if seen.windows(4).any(|window| window == b"\r\n\r\n") {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
+            let seen = read_head_of(&mut stream);
             let _ = stream.write_all(answer);
             let _ = stream.flush();
             seen
@@ -356,15 +660,37 @@ mod tests {
         (addr, handle)
     }
 
-    fn forward_to(addr: SocketAddr, request: &Request) -> Result<Response, ForwardError> {
+    fn forward_to(addr: SocketAddr, request: &Request) -> Result<Answer, ForwardError> {
         let target = Target::new("notes", addr.port());
-        let head = upstream_request(&target, request);
+        let head = if is_upgrade(request) {
+            upstream_handshake(&target, request)
+        } else {
+            upstream_request(&target, request)
+        };
         let raw = exchange(addr, head.as_bytes()).map_err(|source| ForwardError::Connect {
             port: addr.port(),
             source,
         })?;
-        let answer = parse_response(&raw)?;
-        Ok(adapt(&target, answer))
+        let (raw_head, rest) = {
+            let end = raw
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .map(|at| at + 4)
+                .ok_or(ForwardError::Malformed("no head"))?;
+            (raw[..end].to_vec(), raw[end..].to_vec())
+        };
+        let parsed = parse_head(&raw_head)?;
+        if let Some(kind) = stream_kind(&parsed) {
+            let upstream = TcpStream::connect(addr).unwrap();
+            return Ok(Answer::Stream(Stream {
+                head: raw_head,
+                pending: rest,
+                upstream,
+                kind,
+            }));
+        }
+        let body = complete(&parsed, rest)?;
+        Ok(Answer::Full(adapt(&target, &parsed, body)))
     }
 
     #[test]
@@ -375,7 +701,9 @@ mod tests {
     #[test]
     fn the_app_receives_its_own_path_and_its_own_host() {
         let (addr, handle) = serving(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nhi");
-        let response = forward_to(addr, &get("/app/notes/api/items")).unwrap();
+        let response = forward_to(addr, &get("/app/notes/api/items"))
+            .unwrap()
+            .complete();
         assert_eq!(response.status, 200);
 
         let seen = String::from_utf8(handle.join().unwrap()).unwrap();
@@ -410,7 +738,7 @@ mod tests {
     fn a_page_comes_back_with_its_base_and_a_redirect_with_its_prefix() {
         let answer = b"HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: 46\r\n\r\n<html><head></head><body>hi</body></html>      ";
         let (addr, _handle) = serving(answer);
-        let response = forward_to(addr, &get("/app/notes/")).unwrap();
+        let response = forward_to(addr, &get("/app/notes/")).unwrap().complete();
         let body = String::from_utf8(response.body.clone()).unwrap();
         assert!(body.contains("<base href=\"/app/notes/\">"), "{body}");
         assert_eq!(response.content_type, "text/html; charset=utf-8");
@@ -420,7 +748,9 @@ mod tests {
     fn a_redirect_comes_back_pointing_inside_the_app() {
         let answer = b"HTTP/1.1 302 Found\r\nlocation: /login\r\ncontent-length: 0\r\n\r\n";
         let (addr, _handle) = serving(answer);
-        let response = forward_to(addr, &get("/app/notes/private")).unwrap();
+        let response = forward_to(addr, &get("/app/notes/private"))
+            .unwrap()
+            .complete();
         assert_eq!(response.status, 302);
         assert!(
             response
@@ -438,7 +768,7 @@ mod tests {
         // What a Node or axum app does by default for a page it did not measure.
         let answer = b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\ncontent-type: text/plain\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
         let (addr, _handle) = serving(answer);
-        let response = forward_to(addr, &get("/app/notes/")).unwrap();
+        let response = forward_to(addr, &get("/app/notes/")).unwrap().complete();
         assert_eq!(response.body, b"hello world");
     }
 
@@ -446,7 +776,9 @@ mod tests {
     fn a_non_html_answer_is_handed_over_byte_for_byte() {
         let answer = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 12\r\n\r\n{\"items\":[]}";
         let (addr, _handle) = serving(answer);
-        let response = forward_to(addr, &get("/app/notes/api/items")).unwrap();
+        let response = forward_to(addr, &get("/app/notes/api/items"))
+            .unwrap()
+            .complete();
         assert_eq!(response.body, b"{\"items\":[]}");
         assert_eq!(response.content_type, "application/json");
     }
@@ -456,7 +788,8 @@ mod tests {
         let (addr, _handle) = serving(b"this is not a response");
         match forward_to(addr, &get("/app/notes/")) {
             Err(ForwardError::Malformed(_)) => {}
-            other => panic!("{other:?}"),
+            Ok(other) => panic!("{other:?}"),
+            Err(other) => panic!("expected a malformed answer, got {other}"),
         }
     }
 
@@ -471,7 +804,7 @@ mod tests {
         match forward(&target, &get("/app/notes/")) {
             Err(ForwardError::Connect { port: reported, .. }) => assert_eq!(reported, port),
             Err(other) => panic!("expected a connect failure, got {other}"),
-            Ok(response) => panic!("expected a connect failure, got {}", response.status),
+            Ok(other) => panic!("expected a connect failure, got {other:?}"),
         }
     }
 
@@ -481,5 +814,210 @@ mod tests {
         assert!(can_forward(Method::Head));
         assert!(!can_forward(Method::Post));
         assert!(!can_forward(Method::Delete));
+    }
+
+    #[test]
+    fn an_upgrade_is_recognised_from_both_headers() {
+        assert!(is_upgrade(&handshake("/app/notes/socket")));
+
+        // `Upgrade` alone is a hint, and a plain request is not one at all.
+        let mut hint = handshake("/app/notes/socket");
+        hint.headers.retain(|(name, _)| name != "connection");
+        assert!(!is_upgrade(&hint));
+
+        assert!(!is_upgrade(&get("/app/notes/socket")));
+    }
+
+    #[test]
+    fn the_handshake_carries_the_headers_the_app_needs_to_accept_it() {
+        // The rule this test exists for: hop-by-hop headers are stripped for an ordinary request
+        // and must survive for a handshake, because here they are the message.
+        let (addr, handle) = serving(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\r\n");
+        let request = handshake("/app/notes/socket");
+        let _ = forward_to(addr, &request);
+
+        let seen = String::from_utf8(handle.join().unwrap()).unwrap();
+        let lowered = seen.to_ascii_lowercase();
+        assert!(
+            lowered.contains("connection: keep-alive, upgrade"),
+            "{seen}"
+        );
+        assert!(lowered.contains("upgrade: websocket"), "{seen}");
+        // The key is compared lowercased on both sides: it is base64, and base64 is case-sensitive.
+        assert!(
+            lowered.contains(&"sec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==".to_ascii_lowercase()),
+            "{seen}"
+        );
+        assert!(lowered.contains("sec-websocket-version: 13"), "{seen}");
+        assert!(lowered.contains("origin: http://127.0.0.1:4270"), "{seen}");
+        // And the two things that must never happen to a handshake: being told to close, and the
+        // panel's own port arriving as Host.
+        assert!(!lowered.contains("connection: close"), "{seen}");
+        assert!(!lowered.contains("host: 127.0.0.1:4270"), "{seen}");
+    }
+
+    #[test]
+    fn an_upgrade_the_app_refuses_is_still_a_whole_answer() {
+        // A 400 to a handshake is an ordinary response, and the browser must see it.
+        let (addr, _handle) =
+            serving(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 5\r\n\r\nnope!");
+        let answer = forward_to(addr, &handshake("/app/notes/socket")).unwrap();
+        match answer {
+            Answer::Full(response) => {
+                assert_eq!(response.status, 400);
+                assert_eq!(response.body, b"nope!");
+            }
+            Answer::Stream(_) => panic!("a 400 was treated as a tunnel"),
+        }
+    }
+
+    /// An app that starts a stream and holds it open until it is told to finish.
+    fn streaming_app() -> (SocketAddr, mpsc::Sender<()>, thread::JoinHandle<Vec<u8>>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (finish, wait) = mpsc::channel::<()>();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let seen = read_head_of(&mut stream);
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                      transfer-encoding: chunked\r\n\r\n6\r\ndata:1\r\n\r\n",
+                )
+                .unwrap();
+            stream.flush().unwrap();
+            // Held open on purpose: this is what a real event stream does, and what the forward
+            // must not wait for.
+            let _ = wait.recv();
+            let _ = stream.write_all(b"0\r\n\r\n");
+            seen
+        });
+        (addr, finish, handle)
+    }
+
+    #[test]
+    fn a_streamed_answer_comes_back_before_the_stream_ends() {
+        let (addr, finish, handle) = streaming_app();
+
+        // The app is blocked until `finish` is sent, so an answer that arrives here is an answer
+        // that was not read to the end — which is the whole reason a stream is not a body.
+        let answer = forward_to_streaming(addr);
+
+        let stream = match answer {
+            Answer::Stream(stream) => stream,
+            Answer::Full(response) => panic!("an event stream was read whole: {response:?}"),
+        };
+        assert_eq!(stream.kind(), StreamKind::Events);
+        assert!(stream.head().starts_with(b"HTTP/1.1 200 OK\r\n"));
+        // The head's own framing is kept: it is the framing of everything after it.
+        assert!(String::from_utf8_lossy(stream.head())
+            .to_ascii_lowercase()
+            .contains("transfer-encoding: chunked"));
+
+        // Dropping the connection and the app's release together lets its thread end. What the
+        // bytes do once they are being copied is `a_tunnel_carries_bytes_in_both_directions`.
+        drop(stream);
+        drop(finish);
+        handle.join().unwrap();
+    }
+
+    /// The forward against a real app, through the same code path the server uses.
+    fn forward_to_streaming(addr: SocketAddr) -> Answer {
+        let target = Target::new("notes", addr.port());
+        forward(&target, &get("/app/notes/events")).unwrap()
+    }
+
+    #[test]
+    fn a_tunnel_carries_bytes_in_both_directions() {
+        // What an upgraded connection is: not one answer, but a conversation.
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let app_addr = listener.local_addr().unwrap();
+        let app = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut chunk = [0u8; 1024];
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) => return,
+                    Ok(count) => {
+                        // Echo, which is the smallest thing a frame protocol's tunnel must carry.
+                        let _ = stream.write_all(&chunk[..count]);
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+
+        let upstream = TcpStream::connect(app_addr).unwrap();
+        upstream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let stream = Stream::new(
+            upstream,
+            b"HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\n\r\n"
+                .to_vec(),
+            StreamKind::Upgrade,
+        );
+
+        let browser_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let browser_addr = browser_listener.local_addr().unwrap();
+        let mut server_side = TcpStream::connect(browser_addr).unwrap();
+        let (mut browser, _) = browser_listener.accept().unwrap();
+        browser
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+
+        let pump = thread::spawn(move || {
+            let _ = stream.pump(&mut server_side, false);
+        });
+
+        // The head arrives before anything is sent: the browser is told the upgrade happened.
+        let mut head = [0u8; 128];
+        let read = browser.read(&mut head).unwrap();
+        assert!(
+            String::from_utf8_lossy(&head[..read]).starts_with("HTTP/1.1 101"),
+            "{}",
+            String::from_utf8_lossy(&head[..read])
+        );
+
+        // And then the conversation: the browser's bytes reach the app and come back.
+        browser.write_all(b"frame-one").unwrap();
+        let mut echoed = [0u8; 9];
+        browser.read_exact(&mut echoed).unwrap();
+        assert_eq!(&echoed, b"frame-one");
+
+        // The browser leaving ends the tunnel: both directions stop, and the pump returns.
+        browser.shutdown(Shutdown::Both).unwrap();
+        pump.join().unwrap();
+        app.join().unwrap();
+    }
+
+    #[test]
+    fn a_head_only_tunnel_sends_the_head_and_no_frames() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let app_addr = listener.local_addr().unwrap();
+        let app = thread::spawn(move || {
+            let _ = listener.accept();
+        });
+
+        let upstream = TcpStream::connect(app_addr).unwrap();
+        let stream = Stream::new(
+            upstream,
+            b"HTTP/1.1 101 Switching Protocols\r\n\r\n".to_vec(),
+            StreamKind::Upgrade,
+        );
+
+        let browser_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let browser_addr = browser_listener.local_addr().unwrap();
+        let mut server_side = TcpStream::connect(browser_addr).unwrap();
+        let (mut browser, _) = browser_listener.accept().unwrap();
+        browser
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+
+        stream.pump(&mut server_side, true).unwrap();
+        let mut received = Vec::new();
+        browser.read_to_end(&mut received).unwrap();
+        assert_eq!(received, b"HTTP/1.1 101 Switching Protocols\r\n\r\n");
+        app.join().unwrap();
     }
 }
