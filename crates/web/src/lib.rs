@@ -610,6 +610,20 @@ mod tests {
     }
 
     #[test]
+    fn the_dialog_watches_the_route_that_reports_a_rebuild() {
+        // The dialog's own copy of the route, beside the panel's: both are strings on this side and
+        // verbs on the server's, so the only thing that can keep them equal is a line like this.
+        // `build` is the route a turn that changed the app leaves behind, and the dialog is what
+        // turns its answer into a reload.
+        assert!(
+            DIALOG_SCRIPT.contains("/build"),
+            "the dialog never asks whether the rebuild finished, so a turn that changed the app \
+             leaves the page showing the binary from before it"
+        );
+        assert!(DIALOG_SCRIPT.contains("location.reload()"));
+    }
+
+    #[test]
     fn the_script_calls_the_routes_the_server_has() {
         // Cheap guard against a script and a router drifting apart: every path the script fetches
         // is one this repository serves.

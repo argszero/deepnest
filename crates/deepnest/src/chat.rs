@@ -23,10 +23,13 @@
 //! - **The answer arrives whole.** `crate::model::Endpoint` says why: the HTTP adapter this build
 //!   ships sends a request and reads a response, and a streaming path would have to be a second
 //!   adapter. The turn is the same turn either way; what is missing is watching it being written.
-//! - **A writing turn does not rebuild the app.** The reply says `changed`, and building is
-//!   `POST /api/apps/<slug>/build` followed by `restart` — two routes that already exist. A build
-//!   inside this request would hold one HTTP connection for a minute of `bun install`, which is a
-//!   longer request than any browser waits for.
+//! - **A writing turn starts a rebuild, and does not wait for it.** The reply says `changed` and
+//!   the router enqueues the build ([`crate::rebuild`]); this function returns at once, because a
+//!   build inside the request would hold one HTTP connection for a minute of `bun install`, which
+//!   is a longer request than any browser waits for. What the person watches instead is the status
+//!   route the page polls, and what this turn is *told* is the previous build's failure —
+//!   [`build_note`] — so a turn after a broken build fixes the source instead of stacking code on
+//!   top of a tree that does not compile.
 //! - **An escalation request waits for the page that asked the question.** A call may carry
 //!   `request_mode` and `justification`; `crates/agent` puts that in front of whoever is attached as
 //!   its [`Approver`], and this module hands it [`crate::escalation::Requests::approver`]. So the
@@ -112,6 +115,8 @@ pub fn answer(
     slug: &Slug,
     message: &str,
     approver: Option<Arc<dyn Approver>>,
+    // Why the last rebuild failed, when it did: the agent's next turn is told before it writes.
+    build_note: Option<String>,
 ) -> Reply {
     if let Err(error) = manifest::load(app_dir) {
         return Reply::error(
@@ -174,6 +179,12 @@ pub fn answer(
         .with_skills(skills)
         .with_app_url(format!("/app/{slug}/")),
     );
+    // Appended rather than folded into the prompt template: what a build said is this app's own
+    // state, not a rule of the agent's, and the template is `crates/agent`'s to own.
+    let system = match build_note {
+        Some(note) => format!("{system}\n\n{note}"),
+        None => system,
+    };
 
     // One flag shared with every tool: the loop owns the turn, so what a tool touched is recorded
     // where the tools run and read where the answer is assembled.
@@ -366,6 +377,7 @@ mod tests {
             &scratch.slug(),
             "what is on the list?",
             None,
+            None,
         );
         assert_eq!(reply.status, 200, "{}", reply.body);
         assert_eq!(reply.body["text"], "Bread, milk.");
@@ -415,6 +427,7 @@ mod tests {
             &scratch.slug(),
             "write the list",
             None,
+            None,
         );
         assert_eq!(reply.status, 200, "{}", reply.body);
         assert_eq!(reply.body["changed"], true, "{}", reply.body);
@@ -439,6 +452,7 @@ mod tests {
             &Scratch::slug_of("stray"),
             "hello",
             None,
+            None,
         );
         assert_eq!(reply.status, 404, "{}", reply.body);
         assert!(
@@ -461,6 +475,7 @@ mod tests {
             &scratch.app_dir(),
             &scratch.slug(),
             "something the provider will not answer",
+            None,
             None,
         );
         // The loop reads a refusal as an answer about the content and stops, and the route reports
@@ -493,6 +508,7 @@ mod tests {
             &scratch.app_dir(),
             &scratch.slug(),
             "hello",
+            None,
             None,
         );
 

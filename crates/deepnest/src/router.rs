@@ -59,6 +59,7 @@ use crate::escalation;
 use crate::grant;
 use crate::http::{Method, Request, Response};
 use crate::model::Endpoint;
+use crate::rebuild;
 use crate::token::Token;
 
 /// What the router needs in order to make an app real: the supervisor that owns its process, the
@@ -81,17 +82,29 @@ pub struct Lifecycle {
     /// that happens to have a compiler, and on one that does not.
     pub preflight: Arc<dyn Probe>,
     pub home: PathBuf,
+    /// The rebuild queue: what a writing turn starts, and what the page polls until the app serves
+    /// the change. Held here because it outlives any one request — a queue rebuilt per request
+    /// would forget the build that is already running and start a second one beside it.
+    pub rebuild: Arc<rebuild::Rebuilder>,
 }
 
 impl Lifecycle {
     /// The lifecycle the binary uses: the real supervisor and the real build runner.
     pub fn new(supervisor: Arc<Supervisor>, home: impl Into<PathBuf>) -> Self {
+        let home = home.into();
+        let builder: Arc<dyn Runner> = Arc::new(StdRunner::new());
         Self {
+            rebuild: Arc::new(rebuild::Rebuilder::new(
+                Arc::clone(&supervisor),
+                Arc::clone(&builder),
+                deepnest_apps::apps_dir(&home),
+                home.clone(),
+            )),
             supervisor,
-            builder: Arc::new(StdRunner::new()),
+            builder,
             forwarder: Arc::new(StdForwarder),
             preflight: Arc::new(StdProbe),
-            home: home.into(),
+            home,
         }
     }
 
@@ -102,7 +115,17 @@ impl Lifecycle {
     }
 
     /// The same lifecycle with a different build runner.
+    ///
+    /// The queue is rebuilt with it: a runner swapped into the lifecycle but not into the thing
+    /// that builds after a turn would answer the panel's button with one toolchain and a writing
+    /// turn with another, and the test that chose a fake would then measure the real one.
     pub fn with_builder(mut self, builder: Arc<dyn Runner>) -> Self {
+        self.rebuild = Arc::new(rebuild::Rebuilder::new(
+            Arc::clone(&self.supervisor),
+            Arc::clone(&builder),
+            deepnest_apps::apps_dir(&self.home),
+            self.home.clone(),
+        ));
         self.builder = builder;
         self
     }
@@ -386,6 +409,13 @@ impl Router {
     /// not the config. The value must also have been minted for *this* action, so the cookie that
     /// sends a message cannot answer a widening request.
     fn grant_admits(&self, request: &Request) -> bool {
+        // A grant opens the verb the page needs and not the route in every verb it has. `build`
+        // is the one route whose other verb spends a compiler: the dialog watches the rebuild a
+        // turn started, and starting one is the panel's, behind the token.
+        if request.path.ends_with(&format!("/{}", rebuild::ACTION)) && request.method != Method::Get
+        {
+            return false;
+        }
         let Some(rest) = request.path.strip_prefix("/api/apps/") else {
             return false;
         };
@@ -418,12 +448,13 @@ impl Router {
             return response;
         }
         // One cookie per route the dialog may reach, and a value per cookie: the capability to
-        // send a message must not be the capability to approve a widening. Both are minted here,
-        // because serving the page is the moment this server can tell "this browser loaded the app
-        // from here" from "something else on this machine asked".
+        // send a message must not be the capability to approve a widening, or to watch a build.
+        // All three are minted here, because serving the page is the moment this server can tell
+        // "this browser loaded the app from here" from "something else on this machine asked".
         let mut response = response;
-        for action in [chat::ACTION, escalation::ACTION] {
-            let name = grant::cookie_name(action).expect("both routes have a cookie");
+        for action in [chat::ACTION, escalation::ACTION, rebuild::ACTION] {
+            let name =
+                grant::cookie_name(action).expect("every route the dialog may reach has one");
             let presented = grant::presented(request, name)
                 .is_some_and(|value| self.grants.admits(slug.as_str(), action, value));
             // A page that already presents a grant it can still use keeps it — minting again on
@@ -850,7 +881,11 @@ impl Router {
         // change behind `GET` is one a browser may make by prefetching a link, and a `405` naming
         // the method is what stops a client guessing. `escalation` is exempt because half of it is
         // a read: a page polls it for the question it is meant to answer.
-        if request.method != Method::Post && action != Action::Escalation {
+        // `build` is exempt in `GET` for the same reason `escalation` is: half of it is a read.
+        // `POST` builds now and answers when the build is over; `GET` reports what the rebuild a
+        // writing turn started is doing, which is what the page polls without holding anything.
+        let build_status_read = action == Action::Build && request.method == Method::Get;
+        if request.method != Method::Post && action != Action::Escalation && !build_status_read {
             // `chat` is the one verb here that does not change a process, so it is the one that
             // must not claim to: what a caller needs to know is the method, and the wording only
             // has to be true.
@@ -967,7 +1002,13 @@ impl Router {
                 let log = deepnest_apps::log_path(&lifecycle.home, &slug);
                 started(&slug, lifecycle.supervisor.restart(&slug, &dir, log))
             }
-            Action::Chat => self.chat(&request.body, &dir, &slug, &lifecycle.home),
+            Action::Chat => self.chat(&request.body, &dir, &slug, lifecycle),
+            Action::Build if request.method == Method::Get => {
+                // The same route read rather than run: what the page polls after a turn reported
+                // `changed`, so it can say "building" and then reload onto the new binary — or show
+                // the compiler's last lines when there is no new binary to reload onto.
+                Response::json(200, lifecycle.rebuild.status(&slug).body(&slug).to_string())
+            }
             Action::Build => {
                 // The README's promise, kept before the first step instead of discovered by a
                 // compiler: `crates/apps` reports a step whose program will not start, and that
@@ -1117,7 +1158,7 @@ impl Router {
     /// response. The model is built per request rather than held: `POST /api/config` can change the
     /// endpoint at any moment, and an agent assembled at startup would answer the old one until the
     /// next start.
-    fn chat(&self, body: &[u8], dir: &Path, slug: &Slug, home: &Path) -> Response {
+    fn chat(&self, body: &[u8], dir: &Path, slug: &Slug, lifecycle: &Lifecycle) -> Response {
         let message = match chat::message_from(body) {
             Ok(message) => message,
             Err(reason) => return Response::json(400, error_body(&reason)),
@@ -1163,12 +1204,16 @@ impl Router {
         // turn is the one `GET`/`POST .../escalation` reads and answers on another connection.
         let reply = chat::answer(
             model,
-            home,
+            &lifecycle.home,
             dir,
             slug,
             &message,
             Some(self.requests.approver(slug.as_str())),
+            // A build that failed last time is part of what the model must know before it writes
+            // again: without it the next turn adds code on top of a tree that does not compile.
+            lifecycle.rebuild.note(slug),
         );
+        starts_a_rebuild_if_the_app_changed(&reply.body, &lifecycle.rebuild, slug);
         Response::json(reply.status, reply.body.to_string())
     }
 
@@ -1207,7 +1252,7 @@ impl Action {
     fn parse(text: &str) -> Option<Self> {
         match text {
             "create" => Some(Self::Create),
-            "build" => Some(Self::Build),
+            rebuild::ACTION => Some(Self::Build),
             "start" => Some(Self::Start),
             "stop" => Some(Self::Stop),
             "restart" => Some(Self::Restart),
@@ -1328,6 +1373,25 @@ fn state_body(slug: &Slug, state: &State) -> Response {
 
 fn error_body(message: &str) -> String {
     json!({ "error": message }).to_string()
+}
+
+/// Whether this turn starts a rebuild — the seam between a turn and a build.
+///
+/// A function rather than two lines inside [`Router::chat`] because this is the rule the whole
+/// loop turns on, and a rule buried in a sixty-line route is a rule no test reaches without a live
+/// model. The turn returns now and the build happens on its own thread: holding one connection for
+/// a minute of `bun install` is a request longer than any browser waits for, which is why the
+/// rebuild was a second button until now.
+fn starts_a_rebuild_if_the_app_changed(
+    body: &Value,
+    rebuild: &Arc<rebuild::Rebuilder>,
+    slug: &Slug,
+) -> bool {
+    if body["changed"] != Value::Bool(true) {
+        return false;
+    }
+    rebuild.enqueue(slug);
+    true
 }
 
 /// The one answer for a `/api/` request that does not carry the token.
@@ -3032,8 +3096,8 @@ mod tests {
         crate::http::read(&mut reader).unwrap()
     }
 
-    /// The same page, returning both capabilities the dialog holds.
-    fn app_page_with_grants(scratch: &Scratch, slug: &str) -> (Router, String, String) {
+    /// The same page, returning every capability the dialog holds.
+    fn app_page_with_grants(scratch: &Scratch, slug: &str) -> (Router, String, String, String) {
         let router = supervised_forwarding(scratch, RecordingForwarder::answering(200)).0;
         let started = router
             .respond(&post(&format!("/api/apps/{slug}/start")))
@@ -3046,7 +3110,7 @@ mod tests {
         let cookies = set_cookies(&page);
         assert_eq!(
             cookies.len(),
-            2,
+            3,
             "a page carries one cookie per route: {cookies:?}"
         );
         let chat = cookies
@@ -3059,8 +3123,23 @@ mod tests {
             .find(|raw| raw.starts_with("deepnest-escalation="))
             .expect("the question cookie")
             .clone();
+        let build = cookies
+            .iter()
+            .find(|raw| raw.starts_with("deepnest-build="))
+            .expect("the build-status cookie")
+            .clone();
         assert_ne!(chat, escalation, "one value must not open both routes");
-        (router, grant_value(&chat), grant_value(&escalation))
+        assert_ne!(
+            build, chat,
+            "nor is watching a build the same value as sending one"
+        );
+        assert_ne!(build, escalation, "nor is it the capability to approve");
+        (
+            router,
+            grant_value(&chat),
+            grant_value(&escalation),
+            grant_value(&build),
+        )
     }
 
     /// A `POST` that carries a cookie and a real message body instead of the token.
@@ -3197,10 +3276,11 @@ mod tests {
         // second tab is already using.
         let scratch = Scratch::new("grant-reload");
         scratch.built_app("notes", "Notes");
-        let (router, chat, escalation) = app_page_with_grants(&scratch, "notes");
+        let (router, chat, escalation, build) = app_page_with_grants(&scratch, "notes");
         let again = parse(&format!(
             "GET /app/notes/ HTTP/1.1\r\nHost: 127.0.0.1:4270\r\n\
-             Cookie: deepnest-chat={chat}; deepnest-escalation={escalation}\r\n\r\n"
+             Cookie: deepnest-chat={chat}; deepnest-escalation={escalation}; \
+             deepnest-build={build}\r\n\r\n"
         ))
         .unwrap();
         let reloaded = router.respond(&again).complete();
@@ -3214,10 +3294,10 @@ mod tests {
 
     #[test]
     fn a_page_holding_one_capability_is_given_the_other_and_keeps_the_one_it_has() {
-        // The two are separate values, so a page that has only one is missing exactly one.
+        // The values are separate, so a page that has only one is given exactly the other two.
         let scratch = Scratch::new("grant-half");
         scratch.built_app("notes", "Notes");
-        let (router, chat, _) = app_page_with_grants(&scratch, "notes");
+        let (router, chat, _, _) = app_page_with_grants(&scratch, "notes");
         let again = parse(&format!(
             "GET /app/notes/ HTTP/1.1\r\nHost: 127.0.0.1:4270\r\n\
              Cookie: deepnest-chat={chat}\r\n\r\n"
@@ -3225,13 +3305,23 @@ mod tests {
         .unwrap();
         let reloaded = router.respond(&again).complete();
         let minted = set_cookies(&reloaded);
-        assert_eq!(minted.len(), 1, "{minted:?}");
+        assert_eq!(minted.len(), 2, "{minted:?}");
         assert!(
-            minted[0].starts_with("deepnest-escalation="),
-            "{}",
-            minted[0]
+            minted
+                .iter()
+                .any(|raw| raw.starts_with("deepnest-escalation=")),
+            "{minted:?}"
         );
-        assert!(!minted[0].contains("deepnest-chat="), "{}", minted[0]);
+        assert!(
+            minted.iter().any(|raw| raw.starts_with("deepnest-build=")),
+            "{minted:?}"
+        );
+        assert!(
+            !minted
+                .iter()
+                .any(|raw| raw.contains(&format!("deepnest-chat={chat}"))),
+            "the capability it already held was handed back to it: {minted:?}"
+        );
     }
 
     #[test]
@@ -3246,7 +3336,7 @@ mod tests {
             .complete();
 
         let cookies = set_cookies(&page);
-        assert_eq!(cookies.len(), 2, "{cookies:?}");
+        assert_eq!(cookies.len(), 3, "{cookies:?}");
         let chat = cookies
             .iter()
             .find(|raw| raw.starts_with("deepnest-chat="))
@@ -3255,15 +3345,105 @@ mod tests {
             .iter()
             .find(|raw| raw.starts_with("deepnest-escalation="))
             .expect("the question cookie");
-        // Each names its own route and nothing wider, and neither names the other's.
+        let build = cookies
+            .iter()
+            .find(|raw| raw.starts_with("deepnest-build="))
+            .expect("the build-status cookie");
+        // Each names its own route and nothing wider, and none names another's.
         assert!(chat.contains("Path=/api/apps/notes/chat"), "{chat}");
         assert!(!chat.contains("/escalation"), "{chat}");
+        assert!(!chat.contains("/build"), "{chat}");
         assert!(
             escalation.contains("Path=/api/apps/notes/escalation"),
             "{escalation}"
         );
         assert!(!escalation.contains("/chat"), "{escalation}");
+        assert!(!escalation.contains("/build"), "{escalation}");
+        assert!(build.contains("Path=/api/apps/notes/build"), "{build}");
+        assert!(!build.contains("/chat"), "{build}");
+        assert!(!build.contains("/escalation"), "{build}");
         assert_ne!(grant_value(chat), grant_value(escalation));
+        assert_ne!(grant_value(build), grant_value(chat));
+        assert_ne!(grant_value(build), grant_value(escalation));
+    }
+
+    #[test]
+    fn a_turn_that_changed_the_app_starts_a_rebuild_and_a_turn_that_only_read_does_not() {
+        // The seam the whole loop turns on, and the one a live model would be needed to reach
+        // through the route: what a turn did is its `changed` flag, and what that flag means is
+        // here.
+        let scratch = Scratch::new("changed-starts-a-build");
+        scratch.built_app("notes", "Notes");
+        let router = supervised_with(&scratch, Arc::new(FakeBuilder::succeeds()));
+        let lifecycle = router.lifecycle.as_ref().expect("this test built one");
+        let slug = Slug::parse("notes").unwrap();
+
+        assert!(!starts_a_rebuild_if_the_app_changed(
+            &json!({ "changed": false }),
+            &lifecycle.rebuild,
+            &slug,
+        ));
+        assert_eq!(
+            lifecycle.rebuild.status(&slug),
+            rebuild::Status::Idle,
+            "a turn that only read the app must not start a compiler"
+        );
+
+        assert!(starts_a_rebuild_if_the_app_changed(
+            &json!({ "changed": true }),
+            &lifecycle.rebuild,
+            &slug,
+        ));
+        assert_ne!(
+            lifecycle.rebuild.status(&slug),
+            rebuild::Status::Idle,
+            "a turn that wrote to the app left nothing building"
+        );
+    }
+
+    #[test]
+    fn the_page_can_watch_a_build_and_cannot_start_one() {
+        let scratch = Scratch::new("build-status");
+        scratch.built_app("notes", "Notes");
+        let (router, _, _, build) = app_page_with_grants(&scratch, "notes");
+        let path = "/api/apps/notes/build";
+
+        // The route is not open to a page that presents nothing, and it is not open to the
+        // capability that sends messages either.
+        let bare = router.respond(&get(path, "127.0.0.1:4270")).complete();
+        assert_eq!(bare.status, 401, "{:?}", bare);
+
+        // With its own cookie it answers, and what it answers before anything asked for a build is
+        // `idle` rather than a guess about a build that never ran.
+        let read = router
+            .respond(&with_named_grant("GET", path, grant::BUILD_COOKIE, &build))
+            .complete();
+        assert_eq!(read.status, 200, "{}", body(&read));
+        assert!(
+            body(&read).contains("\"state\":\"idle\""),
+            "{}",
+            body(&read)
+        );
+
+        // The same cookie does not spend a compiler: watching a build and starting one are
+        // different capabilities, and the second stays behind the token.
+        let start = router
+            .respond(&with_named_grant("POST", path, grant::BUILD_COOKIE, &build))
+            .complete();
+        assert_eq!(start.status, 401, "{:?}", start);
+
+        // The token opens it too, as it opens every route: the cookie is a narrowing, not a second
+        // door that replaces the first.
+        let with_token = router
+            .respond(
+                &parse(&format!(
+                    "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:4270\r\nauthorization: bearer {}\r\n\r\n",
+                    "a".repeat(64)
+                ))
+                .unwrap(),
+            )
+            .complete();
+        assert_eq!(with_token.status, 200, "{:?}", with_token);
     }
 
     #[test]
@@ -3272,7 +3452,7 @@ mod tests {
         // not be able to answer its own widening request with the same cookie.
         let scratch = Scratch::new("escalation-scope");
         scratch.built_app("notes", "Notes");
-        let (router, chat, escalation) = app_page_with_grants(&scratch, "notes");
+        let (router, chat, escalation, _) = app_page_with_grants(&scratch, "notes");
 
         let path = "/api/apps/notes/escalation";
         let wrong = router
@@ -3312,7 +3492,7 @@ mod tests {
     fn an_answer_with_no_question_waiting_is_a_conflict_and_not_a_success() {
         let scratch = Scratch::new("escalation-idle");
         scratch.built_app("notes", "Notes");
-        let (router, _, escalation) = app_page_with_grants(&scratch, "notes");
+        let (router, _, escalation, _) = app_page_with_grants(&scratch, "notes");
         let answered = router
             .respond(&post_named_grant(
                 "/api/apps/notes/escalation",
@@ -3335,7 +3515,7 @@ mod tests {
     fn a_body_that_does_not_name_an_answer_is_refused_rather_than_read_as_a_no() {
         let scratch = Scratch::new("escalation-body");
         scratch.built_app("notes", "Notes");
-        let (router, _, escalation) = app_page_with_grants(&scratch, "notes");
+        let (router, _, escalation, _) = app_page_with_grants(&scratch, "notes");
         let post = |body: &str| {
             router
                 .respond(&post_named_grant(
@@ -3368,7 +3548,7 @@ mod tests {
     fn escalation_reads_with_get_and_answers_with_post() {
         let scratch = Scratch::new("escalation-method");
         scratch.built_app("notes", "Notes");
-        let (router, _, escalation) = app_page_with_grants(&scratch, "notes");
+        let (router, _, escalation, _) = app_page_with_grants(&scratch, "notes");
         let response = router
             .respond(&with_named_grant(
                 "DELETE",
@@ -3395,7 +3575,7 @@ mod tests {
         // which is blocked inside a turn in the real thing — wakes with the person's answer.
         let scratch = Scratch::new("escalation-roundtrip");
         scratch.built_app("notes", "Notes");
-        let (router, _, escalation) = app_page_with_grants(&scratch, "notes");
+        let (router, _, escalation, _) = app_page_with_grants(&scratch, "notes");
         let path = "/api/apps/notes/escalation";
 
         let approver = router.requests.approver("notes");

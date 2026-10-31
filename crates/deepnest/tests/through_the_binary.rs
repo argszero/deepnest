@@ -404,7 +404,38 @@ fn an_app_is_served_through_the_door_the_way_a_browser_sees_it() {
         "the refusal did not say what is allowed: {answer}"
     );
 
-    // 7. A second start leaves this one alone: it says where the first one is and exits. This is
+    // 7. The build route the dialog polls, as far as a door with no model can be asked it: what it
+    //    says before anything asked for a build, and what a build that cannot run does to the app.
+    //    The rebuild a *writing turn* starts is past this test's reach — a turn needs a model, and
+    //    this install has none — so what is checked here is that the route is wired through the
+    //    door at all, and that a failed build is a report rather than a dead app.
+    let before = install.call("GET", "/api/apps/notes/build");
+    assert!(
+        before.starts_with("HTTP/1.1 200"),
+        "the build-status route did not answer: {before}"
+    );
+    assert!(
+        before.contains("\"state\":\"idle\""),
+        "a status route that has not seen a build must say so: {before}"
+    );
+    let ran = install.call("POST", "/api/apps/notes/build");
+    assert!(
+        !ran.starts_with("HTTP/1.1 200"),
+        "an app with no front end and no Cargo.toml cannot have built: {ran}"
+    );
+    // The log is what the person is shown when a build fails, so it has to be there.
+    let build_log = install.home.join("logs").join("notes.build.log");
+    assert!(
+        build_log.is_file(),
+        "the failed build left no log at {}",
+        build_log.display()
+    );
+    assert!(
+        install.get("/app/notes/").starts_with("HTTP/1.1 200"),
+        "a failed build took the app down with it"
+    );
+
+    // 8. A second start leaves this one alone: it says where the first one is and exits. This is
     //    also the branch that hands that address to the browser — a second double-click is a person
     //    asking for the page that is already being served — which is why it must not disturb it.
     //    `--no-open` keeps the assertion to what can be seen here: the address it prints.

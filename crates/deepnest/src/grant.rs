@@ -9,18 +9,20 @@
 //!
 //! So the capability is narrowed instead of the token being handed over. When this server answers
 //! an app's page it mints values and sets them as cookies, **one cookie per route**: that app's
-//! chat route, and its escalation route (where a request is read and answered). Six properties,
+//! chat route, its escalation route (where a request is read and answered), and its build status
+//! (what the dialog polls after a turn changed the app). Six properties,
 //! each of which is load-bearing rather than decorative:
 //!
 //! - **Random, from the operating system's CSPRNG, and remembered here.** Not derived from the
 //!   token: a derivation would need a hash this crate does not have and should not hand-roll, and
 //!   remembering the value costs a `HashMap` entry. It also means the value cannot outlive the
 //!   process that minted it.
-//! - **`Path=/api/apps/<slug>/chat`, and `/api/apps/<slug>/escalation`.** The browser, not this
-//!   code, is what confines it: neither cookie is ever sent to `/api/config`, to another app, or to
-//!   the panel's own API. Two cookies rather than one over a shared prefix, because a prefix would
-//!   send the message-sending value to the route that answers a widening request — and the value
-//!   that approves an escalation must not be one an app can spend by sending a message.
+//! - **`Path=/api/apps/<slug>/chat`, `/api/apps/<slug>/escalation`, `/api/apps/<slug>/build`.** The
+//!   browser, not this code, is what confines it: no cookie is ever sent to `/api/config`, to
+//!   another app, or to the panel's own API. One cookie per route rather than one over a shared
+//!   prefix, because a prefix would send the message-sending value to the route that answers a
+//!   widening request — and the value that approves an escalation must not be one an app can spend
+//!   by sending a message, or by watching a build.
 //! - **A value names one route as well as one app.** The store records both, so a value minted for
 //!   one route is refused by the other even if a page presents it there.
 //! - **`SameSite=Strict`.** Without it a page on another origin could make the request — it cannot
@@ -63,6 +65,14 @@ pub const COOKIE: &str = "deepnest-chat";
 /// may do without the token, and neither should be usable as the other.
 pub const ESCALATION_COOKIE: &str = "deepnest-escalation";
 
+/// The cookie that opens an app's build status.
+///
+/// The one a page polls after a turn changed the app, so the dialog can say what the build is
+/// doing and reload onto the new binary. It is also the one whose route has a second verb: the
+/// router refuses the `POST` that starts a build on this cookie, because watching a build and
+/// spending a compiler are different capabilities.
+pub const BUILD_COOKIE: &str = "deepnest-build";
+
 /// How long a minted value stays usable.
 ///
 /// Long enough for a day's work in one tab, short enough that a value lifted out of a browser
@@ -87,6 +97,7 @@ pub fn cookie_name(action: &str) -> Option<&'static str> {
     match action {
         crate::chat::ACTION => Some(COOKIE),
         crate::escalation::ACTION => Some(ESCALATION_COOKIE),
+        crate::rebuild::ACTION => Some(BUILD_COOKIE),
         _ => None,
     }
 }
@@ -315,14 +326,14 @@ mod tests {
     }
 
     #[test]
-    fn only_the_two_routes_there_are_two_cookies_for_are_opened_by_one() {
+    fn only_the_routes_the_dialog_reaches_are_opened_by_a_cookie() {
         assert_eq!(cookie_name("chat"), Some(COOKIE));
         assert_eq!(cookie_name("escalation"), Some(ESCALATION_COOKIE));
+        assert_eq!(cookie_name("build"), Some(BUILD_COOKIE));
         // The verbs that change a process stay behind the token, and so does anything added later
         // without a line here.
         assert_eq!(cookie_name("start"), None);
         assert_eq!(cookie_name("stop"), None);
-        assert_eq!(cookie_name("build"), None);
         assert_eq!(cookie_name("create"), None);
         assert_eq!(cookie_name("restart"), None);
     }

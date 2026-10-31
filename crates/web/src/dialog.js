@@ -9,12 +9,13 @@
 // 1. **It never holds the control token.** The app's own script shares this origin, so a token
 //    written into this page is a token the app can read and spend — and the control token spends
 //    on every route there is.
-// 2. **It calls two routes and brings no credential of its own**: `POST /api/apps/<slug>/chat`, and
+// 2. **It calls three routes and brings no credential of its own**: `POST /api/apps/<slug>/chat`,
 //    `GET`/`POST /api/apps/<slug>/escalation` — the second is how a widening request reaches the
-//    person in front of the page. For each, the browser attaches a cookie the server minted when it
-//    served this page, scoped to that one path, and the two are different values. So the box works
-//    on a page whose app is stopped or mid-rewrite, and a page that cannot present that cookie gets
-//    a `401` and says so instead of failing silently.
+//    person in front of the page — and `GET /api/apps/<slug>/build`, which is what a turn that
+//    changed the app leaves behind to be watched. For each, the browser attaches a cookie the
+//    server minted when it served this page, scoped to that one path, and all three are different
+//    values. So the box works on a page whose app is stopped or mid-rewrite, and a page that
+//    cannot present that cookie gets a `401` and says so instead of failing silently.
 //
 // The residual, stated where it is made rather than left implied: the app's own script can make
 // that same request, so an app can spend its own agent turns. It cannot spend another app's, reach
@@ -221,6 +222,63 @@
       });
   }
 
+  // The build route, and the end of the turn's sentence. The turn said `changed` and returned; a
+  // build started on a thread of the server's own. `ok` means a new binary is serving, which is
+  // this page's cue to reload onto it; `failed` carries the compiler's last lines, because "it did
+  // not work" without them leaves a person with nothing to say next.
+  var REBUILD_PATIENCE = 5 * 60 * 1000;
+
+  function watchTheRebuild() {
+    watch(routeFor("build"), REBUILD_PATIENCE, Date.now());
+  }
+
+  function routeFor(action) {
+    return "/api/apps/" + encodeURIComponent(slug) + "/" + action;
+  }
+
+  function watch(route, patience, started) {
+    fetch(route, { credentials: "same-origin" })
+      .then(function (response) {
+        return response.ok ? response.json() : null;
+      })
+      .then(function (body) {
+        // No answer — a `401` after the cookie expired, or a server that went away. The next tick
+        // asks again, and past the patience the line below says so rather than waiting forever.
+        if (body) {
+          if (body.state === "ok") {
+            location.reload();
+            return;
+          }
+          if (body.state === "failed") {
+            say(
+              "The build failed, so the app is still running what it ran before." +
+                (body.detail ? "\n\n" + body.detail : ""),
+              true
+            );
+            return;
+          }
+          if (body.state === "building") {
+            say("Rebuilding…", false);
+          }
+        }
+        if (Date.now() - started > patience) {
+          say("The rebuild is taking longer than a build should — open the control panel to see why.", true);
+          return;
+        }
+        setTimeout(function () {
+          watch(route, patience, started);
+        }, 700);
+      })
+      .catch(function () {
+        if (Date.now() - started > patience) {
+          return;
+        }
+        setTimeout(function () {
+          watch(route, patience, started);
+        }, 700);
+      });
+  }
+
   function startPolling() {
     if (polling !== null) {
       return;
@@ -312,10 +370,16 @@
         if (result.status === 200 && result.body && typeof result.body.text === "string") {
           var text = result.body.text;
           if (result.body.changed) {
-            text += "\n\nThis changed the app — reload to see it.";
+            // The turn came back as soon as it had written; the build it started is still running.
+            // Saying "reload to see it" was the whole defect — nothing had been built to see — so
+            // the line names what is happening and `watchTheRebuild` finishes the sentence.
+            text += "\n\nThis changed the app — rebuilding it now.";
           }
           input.value = "";
           say(text, false);
+          if (result.body.changed) {
+            watchTheRebuild();
+          }
           return;
         }
         if (result.status === 401) {
