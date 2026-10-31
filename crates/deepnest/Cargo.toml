@@ -12,6 +12,10 @@ name = "deepnest"
 path = "src/main.rs"
 
 [dependencies]
+# A stop request, on all three platforms: one call installs SIGINT/SIGTERM/SIGHUP on unix and a
+# console control handler on Windows. `termination` is the feature that adds the last two signals —
+# without it a `kill` would still end the process with its apps running.
+ctrlc = { version = "3", features = ["termination"] }
 deepnest-agent = { path = "../agent" }
 deepnest-apps = { path = "../apps" }
 deepnest-gateway = { path = "../gateway" }

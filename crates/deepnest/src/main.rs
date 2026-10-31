@@ -17,23 +17,22 @@
 //! start — the panel is this program's whole interface and the address is printed either way.
 //!
 //! The one piece of state this process owns beyond the port is the **supervisor**: the apps it
-//! started. It is built here and lives as long as the process, and it is deliberately *not* run
-//! down on the way out, because there is no way out to run it down on — this process waits on a
-//! park and ends by signal, so there is no point at which `stop_all` could be called before the
-//! operating system ends everything at once. An app that outlives a killed deepnest is therefore
-//! reachable only by pid for now; the shutdown path that would close it is `crates/gateway`'s,
-//! together with the real server loop. Saying that here is better than a `Drop` that suggests a
-//! clean exit this build does not have.
+//! started. It is built here, it lives as long as the process, and it is **run down on the way
+//! out**: a stop request sets a flag ([`deepnest::stop`]), and the thread that waited on that flag
+//! stops the listener and then every app, in that order, because requests are what start apps. So
+//! nothing this process started outlives it — unless it is killed with `SIGKILL`, which no handler
+//! can hear, and that is said rather than discovered. The sequence is this crate's, beside the
+//! supervisor it runs down: the gateway serves the door and knows nothing about apps.
 
 use std::io::Write;
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::thread;
 
 use deepnest::config::{self, ConfigError};
 use deepnest::open::{Desktop, Opening};
 use deepnest::router::Lifecycle;
-use deepnest::server::{self, BindError, ServerOptions, StartError};
+use deepnest::server::{self, BindError, Server, ServerOptions, StartError};
+use deepnest::stop;
 use deepnest::token::{self, TokenError};
 use deepnest::{home, prepare_home};
 
@@ -166,6 +165,18 @@ fn serve(opening: Opening) -> Result<(), Failure> {
     // directory, and the listing reports that as "none yet" rather than as a fault.
     let apps_dir = deepnest_apps::apps_dir(&home);
 
+    // The supervisor and the listener are the two things a stop has to run down, so the request is
+    // listened for before either exists: a Ctrl-C that arrives while the port is being taken must
+    // not end the process with an app already running behind it. A process that cannot listen is
+    // still a process worth starting — the panel is this program's whole interface — so this is one
+    // line and not a failed start; what it costs is the ending this build had before: the operating
+    // system ends everything at once, apps included.
+    if let Err(error) = stop::listen() {
+        eprintln!(
+            "deepnest: {error} — a stop request will end the process with its apps still running"
+        );
+    }
+
     // The supervisor owns every app process this run starts. Built before the port is taken so
     // that a refused second instance has started nothing, and shared rather than moved because
     // the HTTP worker answers state questions from another thread.
@@ -243,11 +254,44 @@ fn serve(opening: Opening) -> Result<(), Failure> {
     // `server::start` returned above, so the page a browser lands on is served rather than raced.
     report(opening.show(&Desktop, &running.url()), &running.url());
 
-    // The listener runs on its own thread; this one waits for the process to be ended. There is
-    // no shutdown flag to set from outside: an interrupt ends the process, and the operating
-    // system releases the port — which is the same admission the next start relies on.
-    loop {
-        thread::park();
+    // The listener runs on its own thread; this one waits for the process to be asked to stop. The
+    // wait is a poll of a flag, because a signal handler may not do more than record the request —
+    // what it means is decided here, where taking a lock and joining a thread are allowed.
+    stop::wait();
+
+    // One line, because the terminal that pressed Ctrl-C is the only place anyone can see that the
+    // request was heard: without it a stop that works and a crash look the same from outside.
+    eprintln!("deepnest: stopping");
+
+    // The listener first, then the apps: requests are what start apps, so the other order races a
+    // request that has just started one. Afterwards the port is free and nothing this run started
+    // is still running, so exiting `0` is the truth rather than a claim.
+    stop::run_down(&mut Running {
+        server: Some(running),
+        supervisor,
+    });
+    Ok(())
+}
+
+/// What this process has to run down on the way out, in the order [`stop::run_down`] runs it down.
+///
+/// The listener is held as an `Option` because `Server::shutdown` consumes the server — "stopped"
+/// is a state it cannot be used from again, which is the right type for it — and a [`stop::Rundown`]
+/// is called through `&mut self`.
+struct Running {
+    server: Option<Server>,
+    supervisor: Arc<deepnest_apps::Supervisor>,
+}
+
+impl stop::Rundown for Running {
+    fn stop_serving(&mut self) {
+        if let Some(server) = self.server.take() {
+            server.shutdown();
+        }
+    }
+
+    fn stop_apps(&self) {
+        self.supervisor.stop_all();
     }
 }
 
@@ -350,5 +394,29 @@ mod tests {
         // reading the source.
         assert!(USAGE.contains("--no-open"), "{USAGE}");
         assert!(USAGE.contains("open"), "{USAGE}");
+    }
+
+    #[test]
+    fn a_stop_gives_the_port_back() {
+        // What the next start depends on: the bind is the admission, so a stop that left the port
+        // taken would make a restart report "already running" about a process that is gone. This is
+        // the listener's half; the apps' half is `stop`'s own order test plus the end-to-end run,
+        // which is the only place a real app process can be watched dying with its supervisor.
+        let server = deepnest::server::start(ServerOptions {
+            port: 0,
+            ..Default::default()
+        })
+        .expect("a server on a port the operating system chooses");
+        let addr = server.addr();
+
+        let mut running = Running {
+            server: Some(server),
+            supervisor: Arc::new(deepnest_apps::Supervisor::new()),
+        };
+        stop::run_down(&mut running);
+
+        let again = std::net::TcpListener::bind(addr)
+            .expect("the port must be free once the process has run down");
+        drop(again);
     }
 }
