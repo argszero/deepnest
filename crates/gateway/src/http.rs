@@ -14,6 +14,7 @@
 //! client sends. Every one of those answers with a status the caller can see instead of hanging
 //! or being half-parsed.
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::io::{self, Read, Write};
 
@@ -191,12 +192,19 @@ fn head_end(buffer: &[u8]) -> Option<usize> {
 }
 
 /// A response, ready to be written.
+///
+/// The content type and the header names are `Cow` rather than `&'static str`, and that is the one
+/// change the forward forced (`decided in implementation`, 2026-10-31): a routed answer names a
+/// type this crate chose, while a forwarded one carries whatever the app chose — `image/svg+xml`,
+/// `text/event-stream`, a vendor type nobody has heard of. A `&'static str` field would have made
+/// the gateway's whole job "answer only the types the binary happened to spell", which is the
+/// opposite of not lying to the app. The borrow keeps the routed answers allocation-free.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Response {
     pub status: u16,
-    pub content_type: &'static str,
+    pub content_type: Cow<'static, str>,
     pub body: Vec<u8>,
-    pub headers: Vec<(&'static str, String)>,
+    pub headers: Vec<(Cow<'static, str>, String)>,
 }
 
 impl Response {
@@ -225,12 +233,17 @@ impl Response {
     }
 
     /// Add a header.
-    pub fn header(mut self, name: &'static str, value: impl Into<String>) -> Self {
-        self.headers.push((name, value.into()));
+    pub fn header(mut self, name: impl Into<Cow<'static, str>>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
         self
     }
 
-    fn new(status: u16, content_type: &'static str, body: Vec<u8>) -> Self {
+    /// A response of a type the caller names.
+    ///
+    /// Public because a forwarded answer brings its own content type, and re-deciding it here would
+    /// be the gateway guessing at what the app meant.
+    pub fn new(status: u16, content_type: impl Into<Cow<'static, str>>, body: Vec<u8>) -> Self {
+        let content_type = content_type.into();
         Self {
             status,
             content_type,
@@ -282,6 +295,7 @@ pub fn reason(status: u16) -> &'static str {
         411 => "Length Required",
         413 => "Content Too Large",
         500 => "Internal Server Error",
+        502 => "Bad Gateway",
         503 => "Service Unavailable",
         _ => "Unknown",
     }

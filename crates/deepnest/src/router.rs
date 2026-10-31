@@ -35,6 +35,8 @@ use deepnest_apps::{
 };
 use serde_json::{json, Value};
 
+use deepnest_gateway::{ForwardError, Forwarder, StdForwarder, Target};
+
 use crate::http::{Method, Request, Response};
 use crate::token::Token;
 
@@ -49,6 +51,10 @@ pub struct Lifecycle {
     pub supervisor: Arc<Supervisor>,
     /// How a build runs its steps. A trait object, so a test can build without a toolchain.
     pub builder: Arc<dyn Runner>,
+    /// How a request reaches an app's server. A trait object for the same reason `Spawner` and
+    /// `Prober` are: the router's job is deciding *which* app, and a test of that decision should
+    /// not need an app listening on the port the kernel happened to allocate.
+    pub forwarder: Arc<dyn Forwarder>,
     pub home: PathBuf,
 }
 
@@ -58,8 +64,15 @@ impl Lifecycle {
         Self {
             supervisor,
             builder: Arc::new(StdRunner::new()),
+            forwarder: Arc::new(StdForwarder),
             home: home.into(),
         }
+    }
+
+    /// The same lifecycle with a different forwarder.
+    pub fn with_forwarder(mut self, forwarder: Arc<dyn Forwarder>) -> Self {
+        self.forwarder = forwarder;
+        self
     }
 
     /// The same lifecycle with a different build runner.
@@ -140,6 +153,14 @@ impl Router {
         self
     }
 
+    /// Forward app requests with `forwarder` instead of over a real socket.
+    pub fn with_forwarder(mut self, forwarder: Arc<dyn Forwarder>) -> Self {
+        if let Some(lifecycle) = self.lifecycle.take() {
+            self.lifecycle = Some(lifecycle.with_forwarder(forwarder));
+        }
+        self
+    }
+
     /// Answer one request.
     pub fn respond(&self, request: &Request) -> Response {
         if request.method == Method::Head {
@@ -178,10 +199,7 @@ impl Router {
                     unauthorized()
                 }
             }
-            other if other.starts_with("/app/") => Response::json(
-                404,
-                error_body("the app gateway is not part of this build yet (crates/gateway)"),
-            ),
+            other if other.starts_with("/app/") => self.app_page(request),
             _ => Response::json(404, error_body("no such path")),
         }
     }
@@ -345,6 +363,88 @@ impl Router {
     ///
     /// Every refusal below comes before anything is spawned, and each says which of the four
     /// things is wrong: the action, the method, the slug, or the app.
+    /// Serve an app under `/app/<slug>/`.
+    ///
+    /// The one route on this port a browser navigates to rather than a program calls, so it never
+    /// asks for the token: the token guards deepnest's own API, and a page the user opened by
+    /// clicking a link that then demanded a header is a page that never loads. What keeps it from
+    /// being an open door is that it can only reach an app's own loopback port — the app's
+    /// authorisation, its own, arrives with the request.
+    fn app_page(&self, request: &Request) -> Response {
+        let rest = request.path.strip_prefix("/app/").unwrap_or_default();
+        let slug_text = rest.split('/').next().unwrap_or_default();
+        // A path that names no app is `404`, not `400`: this spelling arrived from an address bar,
+        // and "there is no app at that address" is the reading the person can act on.
+        let slug = match Slug::parse(slug_text) {
+            Ok(slug) => slug,
+            Err(_) => {
+                return Response::json(404, error_body(&format!("no app named `{slug_text}`")))
+            }
+        };
+
+        let Some(lifecycle) = &self.lifecycle else {
+            return Response::json(
+                503,
+                error_body("this process cannot serve apps: it was started without a lifecycle"),
+            );
+        };
+        let Some(apps_dir) = &self.apps_dir else {
+            return Response::json(
+                503,
+                error_body(
+                    "this process cannot find apps: it was started without an apps directory",
+                ),
+            );
+        };
+        if !apps_dir.join(slug.as_str()).is_dir() {
+            return Response::json(
+                404,
+                error_body(&format!("no app named `{slug}` in {}", apps_dir.display())),
+            );
+        }
+
+        // This layer reads one request per connection and no body, so a request that carried one
+        // would arrive at the app saying nothing. Refusing by name is the honest answer; a
+        // forward that dropped the content would report success for something it never sent.
+        if !deepnest_gateway::proxy::can_forward(request.method) {
+            return Response::text(
+                405,
+                format!(
+                    "{} is not forwarded to an app: this server carries GET and HEAD only\n",
+                    request.method.as_str()
+                ),
+            )
+            .header("Allow", "GET, HEAD");
+        }
+
+        let target = match lifecycle.supervisor.state(&slug) {
+            State::Running { port, .. } => Target::new(slug.as_str(), port),
+            State::Stopped => {
+                return Response::text(
+                    503,
+                    format!("`{slug}` is not running — POST /api/apps/{slug}/start\n"),
+                )
+            }
+            State::Failed { reason } => {
+                return Response::text(503, format!("`{slug}` is not running: {reason}\n"))
+            }
+        };
+
+        match lifecycle.forwarder.forward(&target, request) {
+            Ok(response) => response,
+            // The app was running a moment ago and its port answers nothing now: from the browser's
+            // side that is a gateway whose upstream is gone, and the useful next step is the log.
+            Err(error @ ForwardError::Connect { .. }) => Response::text(
+                502,
+                format!(
+                    "{error}\n\nthe app's log is {}\n",
+                    deepnest_apps::log_path(&lifecycle.home, &slug).display()
+                ),
+            ),
+            Err(error) => Response::text(502, format!("{error}\n")),
+        }
+    }
+
     fn app_action(&self, request: &Request) -> Response {
         let Some(rest) = request.path.strip_prefix("/api/apps/") else {
             return Response::json(404, error_body("no such endpoint"));
@@ -946,11 +1046,172 @@ mod tests {
         assert_eq!(router().respond(&request).status, 401);
     }
 
+    /// A forwarder that records where it was asked to go, and answers a page.
+    struct RecordingForwarder {
+        seen: std::sync::Mutex<Vec<(String, u16)>>,
+        answer: u16,
+    }
+
+    impl RecordingForwarder {
+        fn answering(status: u16) -> Arc<Self> {
+            Arc::new(Self {
+                seen: std::sync::Mutex::new(Vec::new()),
+                answer: status,
+            })
+        }
+
+        fn seen(&self) -> Vec<(String, u16)> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    impl Forwarder for RecordingForwarder {
+        fn forward(
+            &self,
+            target: &Target,
+            _request: &Request,
+        ) -> Result<Response, deepnest_gateway::ForwardError> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((target.slug.clone(), target.port));
+            Ok(Response::html(self.answer, "<html><head></head></html>"))
+        }
+    }
+
+    /// The router and the supervisor behind it, so a test can read back what it allocated.
+    fn supervised_forwarding(
+        scratch: &Scratch,
+        forwarder: Arc<dyn Forwarder>,
+    ) -> (Router, Arc<deepnest_apps::Supervisor>) {
+        let supervisor = Arc::new(deepnest_apps::Supervisor::with_parts(
+            Box::new(FakeSpawner),
+            Box::new(AlwaysReady),
+        ));
+        let router = router()
+            .with_lifecycle(
+                Arc::clone(&supervisor),
+                scratch.base.clone(),
+                scratch.apps(),
+            )
+            .with_builder(Arc::new(FakeBuilder::succeeds()))
+            .with_forwarder(forwarder);
+        (router, supervisor)
+    }
+
     #[test]
-    fn the_unbuilt_gateway_says_it_is_unbuilt() {
-        let response = router().respond(&get("/app/notes/", "127.0.0.1:4270"));
+    fn an_app_page_reaches_the_port_the_supervisor_allocated() {
+        let scratch = Scratch::new("page-forward");
+        scratch.built_app("notes", "Notes");
+        let forwarder = RecordingForwarder::answering(200);
+        let (router, supervisor) = supervised_forwarding(&scratch, forwarder.clone());
+
+        let started = router.respond(&post("/api/apps/notes/start"));
+        assert_eq!(started.status, 200, "{}", body(&started));
+
+        let response = router.respond(&get("/app/notes/", "127.0.0.1:4270"));
+        assert_eq!(response.status, 200);
+        assert_eq!(forwarder.seen().len(), 1, "the forward did not happen");
+
+        // The port is the one the supervisor handed out, not one the router guessed.
+        let slug = Slug::parse("notes").unwrap();
+        let port = match supervisor.state(&slug) {
+            State::Running { port, .. } => port,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(forwarder.seen()[0], ("notes".to_string(), port));
+    }
+
+    #[test]
+    fn an_app_that_is_not_running_says_so_instead_of_forwarding() {
+        let scratch = Scratch::new("page-stopped");
+        scratch.built_app("notes", "Notes");
+        let forwarder = RecordingForwarder::answering(200);
+        let router = supervised(&scratch).with_forwarder(forwarder.clone());
+
+        let response = router.respond(&get("/app/notes/", "127.0.0.1:4270"));
+        assert_eq!(response.status, 503);
+        let text = body(&response);
+        assert!(text.contains("is not running"), "{text}");
+        // The next step is a request, so the answer names it.
+        assert!(text.contains("POST /api/apps/notes/start"), "{text}");
+        assert!(
+            forwarder.seen().is_empty(),
+            "nothing was running to forward to"
+        );
+    }
+
+    #[test]
+    fn an_app_page_names_an_app_that_is_not_there_as_absent() {
+        let scratch = Scratch::new("page-absent");
+        let router = supervised(&scratch);
+
+        let response = router.respond(&get("/app/notes/", "127.0.0.1:4270"));
         assert_eq!(response.status, 404);
-        assert!(body(&response).contains("crates/gateway"));
+        assert!(
+            body(&response).contains("no app named `notes`"),
+            "{}",
+            body(&response)
+        );
+
+        // A path that cannot even be a slug is the same reading, not a 400: it came from an
+        // address bar, and the reader cannot act on a validation message.
+        for path in ["/app/Notes/", "/app/../etc/passwd", "/app/"] {
+            let response = router.respond(&get(path, "127.0.0.1:4270"));
+            assert_eq!(response.status, 404, "{path}");
+        }
+    }
+
+    #[test]
+    fn a_post_to_an_app_page_is_refused_rather_than_forwarded_without_its_body() {
+        let scratch = Scratch::new("page-post");
+        scratch.built_app("notes", "Notes");
+        let forwarder = RecordingForwarder::answering(200);
+        let router = supervised(&scratch).with_forwarder(forwarder.clone());
+
+        let response = router.respond(&post("/app/notes/save"));
+        assert_eq!(response.status, 405);
+        assert_eq!(
+            response
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("allow"))
+                .map(|(_, value)| value.as_str()),
+            Some("GET, HEAD")
+        );
+        assert!(
+            forwarder.seen().is_empty(),
+            "a body-less POST reached the app"
+        );
+    }
+
+    #[test]
+    fn a_failed_forward_is_a_bad_gateway_naming_the_log() {
+        // The app answered a moment ago and its port is silent now. That is not a 404 — the app
+        // exists — and it is not a 500 either: the failure is upstream of this server.
+        struct Refusing;
+        impl Forwarder for Refusing {
+            fn forward(
+                &self,
+                target: &Target,
+                _request: &Request,
+            ) -> Result<Response, deepnest_gateway::ForwardError> {
+                Err(deepnest_gateway::ForwardError::Connect {
+                    port: target.port,
+                    source: std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused"),
+                })
+            }
+        }
+
+        let scratch = Scratch::new("page-502");
+        scratch.built_app("notes", "Notes");
+        let router = supervised(&scratch).with_forwarder(Arc::new(Refusing));
+        assert_eq!(router.respond(&post("/api/apps/notes/start")).status, 200);
+
+        let response = router.respond(&get("/app/notes/", "127.0.0.1:4270"));
+        assert_eq!(response.status, 502);
+        let text = body(&response);
+        assert!(text.contains("notes.log"), "{text}");
     }
 
     #[test]
