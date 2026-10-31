@@ -33,9 +33,10 @@
 //!
 //! ## What the page says without script
 //!
-//! The facts that cannot be fetched are rendered into the markup: the port, the endpoint state, and
-//! how many apps are on disk. A reader with script off gets a page that is true and slightly stale
-//! rather than a blank one, and a script that fails to load leaves something readable behind.
+//! The facts that cannot be fetched are rendered into the markup: the port, the endpoint state, how
+//! many apps are on disk, and the skills the loader found. A reader with script off gets a page that
+//! is true and slightly stale rather than a blank one, and a script that fails to load leaves
+//! something readable behind.
 //!
 //! ## The app page's dialog
 //!
@@ -89,7 +90,8 @@ pub const SCRIPT: &str = include_str!("panel.js");
 ///
 /// Deliberately small. The app list is fetched by the script, so an app that appeared a second ago
 /// is in the next refresh without the page being re-rendered; what cannot be fetched is the token,
-/// the port, and the state of the config file, and those are the three things here.
+/// the port, the state of the config file, and the skills this process read on the way here — and
+/// those are what is here.
 #[derive(Debug, Clone)]
 pub struct Panel {
     /// The port this server is on, for the page's own text.
@@ -100,14 +102,75 @@ pub struct Panel {
     pub model: Option<String>,
     /// One plain-text line about the apps directory. Escaped here, never trusted.
     pub apps: String,
+    /// One plain-text line about the skills directory. Escaped here, never trusted.
+    pub skills: String,
+    /// The skills that loaded, as `(name, description)` — text, escaped here.
+    ///
+    /// A list rendered into the page rather than one the script fetches, unlike the app list: this
+    /// is the page a user looks at *after* editing a skill file, so the version that says nothing
+    /// until a round trip finishes is the version that hides the edit.
+    pub skill_list: Vec<(String, String)>,
+    /// The entries under the skills root that are not usable skills, as `(path, reason)`.
+    ///
+    /// Separate from [`Panel::skill_list`] because the two say different things: an empty list
+    /// beside a full one of these means "your skill has a typo", and one merged list would read
+    /// as "no skills yet".
+    pub skill_problems: Vec<(String, String)>,
 }
 
 /// The panel's HTML.
 pub fn page(panel: &Panel) -> String {
-    PAGE.replace("@@PORT@@", &panel.port.to_string())
+    let page = PAGE
+        .replace("@@PORT@@", &panel.port.to_string())
         .replace("@@TOKEN@@", &escape(&panel.token))
         .replace("@@ENDPOINT@@", &escape(&endpoint_state(panel)))
         .replace("@@APPS@@", &escape(&panel.apps))
+        .replace("@@SKILLS@@", &escape(&panel.skills));
+    // Last, and deliberately. The skills list is markup built below out of labels that came from
+    // files on disk; substituting it any earlier would hand a description containing `@@APPS@@` to
+    // the replace above, which would then write an app count into a line of a skill.
+    page.replace("@@SKILL_LIST@@", &skill_markup(panel))
+}
+
+/// The skills section: what loaded, then what did not.
+///
+/// Built here rather than by the caller for the reason the token and the app line are escaped
+/// here: the crate that owns the page is the crate that knows which of its positions are markup
+/// and which are text.
+fn skill_markup(panel: &Panel) -> String {
+    let mut out = String::new();
+    if !panel.skill_list.is_empty() {
+        out.push_str("    <ul class=\"skills\">\n");
+        for (name, description) in &panel.skill_list {
+            out.push_str(&format!(
+                "      <li><code>{}</code> <span class=\"note\">{}</span></li>\n",
+                escape(name),
+                escape(description)
+            ));
+        }
+        out.push_str("    </ul>\n");
+    }
+    if !panel.skill_problems.is_empty() {
+        let count = panel.skill_problems.len();
+        let (entry, verb, thing) = if count == 1 {
+            ("entry", "is", "a skill")
+        } else {
+            ("entries", "are", "skills")
+        };
+        out.push_str(&format!(
+            "    <p class=\"note\">{count} {entry} under the skills root {verb} not {thing}:</p>\n"
+        ));
+        out.push_str("    <ul class=\"skills\">\n");
+        for (path, reason) in &panel.skill_problems {
+            out.push_str(&format!(
+                "      <li><code>{}</code> <span class=\"note\">{}</span></li>\n",
+                escape(path),
+                escape(reason)
+            ));
+        }
+        out.push_str("    </ul>\n");
+    }
+    out
 }
 
 /// The endpoint line, as text.
@@ -173,6 +236,8 @@ const PAGE: &str = r#"<!doctype html>
   .app .slug { opacity: var(--dim); font-size: .8rem; }
   .app .actions { margin-top: .55rem; display: flex; gap: .4rem; flex-wrap: wrap; align-items: baseline; }
   .note { font-size: .85rem; opacity: var(--dim); }
+  ul { margin: .3rem 0 .9rem; padding-left: 1.1rem; }
+  li { margin: .3rem 0; }
   .state { font-size: .9rem; margin: .3rem 0 .9rem; }
   .bad { color: #c0392b; }
   .good { color: #2d7a46; }
@@ -224,6 +289,16 @@ const PAGE: &str = r#"<!doctype html>
     </details>
   </section>
 
+  <section id="skills-section">
+    <h2>Skills</h2>
+    <p id="skills-summary" class="state">Skills: @@SKILLS@@</p>
+    <p class="note">A skill is instructions the agent may choose to follow, installed at
+    <code>~/.deepnest/skills/&lt;name&gt;/SKILL.md</code> or as one Markdown file beside it. A skill
+    an <em>app</em> carries at <code>&lt;app&gt;/.agent/skills/</code> is not in this list: this page
+    belongs to no app, and one list of every app's skills would say each of them applies everywhere.</p>
+@@SKILL_LIST@@
+  </section>
+
   <p id="status" class="note" role="status" aria-live="polite"></p>
 </main>
 <script src="/panel.js"></script>
@@ -241,6 +316,9 @@ mod tests {
             token: "0123456789abcdef".repeat(4),
             model: Some("deepseek-flash".to_string()),
             apps: "2 apps in /home/u/.deepnest/apps".to_string(),
+            skills: "1 skill in /home/u/.deepnest/skills".to_string(),
+            skill_list: vec![("notes".to_string(), "Use when writing a note".to_string())],
+            skill_problems: Vec::new(),
         }
     }
 
@@ -288,10 +366,74 @@ mod tests {
             token: "\"><script>alert(1)</script>".to_string(),
             model: Some("<img onerror=x>".to_string()),
             apps: "</p><script>alert(2)</script>".to_string(),
+            skills: "</p><script>alert(3)</script>".to_string(),
+            // A skill's name is a directory or a header line, and its description is whatever the
+            // user typed: both are input, and both land in markup.
+            skill_list: vec![(
+                "<b>name</b>".to_string(),
+                "</li><script>alert(4)</script>".to_string(),
+            )],
+            skill_problems: vec![("<i>path</i>".to_string(), "<img onerror=y>".to_string())],
         });
         assert!(!page.contains("<script>alert"), "{page}");
         assert!(!page.contains("<img onerror"), "{page}");
+        assert!(!page.contains("<b>name</b>"), "{page}");
+        assert!(!page.contains("<i>path</i>"), "{page}");
         assert!(page.contains("&quot;&gt;&lt;script&gt;"), "{page}");
+    }
+
+    #[test]
+    fn the_page_lists_the_skills_the_loader_found() {
+        // Rendered, not fetched: this is the page a user looks at right after editing a skill.
+        let page = page(&panel());
+        assert!(
+            page.contains("1 skill in /home/u/.deepnest/skills"),
+            "{page}"
+        );
+        assert!(page.contains("<code>notes</code>"), "{page}");
+        assert!(page.contains("Use when writing a note"), "{page}");
+    }
+
+    #[test]
+    fn the_page_says_which_skills_it_does_not_list() {
+        // The panel belongs to no app, so it reads the user's skills only. A page that stayed
+        // silent about that would make "my app's skill does not show up" the next bug report.
+        let page = page(&panel());
+        assert!(page.contains("is not in this list"), "{page}");
+        assert!(page.contains(".agent/skills/"), "{page}");
+    }
+
+    #[test]
+    fn a_skill_that_could_not_be_used_is_reported_beside_the_ones_that_could() {
+        let page = page(&Panel {
+            skill_problems: vec![(
+                "/home/u/.deepnest/skills/broken/SKILL.md".to_string(),
+                "the header has no description".to_string(),
+            )],
+            ..panel()
+        });
+        assert!(
+            page.contains("1 entry under the skills root is not a skill"),
+            "{page}"
+        );
+        assert!(page.contains("the header has no description"), "{page}");
+        // And the one that did load is still there: a fault in one skill is not a reason to hide
+        // the others.
+        assert!(page.contains("<code>notes</code>"), "{page}");
+    }
+
+    #[test]
+    fn a_description_that_looks_like_a_placeholder_is_left_alone() {
+        // The skills list is substituted last for this reason: `@@APPS@@` in a description is a
+        // description, not a request to repeat the app count inside a skill's line.
+        let page = page(&Panel {
+            skill_list: vec![("odd".to_string(), "@@APPS@@".to_string())],
+            ..panel()
+        });
+        assert!(
+            page.contains(r#"<span class="note">@@APPS@@</span>"#),
+            "{page}"
+        );
     }
 
     #[test]

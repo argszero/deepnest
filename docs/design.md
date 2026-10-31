@@ -45,10 +45,11 @@ which is the most expensive place to meet it. It answers the routes below on the
 by name what it does not answer:
 
 - `GET /` — the panel (`crates/web`): the model endpoint that is configured or is not, the apps on
-  disk with every entry there that is not one, a form for the endpoint, a form for a new app, and
-  the five verbs per app. Its facts are rendered into the markup, so the page is true with script
-  off or with a script that failed to load; the app list is fetched, because a directory changes
-  between two page loads.
+  disk with every entry there that is not one, a form for the endpoint, a form for a new app, the
+  five verbs per app, and the user-level skills the loader found with every entry it refused. Its
+  facts are rendered into the markup, so the page is true with script off or with a script that
+  failed to load; the app list is fetched, because a directory changes between two page loads, while
+  the skills report is rendered, because this is the page a user opens after editing a skill.
 - `GET /panel.js` — the panel's script, from `crates/web`'s own file. A route rather than an inline
   block, so `/` can be served with `script-src 'self'`: a string that reaches the page from the
   filesystem — an app's name, a slug — cannot become code. The page carries the control token in a
@@ -228,7 +229,14 @@ Loader reads two roots (`~/.deepnest/skills/`, `<app>/.agent/skills/`) and both 
 - **A symlink is reported rather than followed.** Following one would let a skill live somewhere the user never put it, and "where did this come from" is the question a skill list has to be able to answer.
 - **The header is read line by line, and an indented line is nested, not a field.** A skill may carry a `metadata:` block, and a nested `description:` must not overwrite the top-level one — the failure EMRG already paid for (`impl, ref: emrg/skills/loader.py`). Reading lines also makes the closing delimiter a line rather than the first three hyphens anywhere, which is what lets a description contain them.
 
-**Wired now, through the prompt and not through a route.** A skill reaches the agent through its system prompt and nowhere else, so there is no skills route and there should not be: the chat path calls this loader per turn and puts `name`, `description` and `path` in front of the model. What the loader reports as skipped still reaches nobody but a caller that asks — a panel view of that list is the missing half, and it is a page rather than an API.
+**Wired now, through the prompt and not through a route.** A skill reaches the agent through its system prompt and nowhere else, so there is no skills route and there should not be: the chat path calls this loader per turn and puts `name`, `description` and `path` in front of the model.
+
+**The panel is where a user reads what the loader found** (`decided in implementation`, 2026-10-31). `GET /` renders the loader's own answer: one line naming the skills directory and how many loaded, then each skill's name and description, then every entry that was refused with its path and the reason. Still no skills route — a route would be an API for a fact one page needs. Four decisions came with it:
+
+- **Rendered by the server, not fetched by the script.** This is the page a user opens *after* editing a skill file, so a round trip is precisely the part that would hide the edit. It is the opposite call from the app list, and for the opposite reason.
+- **The user's skills only, and the page says so in as many words.** The loader is called with `None` for the app: this page belongs to no app, and one list of every app's skills would claim each of them applies everywhere. A skill inside an app is invisible here by design, which has to be stated or "my app's skill does not show up" is the next bug report about a deliberate read.
+- **`crates/web` learns nothing about `crates/skills`.** The router hands the page one line and two `(label, detail)` lists — exactly the shape it already hands it the app line — and the page escapes every value at the point it writes it. The skills list is substituted into the page **last**, because a description containing `@@APPS@@` is a description and not a request to repeat the app count.
+- **Loaded and refused are two lists, and the line between them is the summary.** "None yet" and "none usable" are different pages: a user whose only skill has a broken header is told the entry is not a skill, with the reason, rather than that they have no skills.
 
 The catalog that ships inside the binary is itself an ordinary skill file carrying a `skills:` list (`name`, `description`, `repo`, `install`, `dest`, `check`); `dest` points at `~/.deepnest/skills/`. `browser-harness` and `baoyu-design` are the first two entries (`host 20:26`). Installation state lives in `.state.json`: only `managed: true` entries may be refreshed by the updater; anything else is the user's and is never touched (`impl, ref: emrg/skills/installer.py`).
 
@@ -340,9 +348,10 @@ The forward is a `Forwarder` trait, for the same reason `Spawner` and `Prober` a
 ### `crates/web` — the control panel
 
 **Landed**: the panel itself — the endpoint state and its form, the app list including the entries
-that are not apps and why, app creation, the five verbs per app, and an `Open` link to
-`/app/<slug>/`. One HTML page, one stylesheet, one script: no CSS framework, no icon set, no
-bundler, because a panel that needs a build step is a panel nobody reads in the repository.
+that are not apps and why, app creation, the five verbs per app, the skills the loader found with the
+entries it refused, and an `Open` link to `/app/<slug>/`. One HTML page, one stylesheet, one script:
+no CSS framework, no icon set, no bundler, because a panel that needs a build step is a panel nobody
+reads in the repository.
 
 The app page's floating dialog is this crate's bytes: `dialog.js` draws the ball and `dialog.css`
 isolates it from whatever stylesheet the app ships (`all: initial` on every selector, so a reset

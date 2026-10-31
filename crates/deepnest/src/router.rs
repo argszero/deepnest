@@ -364,11 +364,14 @@ impl Router {
 
     /// The panel: `crates/web`'s page, carrying what only this process knows.
     ///
-    /// The port, the control token, the endpoint state and a line about the apps directory are
-    /// rendered into the markup, so a reader with script off — or with a script that failed to load
-    /// — still gets a page that is true. The app list itself is the script's job: it changes
-    /// whenever a directory does, and rendering it here would make it stale between requests.
+    /// The port, the control token, the endpoint state, a line about the apps directory and the
+    /// skills report are rendered into the markup, so a reader with script off — or with a script
+    /// that failed to load — still gets a page that is true. The app list itself is the script's
+    /// job: it changes whenever a directory does, and rendering it here would make it stale between
+    /// requests. The skills report goes the other way and is rendered, because a user edits a skill
+    /// file and then looks at this page — the round trip is the part that would hide the edit.
     fn panel(&self) -> String {
+        let skills = self.skills_report();
         deepnest_web::page(&Panel {
             port: self.port,
             token: self
@@ -378,6 +381,9 @@ impl Router {
                 .unwrap_or_default(),
             model: self.model(),
             apps: self.apps_summary(),
+            skills: skills.summary,
+            skill_list: skills.found,
+            skill_problems: skills.skipped,
         })
     }
 
@@ -419,6 +425,54 @@ impl Router {
                 line
             }
             Err(error) => format!("cannot be listed — {shown}: {error}"),
+        }
+    }
+
+    /// What the panel says about the skills on disk.
+    ///
+    /// `None` for the app, and that is the scope worth stating rather than assuming: this page
+    /// belongs to no app, so its list is the user's skills only. A skill living inside an app is
+    /// invisible here by design, which the page has to say out loud — otherwise "my app's skill
+    /// does not show up" is the next bug report about a deliberate read.
+    ///
+    /// The loader cannot fail loudly: a root that cannot be read comes back as a `skipped` entry
+    /// with its reason, and that entry is exactly what the second list is for.
+    fn skills_report(&self) -> SkillsReport {
+        let Some(home) = self
+            .lifecycle
+            .as_ref()
+            .map(|lifecycle| lifecycle.home.as_path())
+        else {
+            return SkillsReport {
+                summary: "this process was started without a deepnest home".to_string(),
+                found: Vec::new(),
+                skipped: Vec::new(),
+            };
+        };
+
+        let root = deepnest_skills::user_root(home);
+        let shown = root.display().to_string();
+        let loaded = deepnest_skills::load(home, None);
+        let skills = loaded.skills.len();
+        let skipped = loaded.skipped.len();
+        SkillsReport {
+            summary: match (skills, skipped) {
+                // Sorted by name by the loader, so the page and the prompt list skills in the
+                // same order and a user comparing the two is not left wondering about a diff.
+                (0, 0) => format!("none yet in {shown}"),
+                (0, _) => format!("none usable in {shown}"),
+                (count, _) => format!("{count} {} in {shown}", plural(count, "skill", "skills")),
+            },
+            found: loaded
+                .skills
+                .into_iter()
+                .map(|skill| (skill.name, skill.description))
+                .collect(),
+            skipped: loaded
+                .skipped
+                .into_iter()
+                .map(|skipped| (skipped.path.display().to_string(), skipped.reason))
+                .collect(),
         }
     }
 
@@ -1098,6 +1152,19 @@ struct Submitted {
 }
 
 /// `one` or `many`, so a line the user reads does not say "1 apps".
+/// What the panel says about the skills on disk, in the three shapes the page renders.
+///
+/// Assembled by [`Router::skills_report`] and handed to `crates/web` as text: the page escapes what
+/// it is given, and this crate is the one that knows where the skills live.
+struct SkillsReport {
+    /// One plain-text line: how many there are, or why there are none to show.
+    summary: String,
+    /// The skills the loader accepted, as `(name, description)`.
+    found: Vec<(String, String)>,
+    /// The entries it refused, as `(path, reason)`.
+    skipped: Vec<(String, String)>,
+}
+
 fn plural(count: usize, one: &'static str, many: &'static str) -> &'static str {
     if count == 1 {
         one
@@ -1290,6 +1357,17 @@ mod tests {
                 .unwrap();
         }
 
+        /// A user-level skill: `~/.deepnest/skills/<name>/SKILL.md` under this scratch home.
+        fn skill(&self, name: &str, description: &str) {
+            let dir = deepnest_skills::user_root(&self.base).join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(deepnest_skills::SKILL_FILE),
+                format!("---\nname: {name}\ndescription: {description}\n---\n\nBody.\n"),
+            )
+            .unwrap();
+        }
+
         /// An app that has been built: a manifest, and a binary at the path the supervisor runs.
         fn built_app(&self, slug: &str, name: &str) {
             self.app(slug, name);
@@ -1396,6 +1474,95 @@ mod tests {
         assert!(page.contains("1 app in"), "{page}");
         assert!(page.contains("is not an app"), "{page}");
         assert!(page.contains("/api/apps"), "{page}");
+    }
+
+    #[test]
+    fn the_panel_lists_the_skills_the_loader_found_and_not_an_apps_own() {
+        // The page is the loader's own answer, rendered: no route, no fetch, nothing a reader has
+        // to run. `None` for the app, because this page belongs to no app — and a skill inside one
+        // must therefore be absent rather than listed under a heading that claims otherwise.
+        let scratch = Scratch::new("skills-panel");
+        scratch.skill("notes", "Use when writing a note");
+        let own = deepnest_skills::app_root(&scratch.apps().join("notes")).join("apponly");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::write(
+            own.join(deepnest_skills::SKILL_FILE),
+            "---\nname: apponly\ndescription: an app's own\n---\n\nBody.\n",
+        )
+        .unwrap();
+        let router = supervised(&scratch);
+
+        // The count and the directory it counts, because the line a user acts on names the path
+        // they have to open.
+        let root = deepnest_skills::user_root(&scratch.base)
+            .display()
+            .to_string();
+        let page = body(&router.respond(&get("/", "127.0.0.1:4270")).complete());
+        assert!(page.contains(&format!("1 skill in {root}")), "{page}");
+        assert!(page.contains("<code>notes</code>"), "{page}");
+        assert!(page.contains("Use when writing a note"), "{page}");
+        assert!(!page.contains("apponly"), "{page}");
+    }
+
+    #[test]
+    fn the_panel_reports_a_skill_that_could_not_be_used_beside_the_ones_that_could() {
+        // The reading this exists to keep separate: "no skills yet" and "your skill has a typo"
+        // are different pages, and a user with a broken header needs to see the one that loaded.
+        let scratch = Scratch::new("skills-broken");
+        scratch.skill("notes", "Use when writing a note");
+        // A directory with no `SKILL.md` is the shape the loader cannot use.
+        std::fs::create_dir_all(deepnest_skills::user_root(&scratch.base).join("broken")).unwrap();
+        let router = supervised(&scratch);
+
+        let page = body(&router.respond(&get("/", "127.0.0.1:4270")).complete());
+        assert!(
+            page.contains("1 entry under the skills root is not a skill"),
+            "{page}"
+        );
+        assert!(page.contains("broken"), "{page}");
+        assert!(page.contains("<code>notes</code>"), "{page}");
+    }
+
+    #[test]
+    fn the_panel_says_when_it_has_no_home_to_read_skills_from() {
+        // A router built without a lifecycle cannot answer this, and says so rather than reporting
+        // an empty list — "no skills" and "nowhere to look" are not the same claim.
+        let page = body(&router().respond(&get("/", "127.0.0.1:4270")).complete());
+        assert!(page.contains("without a deepnest home"), "{page}");
+    }
+
+    #[test]
+    fn the_panel_of_a_home_with_no_skills_says_there_are_none_yet() {
+        let scratch = Scratch::new("skills-none");
+        let page = body(
+            &supervised(&scratch)
+                .respond(&get("/", "127.0.0.1:4270"))
+                .complete(),
+        );
+        // The whole line, not the phrase: the apps line says "none yet in" too, so an assertion
+        // matching either would pass whichever one the code got wrong.
+        assert!(page.contains("Skills: none yet in"), "{page}");
+        assert!(!page.contains("Skills: none usable"), "{page}");
+        assert!(!page.contains("is not a skill"), "{page}");
+    }
+
+    #[test]
+    fn a_skills_root_where_nothing_could_be_used_says_that_and_not_none_yet() {
+        // What the two lists exist for: a user whose only skill is broken must not be told they
+        // have no skills, and must not be told their skill is fine either.
+        let scratch = Scratch::new("skills-only-broken");
+        std::fs::create_dir_all(deepnest_skills::user_root(&scratch.base).join("broken")).unwrap();
+        let page = body(
+            &supervised(&scratch)
+                .respond(&get("/", "127.0.0.1:4270"))
+                .complete(),
+        );
+        assert!(page.contains("Skills: none usable in"), "{page}");
+        assert!(!page.contains("Skills: none yet in"), "{page}");
+        assert!(
+            page.contains("1 entry under the skills root is not a skill"),
+            "{page}"
+        );
     }
 
     #[test]
