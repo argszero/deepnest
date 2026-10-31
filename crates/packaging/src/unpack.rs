@@ -21,7 +21,9 @@
 //! - **A link may point anywhere inside the tree and nowhere outside.** A symlink is the way a
 //!   payload writes through a name: an entry that names a symlink as its directory writes wherever
 //!   that link points. So the target is resolved lexically against the entry's own parent, and a
-//!   target that would climb above the toolchain root — or that is absolute — is refused.
+//!   target that would climb above the toolchain root — or that is absolute — is refused. Where a
+//!   link cannot be made at all — Windows, without a privilege a plain process does not have — the
+//!   entry is refused by name rather than turned into a copy, because a copy is a different tree.
 //! - **A payload makes files, directories and links, and nothing else.** A device node, a fifo or a
 //!   socket in a toolchain payload is not a toolchain; refusing them keeps this module from needing
 //!   a privilege it should not have.
@@ -649,6 +651,9 @@ mod tests {
         );
     }
 
+    // This expectation holds only where a link can be made at all: Windows refuses the entry
+    // instead of creating one, which is a separate behaviour with its own reason.
+    #[cfg(unix)]
     #[test]
     fn a_link_that_points_inside_is_kept() {
         let scratch = Scratch::new("link-in");
