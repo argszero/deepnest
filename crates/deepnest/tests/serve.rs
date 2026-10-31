@@ -8,6 +8,10 @@
 //!
 //! The port is always `0` (let the OS choose). A test that bound 4270 would fail on a machine
 //! where the developer happens to be running deepnest, and would say nothing about the code.
+//!
+//! `tests/through_the_binary.rs` is the one exception, and it is the opposite case rather than an
+//! oversight: it starts the *program*, whose port the design fixes at 4270, so it takes that port
+//! and says so when the port is already held.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};

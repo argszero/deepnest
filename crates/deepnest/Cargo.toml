@@ -19,3 +19,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 socket2 = "0.5"
 toml = "0.8"
+
+# Test-only, for the end-to-end run in `tests/through_the_binary.rs` and the stand-in app it
+# drives: a WebSocket handshake needs a SHA-1 and a base64, and writing either by hand in a
+# stand-in would be a second implementation of the very thing the test is checking.
+[dev-dependencies]
+base64 = "0.22"
+sha1 = "0.10"
