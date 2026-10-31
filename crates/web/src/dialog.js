@@ -113,10 +113,28 @@
   refuse.id = "deepnest-dialog-refuse";
   refuse.textContent = "No";
 
+  // Why not. A bare no is the one answer the agent cannot act on: `Denied` and `Unanswered` are
+  // separate answers because the model's next move differs, and a refusal without words leaves it
+  // to guess which it was given. Optional, and an empty field sends no `reason` key at all rather
+  // than an empty string — a person who just wants to say no says exactly that.
+  var whyNot = document.createElement("textarea");
+  whyNot.id = "deepnest-dialog-reason";
+  whyNot.rows = 2;
+  whyNot.placeholder = "Why not? Optional — the agent reads this and changes course.";
+  whyNot.setAttribute("aria-label", "Why you are refusing");
+
   asked.appendChild(askedWhat);
   asked.appendChild(askedWhy);
+  asked.appendChild(whyNot);
   asked.appendChild(allow);
   asked.appendChild(refuse);
+
+  // The block and the words typed into it go away together: a reason left behind would answer the
+  // next question with the previous one's refusal.
+  function clearTheQuestion() {
+    asked.hidden = true;
+    whyNot.value = "";
+  }
 
   form.appendChild(input);
   form.appendChild(send);
@@ -171,7 +189,7 @@
       clearInterval(polling);
       polling = null;
     }
-    asked.hidden = true;
+    clearTheQuestion();
   }
 
   function pollForAQuestion() {
@@ -185,6 +203,8 @@
       .then(function (body) {
         var pending = body && body.pending;
         if (!pending) {
+          // Only the block: a reason half-typed while the poll found nothing is still the person's,
+          // and a poll every 700 ms must not wipe it.
           asked.hidden = true;
           return;
         }
@@ -212,20 +232,30 @@
   function answerTheQuestion(approved) {
     allow.disabled = true;
     refuse.disabled = true;
+    // The words travel only with a refusal, and only when there are some. `Approved` has nothing to
+    // explain, and the verdict the route reads refuses a key it does not know — so an approval
+    // sends the one key it needs and no other.
+    var verdict = { approve: approved };
+    if (!approved) {
+      var whyText = whyNot.value.trim();
+      if (whyText) {
+        verdict.reason = whyText;
+      }
+    }
     fetch(askingRoute(), {
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ approve: approved })
+      body: JSON.stringify(verdict)
     })
       .then(function () {
         // Whether it landed or not, the question is no longer this box's to show: the turn either
         // woke with the answer or stopped waiting, and the next poll would be about a request that
         // is already gone.
-        asked.hidden = true;
+        clearTheQuestion();
       })
       .catch(function () {
-        asked.hidden = true;
+        clearTheQuestion();
       })
       .then(function () {
         allow.disabled = false;

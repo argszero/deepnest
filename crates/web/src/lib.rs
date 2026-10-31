@@ -572,6 +572,44 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_carries_the_words_the_person_typed_and_an_approval_does_not() {
+        // `Answer::Denied { reason }` reaches the model as "They said: …", and an empty reason
+        // leaves it reading a bare refusal — the one answer it cannot act on, since `Denied` and
+        // `Unanswered` are kept apart precisely because the next move differs. So there has to be
+        // a field to type into, and the route has to receive it.
+        assert!(
+            DIALOG_SCRIPT.contains("deepnest-dialog-reason"),
+            "there is nowhere to say why"
+        );
+        assert!(
+            DIALOG_STYLE.contains("#deepnest-dialog-reason"),
+            "the field is unstyled, and `all: initial` left it with no border and no size"
+        );
+        // The body is built once, from a verdict that may or may not carry the words. Pinned as a
+        // shape rather than as a word, so the read is "the reason reaches the request" and not
+        // "the string 'reason' appears somewhere in this file".
+        assert!(
+            DIALOG_SCRIPT.contains("JSON.stringify(verdict)"),
+            "the answer is not built from the verdict"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("verdict.reason"),
+            "the words never reach the request"
+        );
+        // And only on a refusal, only when there are some: the route's verdict refuses a key it
+        // does not know, so an approval must not carry a `reason` at all.
+        assert!(
+            DIALOG_SCRIPT.contains("if (!approved)") && DIALOG_SCRIPT.contains("if (whyText)"),
+            "a reason is sent with an approval, or an empty one is sent as if it were words"
+        );
+        // A reason left in the box would answer the next question with the previous refusal.
+        assert!(
+            DIALOG_SCRIPT.contains(r#"whyNot.value = """#),
+            "the field keeps the last refusal"
+        );
+    }
+
+    #[test]
     fn the_script_calls_the_routes_the_server_has() {
         // Cheap guard against a script and a router drifting apart: every path the script fetches
         // is one this repository serves.
