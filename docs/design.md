@@ -540,7 +540,13 @@ zstd-compressed toolchain payload unpacked on first run **atomically** — into 
 - **macOS asks `xcode-select -p`, not a fixed path.** The tools sit in `/Library/Developer/CommandLineTools` by default, a full Xcode puts them elsewhere, and `-s` can put them anywhere at all — a path check would answer "missing" for a machine that compiles C perfectly well, and a false "missing" stops a build that would have worked. The same reasoning makes Windows ask `vswhere` rather than look for `cl.exe` on `PATH`: outside a developer prompt those tools are never on it.
 - **The fix is a command to paste or a page to open.** "Install a C toolchain" is not guidance; `xcode-select --install` is. This is the half of the promise that is about the user rather than about correctness, and a test keeps every platform's fix actionable.
 
-**Still to come: the payload and the signature.** Unpacking a zstd archive into a `Staging` and publishing it, and signing every bundled Mach-O before packing. Both are written against the contract above and change none of it: the unpack fills `Staging::dir` and calls `Staging::adopt`, and nothing else may write inside `toolchain/`.
+**The unpack has landed; the payload and the signature have not.** `crates/packaging/src/unpack.rs` reads a tar inside a zstd stream into a `Staging` and publishes it through `Staging::adopt`, changing nothing in the contract above. Three decisions came with it, and they are about what a *malformed* payload may do rather than about an attacker — the archive is built by one step of the release pipeline and read by another, so the fault this defends against is a mistake in the packer:
+
+- **A path is refused, not repaired.** An entry that is absolute or climbs with `..` fails the whole unpack with a named reason rather than being skipped or reinterpreted, and the toolchain directory is left exactly as it was. The `tar` crate's own `unpack_in` is not relied on for this: an independent check that fails closed with a reason a packer can act on is worth more here than a silent skip.
+- **A link is checked where it is created.** A symlink is how a payload writes through a name, so its target is resolved lexically against its own entry's depth and must stay inside the toolchain root. Because a link that would escape never exists in the tree, no later entry can reach outside by writing through one, and the per-entry check is enough.
+- **A payload makes files, directories and links, and nothing else.** A device node, a fifo or a socket is refused; nothing in a toolchain is one, and creating one needs a privilege the unpack should not hold.
+
+Still to come: **the payload itself** — the archive this code reads, which the release pipeline produces and the build does not yet carry — and **the signature over it**, plus signing every bundled Mach-O before packing.
 
 macOS ships signed and notarized (`host 20:48`). Every Mach-O inside the bundled toolchain must be **signed before packing**, because first-run unpacking does not re-sign, and an unsigned child process is refused under hardened runtime. Windows ships unsigned (`host 20:56`) — SmartScreen will warn on first run, and both README and the first-run page say so plainly rather than teaching users to bypass security prompts blindly.
 
@@ -596,9 +602,12 @@ One module per cycle, each landing with its tests:
    seam — `crates/gateway::transport` speaks `https` now, but nothing wires it into this crate yet.
 9. `crates/packaging` — payload, first-run unpack, signing. **In progress**: the toolchain
    directory contract has landed (where a payload unpacks, the marker that makes a directory whole,
-   and the sweep that removes what an interrupted unpack left behind), and so has the C toolchain
-   check, wired into the `build` route as a `412` before any step runs. The zstd unpack and signing
-   remain.
+   and the sweep that removes what an interrupted unpack left behind), so has the C toolchain
+   check, wired into the `build` route as a `412` before any step runs, and so has the unpack
+   itself (`crates/packaging/src/unpack.rs`): a tar inside a zstd stream, read entry by entry, with
+   every path and every link target checked against the toolchain root before anything is written.
+   It is not wired into the binary yet, and cannot be: there is no payload in the build for it to
+   read. What remains is that payload and the signing of it.
 
 ## 7. Non-negotiables
 

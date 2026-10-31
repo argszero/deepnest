@@ -6,3 +6,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
+
+[dependencies]
+# What a payload is: a tar inside a zstd stream. `tar` writes and reads the container, `zstd` the
+# compression, and both are the shape rustup distributes a toolchain in.
+tar = "0.4"
+zstd = "0.13"
