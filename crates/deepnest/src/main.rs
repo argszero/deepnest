@@ -34,7 +34,7 @@ use deepnest::router::Lifecycle;
 use deepnest::server::{self, BindError, Server, ServerOptions, StartError};
 use deepnest::stop;
 use deepnest::token::{self, TokenError};
-use deepnest::{home, prepare_home};
+use deepnest::{home, prepare};
 
 const USAGE: &str = "\
 deepnest — local-first app generator
@@ -143,7 +143,7 @@ fn serve(opening: Opening) -> Result<(), Failure> {
             "cannot find a home directory: neither $DEEPNEST_HOME nor $HOME/$USERPROFILE is set",
         )
     })?;
-    prepare_home(&home)
+    prepare(&home)
         .map_err(|error| Failure::new(1, format!("cannot prepare {}: {error}", home.display())))?;
 
     let config_path = home.join(config::FILE_NAME);

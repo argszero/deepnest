@@ -585,6 +585,8 @@ impl Router {
             skills: skills.summary,
             skill_list: skills.found,
             skill_problems: skills.skipped,
+            skill_offered: skills.offered,
+            catalog_problems: skills.catalog_problems,
         })
     }
 
@@ -648,6 +650,8 @@ impl Router {
                 summary: "this process was started without a deepnest home".to_string(),
                 found: Vec::new(),
                 skipped: Vec::new(),
+                offered: Vec::new(),
+                catalog_problems: Vec::new(),
             };
         };
 
@@ -656,6 +660,28 @@ impl Router {
         let loaded = deepnest_skills::load(home, None);
         let skills = loaded.skills.len();
         let skipped = loaded.skipped.len();
+
+        // What the catalog offers and this home does not have. Read here rather than behind a route
+        // of its own because it is a file on disk, like the list above it: the facts that cost a
+        // network, or run a program, are the ones that wait for the page's script. A skill nobody
+        // has been told about is one nobody can ask for, and the catalog ships for exactly that.
+        let on_disk: Vec<String> = loaded
+            .skills
+            .iter()
+            .map(|skill| skill.name.clone())
+            .collect();
+        let catalog = deepnest_skills::catalog::load(&root);
+        let offered = catalog
+            .entries
+            .iter()
+            .filter(|entry| !on_disk.contains(&entry.name))
+            .map(|entry| deepnest_web::Offered {
+                name: entry.name.clone(),
+                description: entry.description.clone(),
+                why_not: not_fetchable(entry),
+            })
+            .collect();
+
         SkillsReport {
             summary: match (skills, skipped) {
                 // Sorted by name by the loader, so the page and the prompt list skills in the
@@ -674,6 +700,8 @@ impl Router {
                 .into_iter()
                 .map(|skipped| (skipped.path.display().to_string(), skipped.reason))
                 .collect(),
+            offered,
+            catalog_problems: catalog.rejected.iter().map(ToString::to_string).collect(),
         }
     }
 
@@ -1673,6 +1701,35 @@ struct SkillsReport {
     found: Vec<(String, String)>,
     /// The entries it refused, as `(path, reason)`.
     skipped: Vec<(String, String)>,
+    /// What the catalog offers that is not on disk here yet.
+    offered: Vec<deepnest_web::Offered>,
+    /// The catalog's own unusable lines, one sentence each.
+    catalog_problems: Vec<String>,
+}
+
+/// Why deepnest will not fetch a catalog entry, or `None` when it will.
+///
+/// The three fields [`Entry::is_installable`] asks for, named one at a time: a hand-edited catalog
+/// that dropped `repo` is told which field, which is the difference between a fixable line and a
+/// mystery. The sentence is the page's, so it says what a person can do rather than what is false.
+fn not_fetchable(entry: &deepnest_skills::Entry) -> Option<String> {
+    if entry.is_installable() {
+        return None;
+    }
+    let mut missing = Vec::new();
+    if entry.repo.is_none() {
+        missing.push("`repo`");
+    }
+    if entry.install.is_none() {
+        missing.push("`install`");
+    }
+    if entry.dest.is_none() {
+        missing.push("`dest`");
+    }
+    Some(format!(
+        "it names no {}, so deepnest cannot fetch it — the files are yours to supply",
+        missing.join(", no ")
+    ))
 }
 
 fn plural(count: usize, one: &'static str, many: &'static str) -> &'static str {

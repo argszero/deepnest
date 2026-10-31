@@ -126,6 +126,32 @@ pub struct Panel {
     /// beside a full one of these means "your skill has a typo", and one merged list would read
     /// as "no skills yet".
     pub skill_problems: Vec<(String, String)>,
+    /// What the shipped catalog offers and what is not on disk here yet.
+    ///
+    /// Rendered into the markup for the reason [`Panel::skill_list`] is: the catalog is a file the
+    /// user edits, and a listing that arrived a round trip later would hide the edit. The press for
+    /// an entry deepnest can fetch is the script's job — this crate states what is true, and a
+    /// button that did nothing without a script would be a claim the page cannot keep.
+    pub skill_offered: Vec<Offered>,
+    /// The `skills:` lines the catalog has and could not read, one sentence each.
+    ///
+    /// The same fact as [`Panel::skill_problems`] one level up: a hand-edited catalog with a typo
+    /// would otherwise lose its entry without a word.
+    pub catalog_problems: Vec<String>,
+}
+
+/// One entry the catalog names which is not installed here.
+///
+/// No `installable` flag beside [`Offered::why_not`]: the two would be one fact spelled twice, and
+/// the spelling that matters is the one the page shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Offered {
+    /// The name the catalog gives it, and what an install asks for.
+    pub name: String,
+    /// The catalog's one line about what it is for.
+    pub description: String,
+    /// Why deepnest will not fetch it, in the catalog's own terms — `None` when it will.
+    pub why_not: Option<String>,
 }
 
 /// The panel's HTML.
@@ -142,7 +168,8 @@ pub fn page(panel: &Panel) -> String {
     page.replace("@@SKILL_LIST@@", &skill_markup(panel))
 }
 
-/// The skills section: what loaded, then what did not.
+/// The skills section: what loaded, then what the catalog offers and this home does not have, then
+/// what did not load and what the catalog itself could not read.
 ///
 /// Built here rather than by the caller for the reason the token and the app line are escaped
 /// here: the crate that owns the page is the crate that knows which of its positions are markup
@@ -156,6 +183,41 @@ fn skill_markup(panel: &Panel) -> String {
                 "      <li><code>{}</code> <span class=\"note\">{}</span></li>\n",
                 escape(name),
                 escape(description)
+            ));
+        }
+        out.push_str("    </ul>\n");
+    }
+    if !panel.skill_offered.is_empty() {
+        out.push_str(
+            "    <p class=\"note\">The catalog that ships with deepnest offers these too:</p>\n",
+        );
+        out.push_str("    <ul class=\"skills\">\n");
+        for offered in &panel.skill_offered {
+            out.push_str("      <li");
+            if offered.why_not.is_none() {
+                // The hook the page's script binds a press to. An entry deepnest cannot fetch gets
+                // none: the reason under it is the whole of what there is to do about it.
+                out.push_str(&format!(" data-offer=\"{}\"", escape(&offered.name)));
+            }
+            out.push_str(&format!(
+                "><code>{}</code> <span class=\"note\">{}</span>",
+                escape(&offered.name),
+                escape(&offered.description)
+            ));
+            if let Some(why) = &offered.why_not {
+                out.push_str(&format!(" <span class=\"note\">{}</span>", escape(why)));
+            }
+            out.push_str("</li>\n");
+        }
+        out.push_str("    </ul>\n");
+    }
+    if !panel.catalog_problems.is_empty() {
+        out.push_str("    <p class=\"note\">The catalog has lines deepnest could not read:</p>\n");
+        out.push_str("    <ul class=\"skills\">\n");
+        for problem in &panel.catalog_problems {
+            out.push_str(&format!(
+                "      <li><span class=\"bad\">{}</span></li>\n",
+                escape(problem)
             ));
         }
         out.push_str("    </ul>\n");
@@ -215,7 +277,9 @@ fn escape(value: &str) -> String {
     out
 }
 
-/// The page. `@@PORT@@`, `@@TOKEN@@`, `@@ENDPOINT@@` and `@@APPS@@` are the only substitutions.
+/// The page. `@@PORT@@`, `@@TOKEN@@`, `@@ENDPOINT@@`, `@@APPS@@`, `@@SKILLS@@` and
+/// `@@SKILL_LIST@@` are the substitutions — the skills list last, so a description that happens to
+/// contain a placeholder stays a description.
 const PAGE: &str = r#"<!doctype html>
 <html lang="en">
 <head>
@@ -329,6 +393,8 @@ mod tests {
             skills: "1 skill in /home/u/.deepnest/skills".to_string(),
             skill_list: vec![("notes".to_string(), "Use when writing a note".to_string())],
             skill_problems: Vec::new(),
+            skill_offered: Vec::new(),
+            catalog_problems: Vec::new(),
         }
     }
 
@@ -384,11 +450,23 @@ mod tests {
                 "</li><script>alert(4)</script>".to_string(),
             )],
             skill_problems: vec![("<i>path</i>".to_string(), "<img onerror=y>".to_string())],
+            // The catalog is a file the user edits: its names, descriptions and reasons are input
+            // like any other, and one of them reaching the page as markup would be the same bug.
+            skill_offered: vec![Offered {
+                name: "<em>offered</em>".to_string(),
+                description: "<script>alert(5)</script>".to_string(),
+                why_not: Some("<u>why</u>".to_string()),
+            }],
+            catalog_problems: vec!["<s>problem</s>".to_string()],
         });
         assert!(!page.contains("<script>alert"), "{page}");
         assert!(!page.contains("<img onerror"), "{page}");
         assert!(!page.contains("<b>name</b>"), "{page}");
         assert!(!page.contains("<i>path</i>"), "{page}");
+        assert!(!page.contains("<em>offered</em>"), "{page}");
+        assert!(!page.contains("<u>why</u>"), "{page}");
+        assert!(!page.contains("<s>problem</s>"), "{page}");
+        assert!(!page.contains("<script>alert(5)"), "{page}");
         assert!(page.contains("&quot;&gt;&lt;script&gt;"), "{page}");
     }
 
@@ -444,6 +522,49 @@ mod tests {
             page.contains(r#"<span class="note">@@APPS@@</span>"#),
             "{page}"
         );
+    }
+
+    #[test]
+    fn an_entry_the_catalog_offers_is_listed_with_a_place_for_the_press() {
+        // The catalog ships to tell a user that a capability exists before they have it. An entry
+        // that is not on disk is therefore the one case the page has to show, not hide.
+        let page = page(&Panel {
+            skill_offered: vec![Offered {
+                name: "browser-harness".to_string(),
+                description: "Drive the browser".to_string(),
+                why_not: None,
+            }],
+            ..panel()
+        });
+        assert!(page.contains("offers these too"), "{page}");
+        assert!(page.contains(r#"data-offer="browser-harness""#), "{page}");
+        assert!(page.contains("Drive the browser"), "{page}");
+    }
+
+    #[test]
+    fn an_entry_deepnest_will_not_fetch_says_why_and_offers_no_press() {
+        // A press here could only run something the catalog did not describe, and a row with no
+        // press and no reason would read as a button that is broken rather than as one absent.
+        let page = page(&Panel {
+            skill_offered: vec![Offered {
+                name: "baoyu-design".to_string(),
+                description: "Designs".to_string(),
+                why_not: Some("it names no `repo`, so deepnest cannot fetch it".to_string()),
+            }],
+            ..panel()
+        });
+        assert!(!page.contains("data-offer"), "{page}");
+        assert!(page.contains("it names no `repo`"), "{page}");
+    }
+
+    #[test]
+    fn a_catalog_line_that_could_not_be_read_is_reported() {
+        let page = page(&Panel {
+            catalog_problems: vec!["catalog entry `notes` has no description".to_string()],
+            ..panel()
+        });
+        assert!(page.contains("could not read"), "{page}");
+        assert!(page.contains("has no description"), "{page}");
     }
 
     #[test]
