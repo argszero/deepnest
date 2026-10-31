@@ -29,6 +29,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::atomic;
+
 /// The file, inside the user's skills root.
 pub const STATE_FILE: &str = ".state.json";
 
@@ -103,14 +105,10 @@ impl State {
 
     /// Write the state file at `path`, whole or not at all.
     pub fn write(&self, path: &Path) -> io::Result<()> {
-        let parent = path.parent().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "state path has no parent")
-        })?;
-        fs::create_dir_all(parent)?;
         let mut text = serde_json::to_string_pretty(self)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         text.push('\n');
-        write_atomically(path, &text)
+        atomic::write(path, &text)
     }
 
     /// The skills an updater may refresh — and the only list it is given.
@@ -179,29 +177,6 @@ impl State {
 /// Where the state file lives in a given skills root.
 pub fn path(root: &Path) -> PathBuf {
     root.join(STATE_FILE)
-}
-
-/// Write a file whole: a temporary neighbour, then a rename.
-fn write_atomically(target: &Path, text: &str) -> io::Result<()> {
-    let parent = target
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no parent"))?;
-    let scratch = parent.join(format!(
-        ".{}.{}.tmp",
-        target
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("state"),
-        std::process::id()
-    ));
-    fs::write(&scratch, text)?;
-    match fs::rename(&scratch, target) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let _ = fs::remove_file(&scratch);
-            Err(error)
-        }
-    }
 }
 
 #[cfg(test)]

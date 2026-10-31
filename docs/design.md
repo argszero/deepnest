@@ -210,7 +210,19 @@ The catalog that ships inside the binary is itself an ordinary skill file carryi
 
 **The bundled catalog is a floor, not a source of truth.** `catalog::ensure` writes it only when the file is absent, which covers a fresh install and an upgrade whose file was deleted, and never overwrites a catalog the user curated.
 
-**Still to come: the fetch itself.** Running a package that publishes its own skill file and comparing releases both need things the binary does not have yet — a subprocess for the first, an HTTP client for the second — and both belong behind the agent, which is the thing that would act on an install. The decision-then-side-effect boundary is drawn where the decisions are testable offline: what is installable, what may be refreshed, and what a failed install leaves behind are all answered above, and the two side effects are the installer's remaining half.
+**Still to come: the release check.** Comparing an installed version against a package's releases needs an HTTP client the crate does not have, and it belongs behind the agent, which is the thing that would act on an update.
+
+**What has landed since: the install itself** (`decided in implementation`, 2026-10-31). `installer` drives the one side effect the catalog describes — for `install: self-publishing`, it runs the package and takes the skill file it prints — and records the result. Five decisions came with it:
+
+- **The publisher is the entry's own name, not a constant.** The reference implementation sets one `CLI_NAME` for every entry, so a second catalog entry would run the first one's program (`impl, ref: emrg/skills/installer.py`). Here it is the entry's `name`, and one that cannot be resolved is refused by name together with the repository it comes from — the repository URL is the fix, which is what a refusal owes the reader.
+- **A file deepnest did not write is never overwritten, and both halves of provenance are consulted.** The state file says whether deepnest put this file there and the disk says whether anything is there at all; either alone is a way to lose somebody's work, because a state file can be missing and a file can be deleted. A name the state file records as the user's is refused even with an empty path, and a file the state file does not account for is refused as unknown provenance — the same reading a missing `managed` field gets. The reference writes `dest/<name>.md` over whatever is there.
+- **The published header must declare the name the catalog asked for.** The reference writes the file under the *published* name and records state under the *catalog* name, so the update loop then looks up a skill that is not there under that name. Here a disagreement is a refusal naming both.
+- **Nothing is recorded that is not on disk.** The file is written first and the state second, so an interrupted install leaves an unrecorded file — which the next install refuses to overwrite, the safe direction — rather than a managed entry pointing at nothing. `install` updates the state and the caller writes it, which keeps this crate's file-writing in one place.
+- **No version is invented.** The reference records `version: "unknown"` when its release check fails; the state model already has the better answer for "the source did not say", which is an absent field, and a refresh keeps whatever version was there rather than clearing it.
+
+The `Publisher` is a trait for the same reason `Runner`, `Spawner`, `Probe` and `Prober` are: every refusal worth testing happens *after* a program has run, and a test that ran a real one would measure whatever that program does on the machine running the suite. The real one waits as long as the package takes — a limit worth naming, and one whose fix goes behind this seam rather than into the logic.
+
+**Not wired into the binary, like the loader.** Installing is a side effect on the user's machine and belongs to the agent, which does not exist yet; `docs/design.md` §2's routes therefore gain nothing from this slice.
 
 ### `crates/apps` — app lifecycle
 
@@ -378,9 +390,9 @@ One module per cycle, each landing with its tests:
    concurrently; the escalation prompt inside the dialog remains, and it needs the agent in the
    binary first.
 8. `crates/skills` — loader, catalog, installer. **In progress**: the loader (two roots, two
-   layouts, shadowing, skip reporting, the prompt summary), the bundled catalog and the `.state.json`
-   that says which skills may be refreshed have landed; the installer that fetches what the catalog
-   names — a subprocess for a self-publishing package, an HTTP client for release tags — remains.
+   layouts, shadowing, skip reporting, the prompt summary), the bundled catalog, the `.state.json`
+   that says which skills may be refreshed, and the install path for a self-publishing package have
+   landed; the release check that would notice a newer version — an HTTP client — remains.
 9. `crates/packaging` — payload, first-run unpack, signing. **In progress**: the toolchain
    directory contract has landed (where a payload unpacks, the marker that makes a directory whole,
    and the sweep that removes what an interrupted unpack left behind), and so has the C toolchain
