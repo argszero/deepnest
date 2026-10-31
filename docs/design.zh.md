@@ -33,7 +33,7 @@
 - 转发层往每个 `/app/<slug>/` 的响应里注入悬浮球，所以 agent 把应用页面整块重写也不会把它弄丢；为此它也改应用设的 CSP。
 - 因此转发层负责：注入 `<base href>`、重写绝对路径、重写 `Location` 头、给 Cookie 加 `Path` 前缀、WebSocket 升级、SSE 不缓冲。
 
-单实例准入**就是那个 bind 本身** —— 内核拒绝第二个 bind，所以没有可伪造的 PID 文件、没有竞态（`实现自决, ref: emrg/server/daemon.py::_create_fixed_port_socket`）。POSIX 只设 `SO_REUSEADDR`、绝不 `SO_REUSEPORT`；Windows 用 `SO_EXCLUSIVEADDRUSE`。bind 失败但后面没有活着的监听者 ⇒ TIME_WAIT 残留，有界重试，不要直接失败。
+单实例准入**就是那个 bind 本身** —— 内核拒绝第二个 bind，所以没有可伪造的 PID 文件、没有竞态（`实现自决, ref: emrg/server/daemon.py::_create_fixed_port_socket`）。POSIX 只设 `SO_REUSEADDR`、绝不 `SO_REUSEPORT`；Windows **不设** `SO_EXCLUSIVEADDRUSE` —— 两个都不设的默认行为本来就以 `WSAEADDRINUSE` 拒绝第二个 bind，而显式设置要走一次原始 winsock 调用，那是打包期该做的事，不在这一层声称。bind 失败但后面没有活着的监听者 ⇒ TIME_WAIT 残留，有界重试，不要直接失败。
 
 随机令牌写入 `~/.deepnest/deepnest.token`（权限 `0600`），并由 keepalive 定时重写，外部误删能自愈（`实现自决, ref: emrg/server/daemon.py::serve`）。回环地址不是安全边界：令牌加 `Host`/`Origin` 校验才是挡 CSRF 与 DNS rebinding 的东西。
 
@@ -103,7 +103,7 @@ shell 结果明确携带沙箱判定，区分「runner 没起来」与「沙箱�
 
 **agent 已经进二进制，能回一条消息了**（`实现中决定`，2026-10-31）。`POST /api/apps/<slug>/chat` 从请求体读 `{"message": "…"}`，回一个轮次。先有三道拒绝，各指一条不同的下一步：体不是一条消息（`400`）、进程没有配置文件可读（`503`）、配置里还没有模型（`412`，首启表单只差一个请求）。此后 `crates/deepnest::chat` 为**每个应用拼一个 agent** —— 六个叶子工具跑在该应用的 `workspace-write` 策略上、对话与记忆在 `<应用>/.agent/` 下、系统提示词由真加载器给出 —— 交给循环。接线带出五条决定：
 
-- **HTTP 适配器是明文的，且点名拒绝 `https`。** `crates/gateway::transport` 用 `std::net::TcpStream` 实现 `deepnest_llm::Transport`，因此没有 crate 因此多出 socket 依赖，`crates/llm` 依然无网络可测。**没有 TLS 客户端**：证书库、密码套件、信任决定是一个编译期与供应链上的台阶，这一版没有迈；诚实的选项只有两个 —— 点名拒绝一个 `https` 端点并说清缺什么，或者发一个到不了的请求、让用户一直等下去最后怪自己的 key。`http://127.0.0.1` 上的本地模型服务今天就能用；云端端点不能，而且它会这么说。
+- **HTTP 适配器两种 scheme 都走，而且互不降级。** `crates/gateway::transport` 为 `http://` 用裸 `std::net::TcpStream` 实现 `deepnest_llm::Transport`，`crates/llm` 依然不拥有 socket、依然无网络可测；`https://` 走 `native-tls`，把信任决定交给平台（macOS 的 Security framework、Windows 的 SChannel、Linux 的 OpenSSL），于是一个端点按用户浏览器用的**同一个证书库**校验。选那个库、而不是把根列表打进二进制，理由就是这一点：公司代理的证书签发机构装在那里，内置列表会拒绝它，而用户只会读到「deepnest 坏了」。`HttpTransport` 是两者合体，也是二进制实际装上的那个；两半各自点名拒绝对方的 scheme，因为明文撞 TLS 端口要么是静默、要么是把 key 明文发出去，两者都不是「回退」。**被拒的证书要说清是哪一种拒绝**（`实现中决定`，2026-11-01）：证书不受信任、证书是给别的名字的、端点根本到不了 —— 三种情况三种修法，所以是三条消息；`native-tls` 不暴露错误码、只给一句话，所以这个区分是从那句话里读出来的，而平台自己不说清名字不匹配的地方，消息仍然说「证书被拒」，绝不退回「连接失败」。适配器仍然不做流式：`post_stream` 照旧拒绝，一个轮次照旧整个回。
 - **一个轮次整个回，不流式。** `Client` 的 `Model` 实现走的是 `chat_stream`，这个适配器给不了，所以 `crates/deepnest` 的 `model::Endpoint` 调 `Client::turn`：同一个 `AssistantTurn`，一次到齐。缺的是「看着答案被写出来」，不是答案。
 - **端点每请求读一次，不在启动时握住。** `POST /api/config` 能改它，启动时拼一次的 agent 会一直问旧的，直到下次启动。
 - **改过东西的轮次只报 `changed`，不顺手重编译。** 是 `bash` 与 `write`/`edit` 置这个标记，回复带着它，编译仍旧是既有的 `POST /api/apps/<slug>/build` 加 `/restart`。在这个请求里编译会让一条连接卡在 `bun install` 上一分钟，比任何浏览器肯等的时间都长。
@@ -141,7 +141,7 @@ shell 结果明确携带沙箱判定，区分「runner 没起来」与「沙箱�
 
 **内置目录是地板，不是真源。** `catalog::ensure` 只在该文件缺失时才写，覆盖的是全新安装与「升级后文件被删」两种情况，永不覆盖用户自己整理过的目录。
 
-**release 比对已落地，请求本身仍是一条缝**（`实现中决定`，2026-10-31）。`crates/skills::release` 回答一个问题：「盘上这份的版本，比包里发布的最新版旧吗？」—— 一次请求、一次比较 —— 而请求走的是 `Releases` 这条缝。它返回的是答复的**本体**，不是解析好的 release，理由与 `Publisher` 返回程序的 stdout 相同：本体能出的每一种错，都在测试用一个字符串就能驱动的代码里判定。缺的只是 socket，而缺的原因前面已经记过：GitHub 走 TLS，这个工作区还没有 TLS 客户端。`release_url` 把端点写进契约，后来那条传输层因此没有形状需要自己发明。五条决定：
+**release 比对已落地，请求本身仍是一条缝**（`实现中决定`，2026-10-31）。`crates/skills::release` 回答一个问题：「盘上这份的版本，比包里发布的最新版旧吗？」—— 一次请求、一次比较 —— 而请求走的是 `Releases` 这条缝。它返回的是答复的**本体**，不是解析好的 release，理由与 `Publisher` 返回程序的 stdout 相同：本体能出的每一种错，都在测试用一个字符串就能驱动的代码里判定。缺的只是 socket，而且缺的只是接线：`crates/gateway::transport` 现在走得通 `https`，但 `crates/skills` 并不依赖它，所以这里还什么都取不到。`release_url` 把端点写进契约，后来那条传输层因此没有形状需要自己发明。五条决定：
 
 - **`GET` 没有从模型客户端借，也不需要借。** 缝是本 crate 自己的，返回 `io::Result<String>`、收一个 `owner/name` —— skill 的问题用 skill 的词表，这正是当初刻意不复用模型客户端那条 `POST` 缝时答应的事。
 - **四个答案，因为「没有」与「说不准」不是同一个答案。** `UpToDate`（无事可做）、`Newer`（刷新，并把采纳的版本记下来）、`Unknown`（最新版知道了、盘上那份没记录 —— 一次刷新把它采纳下来，从此可比）、`CannotTell`（附一个 `Why` 点名缺的是哪一块）。把第四种并进第一种，就是更新检查悄悄不再提供更新的由来；它也是让一条坏掉的检查读起来不像健康检查的那一支。
@@ -318,7 +318,7 @@ struct MemoryStore { /* 条目 + 索引；正文永不进提示词 */ }
 5. `crates/deepnest` —— 二进制 + 三平台 CI 矩阵。排在应用生命周期**之前**：「这东西在三平台上到底能不能起来」要在答案还便宜的时候答掉。此后每个模块要么接进二进制落地，要么在 PR 里说明为什么不接。**它现在承载 agent**（`实现中决定`，2026-10-31）：`POST /api/apps/<slug>/chat` 用一个真·按应用 agent 跑完一个轮次，所以它下面那五个 crate 从一条消息就能碰到，而不只是从测试里。
 6. `crates/apps` —— 模板、编译、生命周期、日志。**已落地**，三片：目录契约 → 进程生命周期（端口分配、启停）→ 模板与编译（`POST /api/apps/<slug>/create` 与 `/build`）。三片全部接进二进制。
 7. `crates/gateway` + `crates/web` —— 唯一的门、面板、悬浮球。**已落地**：gateway 的转发、它底下那层 HTTP、WebSocket 升级、不缓冲的流式、面板、悬浮球注入与随之而动的 CSP 改写，以及球里的提权提示 —— 申请由调用携带、页面轮询取它、回答只放宽一次调用。二进制并发地服务连接，正是它让一个轮次能一边等、页面一边作答。
-8. `crates/skills` —— 加载器、目录、安装器。**进行中**：加载器（两个根、两种布局、遮蔽、跳过报告、提示词摘要）、随二进制内置的目录、记录哪些 skill 可被刷新的 `.state.json`、自发布包的安装路径、以及带自己一条一次性请求缝的 release 比对均已落地；还差的只是那条缝底下的 socket —— GitHub 走 TLS，而本工作区还没有 TLS 客户端。
+8. `crates/skills` —— 加载器、目录、安装器。**进行中**：加载器（两个根、两种布局、遮蔽、跳过报告、提示词摘要）、随二进制内置的目录、记录哪些 skill 可被刷新的 `.state.json`、自发布包的安装路径、以及带自己一条一次性请求缝的 release 比对均已落地；还差的只是那条缝底下的 socket —— `crates/gateway::transport` 现在走得通 `https`，但还没有任何东西把它接到这个 crate 里。
 9. `crates/packaging` —— 载荷、首启解包、签名。**进行中**：工具链的目录契约已落地（载荷解到哪、什么标记让一个目录算完整、清掉被中断解包残留的清扫），C 工具链预检也已落地并接进 `build` 路由（缺就回 `412`，一步不跑）。zstd 解包与签名仍未做。
 
 ## 7. 不可让步

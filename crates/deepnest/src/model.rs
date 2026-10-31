@@ -3,8 +3,9 @@
 //! `crates/agent` reaches the model through its own `Model` trait so the loop is testable with no
 //! network; this is the one line of wiring that connects it to [`deepnest_llm::Client`], and it
 //! exists rather than the crate's streaming impl because the HTTP adapter in
-//! `crates/gateway::transport` sends a whole request and reads a whole answer. When a TLS adapter
-//! lands, this type is what changes — the loop above it is already indifferent.
+//! `crates/gateway::transport` sends a whole request and reads a whole answer. That adapter carries
+//! `https` as well as `http` now; what it still does not do is stream, so a streaming `Model` impl
+//! is what this type would have to become — the loop above it is already indifferent.
 //!
 //! The prompt is passed on every request because the loop owns it; nothing here decides what the
 //! agent is told.

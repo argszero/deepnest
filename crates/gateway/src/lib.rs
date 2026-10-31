@@ -47,4 +47,4 @@ pub use proxy::{
     exchange, forward, is_upgrade, Answer, ForwardError, Forwarder, StdForwarder, Stream,
     StreamKind, Target,
 };
-pub use transport::PlainHttp;
+pub use transport::{HttpTransport, PlainHttp, TlsHttp};
