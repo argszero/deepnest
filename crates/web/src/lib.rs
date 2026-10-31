@@ -644,10 +644,37 @@ mod tests {
     }
 
     #[test]
+    fn the_panel_asks_for_a_refresh_with_a_post_that_names_one_skill() {
+        // A refresh runs a program on the user's machine, so the script must ask for it with a verb a
+        // browser never prefetches and a body naming the skill: a link would make the request by
+        // being pointed at, and one button that refreshed everything would act on a set nobody saw.
+        assert!(
+            SCRIPT.contains("/api/skills/refresh"),
+            "the panel has no way to ask for a refresh, so the route is unreachable from the product"
+        );
+        assert!(
+            SCRIPT.contains("JSON.stringify({ name: name })"),
+            "the refresh is asked for without naming the skill it is about"
+        );
+        // The server answers `202` and the publisher takes as long as the package does, so the script
+        // has to read the same route back for the outcome.
+        assert!(
+            SCRIPT.matches("/api/skills/refresh").count() >= 2,
+            "the script asks for a refresh and never reads its outcome back"
+        );
+    }
+
+    #[test]
     fn the_script_calls_the_routes_the_server_has() {
         // Cheap guard against a script and a router drifting apart: every path the script fetches
         // is one this repository serves.
-        for path in ["/api/health", "/api/apps", "/api/config"] {
+        for path in [
+            "/api/health",
+            "/api/apps",
+            "/api/config",
+            "/api/skills/updates",
+            "/api/skills/refresh",
+        ] {
             assert!(
                 SCRIPT.contains(path),
                 "the script never calls {path}, so either it is dead or this test is stale"

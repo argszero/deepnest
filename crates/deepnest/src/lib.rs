@@ -35,6 +35,7 @@ pub mod home;
 pub mod model;
 pub mod open;
 pub mod rebuild;
+pub mod refresh;
 pub mod router;
 pub mod server;
 pub mod stop;

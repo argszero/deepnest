@@ -259,14 +259,20 @@
     api("/api/skills/updates")
       .then(function (report) {
         var lines = [];
+        // The rows a person can act on: a published release, or a skill whose installed version
+        // nobody recorded. Each gets its own button below, because a refresh runs a program on this
+        // machine and one press that ran several would act on a set the user never saw.
+        var actionable = [];
         (report.skills || []).forEach(function (skill) {
           if (skill.state === "newer") {
             lines.push(skill.name + ": release " + skill.version + " is published.");
+            actionable.push(skill);
           } else if (skill.state === "unknown") {
             lines.push(
               skill.name + ": " + skill.version + " is published; no installed version is recorded, " +
                 "so there is nothing to compare it with yet."
             );
+            actionable.push(skill);
           } else if (skill.state === "unchecked") {
             // Said out loud rather than left blank: a missing line and "up to date" would look the
             // same, which is the reading the four-state check exists to prevent.
@@ -279,12 +285,88 @@
         var note = element("p", "note", lines.join(" "));
         note.id = "skills-updates";
         section.appendChild(note);
+        actionable.forEach(function (skill) {
+          if (document.getElementById("refresh-" + skill.name)) {
+            return;
+          }
+          var row = element("p", "note");
+          row.id = "refresh-" + skill.name;
+          var press = button("Refresh " + skill.name, function () {
+            return askRefresh(skill.name, row, press);
+          });
+          row.appendChild(press);
+          section.appendChild(row);
+        });
       })
       .catch(function () {
         // The check is a courtesy, and a page that reported its failure in red would be shouting
         // about the least important thing on it. The skills themselves are already listed above,
         // read from disk with no network at all.
       });
+  }
+
+  // ---- skill refresh -------------------------------------------------------------------------
+
+  // A refresh runs the package that publishes the skill, so it is one explicit press per skill, and
+  // the outcome arrives through the same route: the server starts it and answers at once, because
+  // the publisher returns when that program decides to — longer than a browser holds a request.
+  var REFRESH_POLL_MS = 500;
+  var REFRESH_POLLS = 240;
+
+  function askRefresh(name, row, press) {
+    press.textContent = "Refreshing " + name + "...";
+    return api("/api/skills/refresh", { method: "POST", body: JSON.stringify({ name: name }) })
+      .then(function () {
+        return awaitRefresh(name, row, REFRESH_POLLS);
+      })
+      .then(function () {
+        // Enabled again either way: a refresh that failed can be asked for again, and one that
+        // worked is cheap to repeat.
+        press.textContent = "Refresh " + name;
+      })
+      .catch(function (error) {
+        press.textContent = "Refresh " + name;
+        throw error;
+      });
+  }
+
+  function awaitRefresh(name, row, left) {
+    return api("/api/skills/refresh").then(function (answer) {
+      var refresh = answer && answer.refresh;
+      if (refresh && refresh.name === name && refresh.state !== "refreshing") {
+        if (refresh.state === "refreshed") {
+          reportRefresh(
+            row,
+            "refreshed" + (refresh.version ? " to " + refresh.version : ", version still unknown"),
+            "note"
+          );
+        } else {
+          reportRefresh(row, "not refreshed: " + (refresh.detail || "no reason given"), "bad");
+        }
+        return null;
+      }
+      if (left <= 0) {
+        reportRefresh(row, "still running; reload the page to see how it ended", "note");
+        return null;
+      }
+      return new Promise(function (resolve) {
+        setTimeout(function () {
+          resolve(awaitRefresh(name, row, left - 1));
+        }, REFRESH_POLL_MS);
+      });
+    });
+  }
+
+  // Replaced rather than appended: a second press must not leave the previous answer standing
+  // beside the new one.
+  function reportRefresh(row, text, kind) {
+    var said = row.querySelector(".refresh-outcome");
+    if (!said) {
+      said = element("span", "");
+      row.appendChild(said);
+    }
+    said.className = kind + " refresh-outcome";
+    said.textContent = " " + text;
   }
 
   refreshUpdates();
