@@ -3,9 +3,10 @@
 //! A skill is a Markdown file with a header, holding instructions the agent can choose to follow.
 //! This crate is the half that reads them and the half that knows which ones exist: [`loader`] finds
 //! the files and [`frontmatter`] reads their headers, [`catalog`] holds the list of optional skills
-//! that ship inside the binary, and [`state`] records which installed skills deepnest may refresh.
-//! Fetching what the catalog names — running a package that publishes its own skill file, and
-//! comparing releases — is the one piece not written, and [`catalog`] says why it can wait.
+//! that ship inside the binary, [`installer`] puts one of them in place, and [`state`] records which
+//! installed skills deepnest may refresh. What is still not written is the update check — comparing
+//! an installed version against the package's releases, which needs an HTTP client this crate does
+//! not have; [`installer`] says why that half can wait.
 //!
 //! The rule the whole crate is shaped by is **progressive disclosure**: only a skill's name, its
 //! one-line description and the path to its file reach the prompt. The instructions are read by the
@@ -27,14 +28,24 @@
 //! - **Only `managed: true` may be refreshed.** A skill the user put in place is theirs; that is
 //!   enforced by handing an updater the managed list and nothing else, and a state file missing the
 //!   flag reads as unmanaged.
+//! - **An install never overwrites a file it did not write.** Provenance is the state file's
+//!   `managed` flag, and a file already on disk that the state file does not account for is the
+//!   user's, because doubt is not permission.
+
+mod atomic;
 
 pub mod catalog;
 pub mod frontmatter;
+pub mod installer;
 pub mod loader;
 pub mod state;
 
 pub use catalog::{Catalog, Entry, Rejected, BUNDLED, CATALOG_FILE};
 pub use frontmatter::{Frontmatter, NoFrontmatter};
+pub use installer::{
+    install, resolve_dest, Outcome, Placed, Publisher, Refused, Report, StdPublisher, PUBLISH_ARG,
+    SELF_PUBLISHING,
+};
 pub use loader::{
     app_root, load, summary, user_root, Loaded, Skill, Skipped, Source, APP_DIR, SKILL_FILE,
     USER_DIR,

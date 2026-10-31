@@ -32,6 +32,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::atomic;
 use crate::frontmatter;
 
 /// The file the catalog lives in, inside the user's skills root.
@@ -315,8 +316,7 @@ pub fn ensure(root: &Path) -> io::Result<PathBuf> {
     if target.exists() {
         return Ok(target);
     }
-    fs::create_dir_all(root)?;
-    write_atomically(&target, BUNDLED)?;
+    atomic::write(&target, BUNDLED)?;
     Ok(target)
 }
 
@@ -330,32 +330,6 @@ pub fn load(root: &Path) -> Catalog {
     match fs::read_to_string(path(root)) {
         Ok(text) => Catalog::parse(&text),
         Err(_) => Catalog::default(),
-    }
-}
-
-/// Write a file whole: a temporary neighbour, then a rename.
-///
-/// A reader that finds a half-written catalog would see an empty list, which reads as "no optional
-/// skills" rather than "a write is in flight".
-fn write_atomically(target: &Path, text: &str) -> io::Result<()> {
-    let parent = target
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "catalog path has no parent"))?;
-    let scratch = parent.join(format!(
-        ".{}.{}.tmp",
-        target
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("catalog"),
-        std::process::id()
-    ));
-    fs::write(&scratch, text)?;
-    match fs::rename(&scratch, target) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let _ = fs::remove_file(&scratch);
-            Err(error)
-        }
     }
 }
 
