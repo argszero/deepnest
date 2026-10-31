@@ -314,6 +314,12 @@ fn serve(
 }
 
 fn answer(mut stream: TcpStream, router: &Router) -> io::Result<()> {
+    // Blocking, explicitly. BSD — and therefore macOS — hands the accepted socket the listening
+    // socket's non-blocking state, while Linux does not. Inheriting it turns "the head has not
+    // arrived in one packet yet" into a client error, and the half-written answer that follows
+    // is a connection reset at the other end. This cost two of eight integration tests on the
+    // macOS CI job and none on Linux: exactly the difference this matrix exists to find.
+    let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
     let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
 

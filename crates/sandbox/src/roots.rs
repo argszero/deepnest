@@ -114,14 +114,19 @@ pub fn canonical_path(path: &Path) -> PathBuf {
 
 /// Whether two paths name the same file.
 ///
-/// By **device and inode** wherever the platform reports them, because a protected file
-/// reached through a second name — a hard link, a symlink, a case-folding alias — is the same
-/// file and must be refused the same way. A string comparison answers a question about the
-/// spelling, and the spelling is what an attacker chooses.
+/// By identity — device and inode on unix, volume serial number and file index on Windows —
+/// because a protected file reached through a second name (a hard link, a symlink, a
+/// case-folding alias) is the same file and must be refused the same way. A string comparison
+/// answers a question about the spelling, and the spelling is what an attacker chooses.
 ///
-/// `None` when there is no identity to compare (a path that does not exist, or a platform
-/// without the pair): the caller then decides, and [`Policy::is_protected`] treats `None` as
-/// "not the protected file" while comparing the canonical paths as a second, weaker check.
+/// The Windows pair is not a stand-in for the unix one: `std` reports it as `Option`, and the
+/// canonical spelling is used only when the filesystem reports neither (some network shares).
+/// That fallback is a real weakness and is named as one — it is why the CI matrix runs this on
+/// all three platforms rather than trusting that one identity check covers the others.
+///
+/// `None` when there is no identity to compare (a path that does not exist): the caller then
+/// decides, and [`Policy::is_protected`] treats `None` as "not the protected file" while
+/// comparing the canonical paths as a second, weaker check.
 pub fn same_file(left: &Path, right: &Path) -> Option<bool> {
     let left_meta = std::fs::metadata(left).ok()?;
     let right_meta = std::fs::metadata(right).ok()?;
@@ -130,11 +135,24 @@ pub fn same_file(left: &Path, right: &Path) -> Option<bool> {
         use std::os::unix::fs::MetadataExt;
         Some(left_meta.dev() == right_meta.dev() && left_meta.ino() == right_meta.ino())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        // No stable (device, inode) pair here; `Metadata` carries none on this platform's
-        // std. The canonical spelling is the strongest identity available, so it is used and
-        // the weakness is named in the docstring above rather than papered over.
+        use std::os::windows::fs::MetadataExt;
+        match (
+            left_meta.volume_serial_number(),
+            left_meta.file_index(),
+            right_meta.volume_serial_number(),
+            right_meta.file_index(),
+        ) {
+            (Some(left_volume), Some(left_index), Some(right_volume), Some(right_index)) => {
+                Some(left_volume == right_volume && left_index == right_index)
+            }
+            // A filesystem that reports neither leaves only the spelling — see the docstring.
+            _ => Some(canonical_path(left) == canonical_path(right)),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
         let _ = (left_meta, right_meta);
         Some(canonical_path(left) == canonical_path(right))
     }
@@ -248,18 +266,23 @@ mod tests {
 
     #[test]
     fn a_file_grant_covers_itself_but_not_a_tree_of_that_name() {
-        let file = WritableRoot::file("/srv/notes.md");
-        assert!(file.covers(&canonical_path(Path::new("/srv/notes.md"))));
-        assert!(file.covers(Path::new("/srv/notes.md")));
-        assert!(!file.covers(Path::new("/srv/notes.md/inner")));
+        // Both sides go through `canonical_path`, which is what every real caller does. Asserting
+        // against the raw spelling only worked on a platform where canonicalising this path is a
+        // no-op: on Windows `/srv/notes.md` resolves against the current drive, so the grant and
+        // the target agree only after both are resolved.
+        let spelled = Path::new("/srv/notes.md");
+        let file = WritableRoot::file(spelled);
+        assert!(file.covers(&canonical_path(spelled)));
+        assert!(!file.covers(&canonical_path(Path::new("/srv/notes.md/inner"))));
     }
 
     #[test]
     fn a_directory_grant_covers_everything_below_it() {
         let dir = WritableRoot::directory("/srv/app");
-        assert!(dir.covers(Path::new("/srv/app")));
-        assert!(dir.covers(Path::new("/srv/app/src/main.rs")));
-        assert!(!dir.covers(Path::new("/srv/apple")));
+        assert!(dir.covers(&canonical_path(Path::new("/srv/app"))));
+        assert!(dir.covers(&canonical_path(Path::new("/srv/app/src/main.rs"))));
+        // A component boundary, not a string prefix: `apple` is not inside `app`.
+        assert!(!dir.covers(&canonical_path(Path::new("/srv/apple"))));
     }
 
     #[test]
