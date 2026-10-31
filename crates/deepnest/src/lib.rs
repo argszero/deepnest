@@ -2,9 +2,10 @@
 //!
 //! Nothing that shipped before this crate could be started. This one **starts**: it reads the
 //! one file the user must supply, writes the token that guards the panel, takes the single
-//! listening port as its own, and answers on it. Everything above that line — the apps, the
-//! gateway, the panel itself — arrives in later crates; nothing here pretends to be them, and
-//! every route it does not serve says so by name.
+//! listening port as its own, and answers on it. What sits above that line is a crate beside this
+//! one: the HTTP layer and the forward are [`deepnest_gateway`], and the panel itself is
+//! `deepnest-web`. Every route it does not serve it names, rather than answering a `404` that looks
+//! like a bug in a path the caller spelled correctly.
 //!
 //! Three of its decisions are load-bearing, and each is stated where it is made:
 //!

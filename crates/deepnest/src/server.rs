@@ -167,6 +167,10 @@ pub struct ServerOptions {
     /// lifecycle routes answering `503`: a server that read apps but could not run them would
     /// otherwise have to pretend the button worked.
     pub lifecycle: Option<Lifecycle>,
+    /// `~/.deepnest/config.toml`, for the panel's first-run form. `None` leaves `POST /api/config`
+    /// answering `503`: a process with no config path has nowhere to save one, and answering "saved"
+    /// to a write that went nowhere is the one lie this server must not tell.
+    pub config_path: Option<PathBuf>,
     /// How often the keepalive re-asserts the token file.
     pub keepalive: Duration,
     pub bind: BindAttempts,
@@ -181,6 +185,7 @@ impl Default for ServerOptions {
             model: None,
             apps_dir: None,
             lifecycle: None,
+            config_path: None,
             keepalive: Duration::from_secs(30),
             bind: BindAttempts::default(),
         }
@@ -347,6 +352,9 @@ pub fn start(options: ServerOptions) -> Result<Server, StartError> {
     })?;
 
     let mut router = Router::new(addr.port(), options.model.clone(), options.token.clone());
+    if let Some(path) = options.config_path.clone() {
+        router = router.with_config_path(path);
+    }
     match (options.lifecycle.clone(), options.apps_dir.clone()) {
         // The supervisor is what makes the lifecycle routes real, and a home always implies
         // `home/apps` — so a caller that gave the home need not spell the directory twice. The
@@ -482,13 +490,25 @@ fn answer(mut stream: TcpStream, router: &Router, stop: Arc<AtomicBool>) -> io::
             ),
             false,
         ),
-        // Nothing here reads a body, so a request that announces one is refused before its route
-        // is even looked at: answering "done" to a request whose content was never seen is the
-        // failure this arm exists to prevent.
+        // A chunked body is refused before its route is looked at: the bound that makes a body
+        // safe to read is a declared length, and a chunked one has none until it has all arrived.
         Err(ReadError::Parse(ParseError::Body)) => (
             Answer::Full(Response::text(
                 411,
-                "this server reads no request body: send the action in the path\n",
+                "this server reads a request body only with a Content-Length: send one, or send \
+                 nothing\n",
+            )),
+            false,
+        ),
+        // A body past the bound is a decision about how much memory this process spends, and the
+        // answer is the status rather than the buffer.
+        Err(ReadError::Parse(ParseError::TooLarge)) => (
+            Answer::Full(Response::text(
+                413,
+                format!(
+                    "request body too large: this server reads at most {} bytes\n",
+                    deepnest_gateway::http::MAX_BODY
+                ),
             )),
             false,
         ),

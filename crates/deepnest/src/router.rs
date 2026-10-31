@@ -26,9 +26,19 @@
 //! `deepnest_apps::list` — because the panel showing fewer apps than the user created has no other
 //! way to say why.
 
+//! `/` is `crates/web`'s panel, and the two routes it needs live here: its script, served from the
+//! crate's own file so the policy can be `script-src 'self'`, and `GET`/`POST /api/config` — the
+//! one route that reads a **request body**. The body and not the URL, because what it carries is an
+//! API key: a key in a URL is written into the browser's history and into whatever logs the URL,
+//! which is the same reason the control token travels in a header rather than in the path.
+//!
+//! A save takes effect in this process rather than at the next start. The model name is behind a
+//! lock for exactly that reason: a first-run form whose answer is "restart me" is asking the user
+//! to do something the program does not need.
+
 use std::fmt::{self, Write as _};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use deepnest_apps::{
     BuildError, Runner, Slug, StartError, State, StdRunner, Supervisor, TemplateError,
@@ -36,6 +46,7 @@ use deepnest_apps::{
 use serde_json::{json, Value};
 
 use deepnest_gateway::{Answer, ForwardError, Forwarder, StdForwarder, Target};
+use deepnest_web::Panel;
 
 use crate::http::{Method, Request, Response};
 use crate::token::Token;
@@ -97,7 +108,11 @@ impl fmt::Debug for Lifecycle {
 pub struct Router {
     port: u16,
     /// The model name from `config.toml`, when there was a config to read.
-    model: Option<String>,
+    ///
+    /// Behind a lock because the panel can change it: `POST /api/config` writes the file *and*
+    /// updates this, so what the page and the health probe report is the file that is on disk now.
+    /// A `RwLock` and not a `Mutex` because every reader only reads.
+    model: Arc<RwLock<Option<String>>>,
     /// The control token. `None` only in tests — the binary always has one.
     token: Option<Token>,
     /// `~/.deepnest/apps`, when the caller knows where the home is. `None` reports that the list
@@ -106,6 +121,9 @@ pub struct Router {
     /// The supervisor and the home to log under. `None` in tests that only read: the lifecycle
     /// routes then say this process cannot start anything, rather than pretending they tried.
     lifecycle: Option<Lifecycle>,
+    /// `config.toml`, for the panel's first-run form. `None` means this process has nowhere to
+    /// write one, and `POST /api/config` says so instead of succeeding into the void.
+    config_path: Option<PathBuf>,
 }
 
 impl Router {
@@ -113,11 +131,22 @@ impl Router {
     pub fn new(port: u16, model: Option<String>, token: Option<Token>) -> Self {
         Self {
             port,
-            model,
+            model: Arc::new(RwLock::new(model)),
             token,
             apps_dir: None,
             lifecycle: None,
+            config_path: None,
         }
+    }
+
+    /// Let `POST /api/config` write `path`.
+    ///
+    /// Separate from the constructor for the reason the other builders are separate: a router that
+    /// only reads (a test, a listing server) must not acquire the ability to rewrite the user's
+    /// config by being constructed.
+    pub fn with_config_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config_path = Some(path.into());
+        self
     }
 
     /// List apps from `dir`. Without it, `/api/apps` says the directory is unknown.
@@ -189,14 +218,37 @@ impl Router {
         }
 
         let path = request.path.as_str();
+
+        // One route reads a body, and every other route refuses one by name. Reading it and then
+        // routing anyway would answer "done" to a request whose content was never looked at, which
+        // is the one answer a server must not give about something it did not read.
+        if !request.body.is_empty() && path != CONFIG_PATH {
+            return Answer::Full(Response::text(
+                400,
+                format!("{path} takes no request body — send none, or send one to {CONFIG_PATH}\n"),
+            ));
+        }
+
         match path {
             "/" | "/index.html" => Answer::Full(
-                Response::html(200, self.panel()).header(
-                    "Content-Security-Policy",
-                    "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'",
-                ),
+                Response::html(200, self.panel())
+                    .header("Content-Security-Policy", deepnest_web::CSP),
             ),
+            // The panel's script, from the crate's own file. A route rather than an inline block so
+            // the policy can be `script-src 'self'`: a string that reaches the page from the
+            // filesystem — an app's name — cannot become code under it.
+            "/panel.js" => Answer::Full(Response::new(
+                200,
+                "text/javascript; charset=utf-8",
+                deepnest_web::SCRIPT.as_bytes().to_vec(),
+            )),
             "/api/health" => Answer::Full(Response::json(200, self.health())),
+            "/api/config" => {
+                if !self.authorized(request) {
+                    return Answer::Full(unauthorized());
+                }
+                Answer::Full(self.config_route(request))
+            }
             "/api/apps" => {
                 if !self.authorized(request) {
                     return Answer::Full(unauthorized());
@@ -266,57 +318,161 @@ impl Router {
         scheme.eq_ignore_ascii_case("bearer") && token.matches(credential)
     }
 
-    /// The placeholder panel.
+    /// The panel: `crates/web`'s page, carrying what only this process knows.
     ///
-    /// It exists to prove the process is up and to say what is configured, and it says plainly
-    /// that the real panel is not here yet. A page that looked finished and did nothing would be
-    /// worse than one that states the truth.
+    /// The port, the control token, the endpoint state and a line about the apps directory are
+    /// rendered into the markup, so a reader with script off — or with a script that failed to load
+    /// — still gets a page that is true. The app list itself is the script's job: it changes
+    /// whenever a directory does, and rendering it here would make it stale between requests.
     fn panel(&self) -> String {
-        let state = match &self.model {
-            Some(model) => format!(
-                "Model endpoint: configured (<code>{}</code>).",
-                escape_html(model)
-            ),
-            None => "Model endpoint: <strong>not configured</strong> — write <code>config.toml</code> in the deepnest home (see <code>deepnest --help</code>).".to_string(),
-        };
-        PANEL
-            .replace("@@PORT@@", &self.port.to_string())
-            .replace("@@STATE@@", &state)
-            .replace("@@APPS@@", &self.apps_summary())
+        deepnest_web::page(&Panel {
+            port: self.port,
+            token: self
+                .token
+                .as_ref()
+                .map(|token| token.as_str().to_string())
+                .unwrap_or_default(),
+            model: self.model(),
+            apps: self.apps_summary(),
+        })
     }
 
-    /// One line about the apps directory, for the panel.
+    /// The model name this process knows, if any.
+    fn model(&self) -> Option<String> {
+        self.model
+            .read()
+            .ok()
+            .and_then(|model| model.as_ref().cloned())
+    }
+
+    /// One plain-text line about the apps directory, for the panel.
     ///
     /// It counts what could not be used and points at the route that explains each one: a page that
-    /// silently showed fewer apps than exist would leave the user with nothing to act on.
+    /// silently showed fewer apps than exist would leave the user with nothing to act on. Plain
+    /// text rather than markup, because the page escapes what it is given.
     fn apps_summary(&self) -> String {
         let Some(dir) = &self.apps_dir else {
-            return "Apps: <strong>not configured</strong> — this process was started without an apps directory.".to_string();
+            return "this process was started without an apps directory".to_string();
         };
-        let shown = escape_html(&dir.display().to_string());
+        let shown = dir.display().to_string();
         match deepnest_apps::list(dir) {
             Ok(listing) if listing.is_empty() && listing.skipped.is_empty() => {
-                format!("Apps: <strong>none yet</strong> in <code>{shown}</code>.")
+                format!("none yet in {shown}")
             }
             Ok(listing) => {
-                let mut line = format!(
-                    "Apps: <strong>{}</strong> in <code>{shown}</code>.",
-                    listing.apps.len()
-                );
-                if !listing.skipped.is_empty() {
+                let apps = listing.apps.len();
+                let skipped = listing.skipped.len();
+                let mut line = format!("{apps} {} in {shown}", plural(apps, "app", "apps"));
+                if skipped > 0 {
                     let _ = write!(
                         line,
-                        " {} entries there are not apps — <code>GET /api/apps</code> says why.",
-                        listing.skipped.len()
+                        "; {skipped} other {} there {} not {} — GET /api/apps says why",
+                        plural(skipped, "entry", "entries"),
+                        if skipped == 1 { "is" } else { "are" },
+                        plural(skipped, "an app", "apps"),
                     );
                 }
                 line
             }
-            Err(error) => format!(
-                "Apps: <strong>cannot be listed</strong> — <code>{}</code>: {}.",
-                shown,
-                escape_html(&error.to_string())
-            ),
+            Err(error) => format!("cannot be listed — {shown}: {error}"),
+        }
+    }
+
+    /// `GET` and `POST /api/config`, and a refusal naming both for anything else.
+    fn config_route(&self, request: &Request) -> Response {
+        match request.method {
+            // `HEAD` reads like `GET`: the body is dropped at write time, and the headers are the
+            // ones a `GET` would have produced.
+            Method::Get | Method::Head => self.config_view(),
+            Method::Post => self.save_config(request),
+            Method::Delete => Response::json(
+                405,
+                error_body("the config is read with GET and written with POST"),
+            )
+            .header("Allow", "GET, POST"),
+        }
+    }
+
+    /// What the page needs to know about the config — and nothing it does not.
+    ///
+    /// The key is not in this answer and never will be: the page put it here, and nothing this
+    /// server answers has a use for it.
+    fn config_view(&self) -> Response {
+        let model = self.model();
+        Response::json(
+            200,
+            json!({ "configured": model.is_some(), "model": model }).to_string(),
+        )
+    }
+
+    /// `POST /api/config` — the first-run form, and the only route that writes a file.
+    ///
+    /// Everything is checked before anything is written: a body this route cannot read, a body
+    /// whose values [`crate::config::save`] would refuse, and a process with no config path all
+    /// answer before the file is touched, so a refused form leaves the user's config exactly as it
+    /// was.
+    fn save_config(&self, request: &Request) -> Response {
+        let Some(path) = &self.config_path else {
+            return Response::json(
+                503,
+                error_body(
+                    "this process cannot write a config: it was started without a config path, so \
+                     the endpoint is set in config.toml by hand",
+                ),
+            );
+        };
+        let Some(text) = request.body_text() else {
+            return Response::json(400, error_body("the config body must be UTF-8 JSON"));
+        };
+        if text.trim().is_empty() {
+            return Response::json(
+                400,
+                error_body(
+                    "the config body is empty — send {\"base_url\":…,\"api_key\":…,\"model\":…}",
+                ),
+            );
+        }
+        let submitted: Submitted = match serde_json::from_str(text) {
+            Ok(submitted) => submitted,
+            Err(error) => {
+                return Response::json(
+                    400,
+                    error_body(&format!(
+                        "the config body is not the JSON this route reads (base_url, api_key, \
+                         model): {error}"
+                    )),
+                )
+            }
+        };
+
+        let llm = crate::config::Llm {
+            base_url: submitted.base_url,
+            api_key: submitted.api_key,
+            model: submitted.model,
+        };
+        match crate::config::save(path, &llm) {
+            Ok(()) => {
+                // The running process picks it up now. Nothing else caches the config, so there is
+                // nothing to restart and the answer says nothing about one.
+                if let Ok(mut model) = self.model.write() {
+                    *model = Some(llm.model.trim().to_string());
+                }
+                Response::json(
+                    200,
+                    json!({
+                        "configured": true,
+                        "model": llm.model.trim(),
+                        "path": path.display().to_string(),
+                    })
+                    .to_string(),
+                )
+            }
+            // A value the binary would refuse to start on. Refusing it here is the whole point of
+            // writing through `save` rather than through `toml::to_string`.
+            Err(error @ crate::config::ConfigError::Unusable { .. }) => {
+                Response::json(400, error_body(&error.to_string()))
+            }
+            Err(error) => Response::json(500, error_body(&error.to_string())),
         }
     }
 
@@ -635,45 +791,12 @@ impl Router {
         json!({
             "status": "ok",
             "version": env!("CARGO_PKG_VERSION"),
-            "model_endpoint_configured": self.model.is_some(),
+            "model_endpoint_configured": self.model().is_some(),
             "pid": std::process::id(),
         })
         .to_string()
     }
 }
-
-const PANEL: &str = r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>deepnest</title>
-<style>
-  :root { color-scheme: light dark; }
-  body { font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, sans-serif; margin: 0; }
-  main { max-width: 40rem; margin: 12vh auto 0; padding: 0 1.5rem; }
-  h1 { font-size: 1.6rem; margin: 0 0 .25rem; letter-spacing: -.02em; }
-  .sub { margin: 0 0 1.75rem; opacity: .65; font-size: .9rem; }
-  p { margin: 0 0 .85rem; }
-  code { font: .875em ui-monospace, SFMono-Regular, Menlo, monospace; background: rgba(127,127,127,.14); padding: .1em .35em; border-radius: 4px; }
-  .todo { margin-top: 1.75rem; padding-top: 1rem; border-top: 1px solid rgba(127,127,127,.3); font-size: .9rem; opacity: .8; }
-</style>
-</head>
-<body>
-<main>
-  <h1>deepnest</h1>
-  <p class="sub">running on <code>127.0.0.1:@@PORT@@</code></p>
-  <p>@@STATE@@</p>
-  <p>@@APPS@@</p>
-  <div class="todo">
-    <p>This is the process, not the product. The control panel arrives with <code>crates/web</code>,
-    and app pages at <code>/app/&lt;slug&gt;/</code> with <code>crates/gateway</code>.</p>
-    <p>Liveness: <code>GET /api/health</code>. Apps: <code>GET /api/apps</code>.</p>
-  </div>
-</main>
-</body>
-</html>
-"#;
 
 /// The three state changes an app has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -821,24 +944,29 @@ fn unauthorized() -> Response {
     .header("WWW-Authenticate", "Bearer realm=\"deepnest\"")
 }
 
-/// Escape the five characters that would otherwise end the text they sit in.
+/// The one route that reads a request body.
+const CONFIG_PATH: &str = "/api/config";
+
+/// The body `POST /api/config` reads.
 ///
-/// The model name comes from the user's own config, so this is not a defence against a hostile
-/// value — it is the difference between a page that renders a name containing `<` and a page
-/// that silently loses half of it.
-fn escape_html(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for character in text.chars() {
-        match character {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            other => out.push(other),
-        }
+/// `deny_unknown_fields` for the reason [`crate::config::Config`] has it: `apikey` instead of
+/// `api_key` is a typo, and a route that read "no key" from a body plainly carrying one would
+/// report success for a config the binary then refuses to start on.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Submitted {
+    base_url: String,
+    api_key: String,
+    model: String,
+}
+
+/// `one` or `many`, so a line the user reads does not say "1 apps".
+fn plural(count: usize, one: &'static str, many: &'static str) -> &'static str {
+    if count == 1 {
+        one
+    } else {
+        many
     }
-    out
 }
 
 #[cfg(test)]
@@ -1066,16 +1194,18 @@ mod tests {
     }
 
     #[test]
-    fn the_panel_counts_the_apps_and_points_at_the_route_that_explains_the_rest() {
+    fn the_panel_reports_what_is_on_disk_without_any_script() {
+        // The panel's markup has to be true on its own: a browser with script off, or a script
+        // that failed to load, still learns how many apps there are and that one entry is not one.
         let scratch = Scratch::new("apps-panel");
         scratch.app("notes", "Notes");
         std::fs::create_dir_all(scratch.apps().join("Broken")).unwrap();
         let router = router().with_apps_dir(scratch.apps());
 
         let page = body(&router.respond(&get("/", "127.0.0.1:4270")).complete());
-        assert!(page.contains("<strong>1</strong>"), "{page}");
+        assert!(page.contains("1 app in"), "{page}");
+        assert!(page.contains("is not an app"), "{page}");
         assert!(page.contains("/api/apps"), "{page}");
-        assert!(page.contains("are not apps"), "{page}");
     }
 
     #[test]
@@ -1803,5 +1933,255 @@ mod tests {
         let page = body(&router.respond(&get("/", "127.0.0.1:4270")).complete());
         assert!(page.contains("&lt;script&gt;"));
         assert!(!page.contains("<script>x</script>"));
+    }
+
+    // --- the panel's script, and the config it writes ----------------------------------------
+
+    #[test]
+    fn the_panel_is_served_with_a_policy_that_allows_only_its_own_script() {
+        let response = router().respond(&get("/", "127.0.0.1:4270")).complete();
+        assert_eq!(response.status, 200);
+        let policy = response
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-security-policy"))
+            .map(|(_, value)| value.as_str())
+            .expect("the panel is served without a policy");
+        assert!(policy.contains("script-src 'self'"), "{policy}");
+        assert!(!policy.contains("script-src 'unsafe-inline'"), "{policy}");
+    }
+
+    #[test]
+    fn the_script_the_page_asks_for_is_a_route_that_answers_as_a_script() {
+        // A policy of `script-src 'self'` refuses the script if its type is wrong, and the panel
+        // would then be a page that renders nothing.
+        let response = router()
+            .respond(&get("/panel.js", "127.0.0.1:4270"))
+            .complete();
+        assert_eq!(response.status, 200);
+        assert!(
+            response.content_type.starts_with("text/javascript"),
+            "{:?}",
+            response.content_type
+        );
+        assert!(body(&response).contains("deepnest-token"));
+    }
+
+    #[test]
+    fn the_panel_carries_the_token_its_script_sends_back() {
+        // The page is not behind the token — a browser opening the address has none — so the page
+        // carries it, and this is the test that says the two spellings agree.
+        let page = body(&router().respond(&get("/", "127.0.0.1:4270")).complete());
+        let expected = format!(
+            r#"<meta name="deepnest-token" content="{}">"#,
+            "a".repeat(64)
+        );
+        assert!(
+            page.contains(&expected),
+            "the page does not carry the token"
+        );
+    }
+
+    /// A request that carries the token and a body.
+    ///
+    /// Built through [`crate::http::read`] and not [`parse`]: `parse` sees a head and nothing else,
+    /// and a request assembled from a head alone has no body — which is exactly the case a route
+    /// that writes a file must not be tested with.
+    fn post_body(path: &str, body: &str) -> Request {
+        let wire = format!(
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:4270\r\nauthorization: bearer {}\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            "a".repeat(64),
+            body.len(),
+            body
+        );
+        let mut reader = wire.as_bytes();
+        crate::http::read(&mut reader).unwrap()
+    }
+
+    /// What the first-run form sends.
+    const FORM: &str = r#"{"base_url":"https://api.deepseek.com","api_key":"sk-from-the-form","model":"deepseek-flash"}"#;
+
+    /// A router that starts unconfigured and may write its config into `scratch`.
+    fn first_run(scratch: &Scratch) -> Router {
+        Router::new(PORT, None, Some(Token::parse(&"a".repeat(64)).unwrap()))
+            .with_config_path(scratch.base.join(crate::config::FILE_NAME))
+    }
+
+    #[test]
+    fn the_first_run_form_writes_the_config_the_running_process_then_reports() {
+        let scratch = Scratch::new("config-save");
+        let path = scratch.base.join(crate::config::FILE_NAME);
+        let router = first_run(&scratch);
+
+        assert!(!path.exists(), "a scratch home starts unconfigured");
+        let before = body(&router.respond(&authorized_get("/api/config")).complete());
+        assert!(before.contains("\"configured\":false"), "{before}");
+
+        let saved = router.respond(&post_body("/api/config", FORM)).complete();
+        assert_eq!(saved.status, 200, "{:?}", saved);
+        let answer = body(&saved);
+        assert!(answer.contains("\"configured\":true"), "{answer}");
+        assert!(
+            !answer.contains("sk-from-the-form"),
+            "the key was echoed back: {answer}"
+        );
+
+        // The file, with the mode that keeps other users out of the key.
+        let config = crate::config::load(&path)
+            .unwrap()
+            .expect("a config was written");
+        assert_eq!(config.llm.api_key, "sk-from-the-form");
+        assert_eq!(config.model(), "deepseek-flash");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "the API key is in that file");
+        }
+
+        // No restart: both routes read it back from the process, not from the file.
+        let after = body(&router.respond(&authorized_get("/api/config")).complete());
+        assert!(after.contains("\"configured\":true"), "{after}");
+        assert!(after.contains("deepseek-flash"), "{after}");
+        let health = body(
+            &router
+                .respond(&get("/api/health", "127.0.0.1:4270"))
+                .complete(),
+        );
+        assert!(
+            health.contains("\"model_endpoint_configured\":true"),
+            "{health}"
+        );
+        let page = body(&router.respond(&get("/", "127.0.0.1:4270")).complete());
+        assert!(page.contains("configured (deepseek-flash)"), "{page}");
+    }
+
+    #[test]
+    fn a_body_sent_to_a_route_that_reads_none_is_refused_rather_than_routed() {
+        // `POST /api/config` is the one route that reads a body. Routing any other with a body would
+        // answer "done" to a request whose content this server never looked at.
+        let response = router()
+            .respond(&post_body("/api/apps/notes/start", "anything"))
+            .complete();
+        assert_eq!(response.status, 400, "{:?}", response);
+        assert!(
+            body(&response).contains("/api/config"),
+            "{}",
+            body(&response)
+        );
+    }
+
+    #[test]
+    fn a_config_that_would_not_boot_is_refused_and_nothing_is_written() {
+        // The file is written through `config::save`, so the checks that stop the binary at startup
+        // stop the form instead. A form that left behind a config the binary refuses to boot on
+        // would be worse than a form that said no.
+        let scratch = Scratch::new("config-refused");
+        let path = scratch.base.join(crate::config::FILE_NAME);
+        let refusal = first_run(&scratch)
+            .respond(&post_body(
+                "/api/config",
+                r#"{"base_url":"api.deepseek.com","api_key":"sk-x","model":"m"}"#,
+            ))
+            .complete();
+        assert_eq!(refusal.status, 400, "{:?}", refusal);
+        assert!(
+            body(&refusal).contains("llm.base_url"),
+            "{}",
+            body(&refusal)
+        );
+        assert!(!path.exists(), "a refused config was written anyway");
+    }
+
+    #[test]
+    fn a_config_body_that_is_not_what_the_route_reads_is_a_bad_request() {
+        let scratch = Scratch::new("config-body");
+        let router = first_run(&scratch);
+        for body in [
+            "",
+            "not json",
+            "{}",
+            // A misspelled field is a typo, not an absent value: reading "no key" from a body that
+            // plainly carries one would report success for a config that cannot work.
+            r#"{"base_url":"https://x","apikey":"k","model":"m"}"#,
+        ] {
+            let response = router.respond(&post_body("/api/config", body)).complete();
+            assert_eq!(response.status, 400, "{body}: {:?}", response);
+        }
+        assert!(!scratch.base.join(crate::config::FILE_NAME).exists());
+    }
+
+    #[test]
+    fn the_config_route_needs_the_token_and_a_method_it_has() {
+        let scratch = Scratch::new("config-method");
+        let router = first_run(&scratch);
+
+        let anonymous =
+            parse("POST /api/config HTTP/1.1\r\nHost: 127.0.0.1:4270\r\nContent-Length: 0\r\n")
+                .unwrap();
+        assert_eq!(router.respond(&anonymous).complete().status, 401);
+
+        assert_eq!(
+            router
+                .respond(&authorized_get("/api/config"))
+                .complete()
+                .status,
+            200
+        );
+
+        // A `DELETE` would be a way to remove the endpoint by accident; the refusal names the two
+        // methods that exist rather than leaving the caller to guess.
+        let delete = parse(&format!(
+            "DELETE /api/config HTTP/1.1\r\nHost: 127.0.0.1:4270\r\nauthorization: bearer {}\r\n",
+            "a".repeat(64)
+        ))
+        .unwrap();
+        let response = router.respond(&delete).complete();
+        assert_eq!(response.status, 405);
+        assert!(response
+            .headers
+            .iter()
+            .any(|(name, value)| *name == "Allow" && *value == "GET, POST"));
+    }
+
+    #[test]
+    fn a_process_with_no_config_path_says_so_instead_of_saving_into_the_void() {
+        let response = router().respond(&post_body("/api/config", FORM)).complete();
+        assert_eq!(response.status, 503, "{:?}", response);
+        assert!(
+            body(&response).contains("config path"),
+            "{}",
+            body(&response)
+        );
+    }
+
+    #[test]
+    fn the_config_route_never_returns_the_key_it_stored() {
+        // The page carries the control token on purpose. The model key is a different secret and
+        // nothing this server answers has a use for it.
+        let scratch = Scratch::new("config-key");
+        let router = first_run(&scratch);
+        // The save's own answer, first: it is the one response written by the code that has the key
+        // in hand, so it is the one most likely to leak it.
+        let saved = router.respond(&post_body("/api/config", FORM)).complete();
+        assert_eq!(saved.status, 200, "{:?}", saved);
+        assert!(
+            !body(&saved).contains("sk-from-the-form"),
+            "the save answer returned the key: {}",
+            body(&saved)
+        );
+        for request in [
+            authorized_get("/api/config"),
+            get("/api/health", "127.0.0.1:4270"),
+            get("/", "127.0.0.1:4270"),
+        ] {
+            let answer = body(&router.respond(&request).complete());
+            assert!(
+                !answer.contains("sk-from-the-form"),
+                "{} returned the key",
+                request.path
+            );
+        }
     }
 }
