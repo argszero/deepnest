@@ -8,8 +8,8 @@
 //! pretending to start.
 //!
 //! What this build does not do, and says so rather than half-doing: it does not open the browser.
-//! The page it would open is a placeholder, and opening one on every start is worth exactly as
-//! much as the panel behind it — which arrives with `crates/web`.
+//! The panel it would open is real now, so opening it is worth doing rather than pointless — but it
+//! is a decision about the user's desktop, and the URL is printed for whoever lands that.
 //!
 //! The one piece of state this process owns beyond the port is the **supervisor**: the apps it
 //! started. It is built here and lives as long as the process, and it is deliberately *not* run
@@ -156,6 +156,7 @@ fn serve() -> Result<(), Failure> {
         model: config.as_ref().map(|config| config.model().to_string()),
         apps_dir: Some(apps_dir.clone()),
         lifecycle: Some(Lifecycle::new(Arc::clone(&supervisor), home.clone())),
+        config_path: Some(config_path.clone()),
         ..Default::default()
     };
 
@@ -203,6 +204,9 @@ fn explain_config(error: &ConfigError) -> String {
             "\nfix the value and start again; nothing was started and no token was minted"
         }
         ConfigError::Unreadable { .. } => "\ncheck the file's permissions",
+        // Startup only ever reads; a write failure comes from the panel's first-run form, which
+        // reports it on the page rather than through this message.
+        ConfigError::Unwritable { .. } => "\ncheck that the deepnest home is writable",
     };
     format!("{error}{hint}")
 }

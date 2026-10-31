@@ -1,10 +1,18 @@
 //! Exactly the HTTP/1.1 this binary needs: read one request, write one response, close.
 //!
-//! It speaks four methods and **reads no request body at all**. That is not laziness about
-//! parsing: the routes that exist are `GET` for things that can be read and `POST` for things that
-//! change state and need no argument beyond their own path — starting an app, stopping it. A
-//! request that declares a body is refused rather than half-read, because a server that ignored a
-//! body would answer "done" to a request whose content it never saw.
+//! It speaks four methods, and it reads a request body **only when a route asks for one and only
+//! up to a bound**. The first such route is the panel's `POST /api/config`, and the reason is the
+//! value it carries: an API key. A key in a URL is written into the browser's history and into
+//! whatever logs the URL, which is the same reason the control token travels in a header rather
+//! than in the path — so the key travels in a body.
+//!
+//! Every other route still reads nothing, and a body sent to one is refused by name: the router
+//! knows which route reads a body, and this layer does not read a byte for one that does not. A
+//! server that ignored a body would answer "done" to a request whose content it never saw.
+//!
+//! A body is bounded by [`MAX_BODY`] and is accepted only with a declared `Content-Length`.
+//! Chunked encoding is refused: this layer would have to buffer the whole thing to know its size
+//! anyway, so supporting it would buy nothing but a way to send more than the bound.
 //!
 //! Deliberately not a server library. `crates/gateway` needs a real one — routing, header
 //! rewriting, WebSocket upgrade, unbuffered SSE — and choosing that stack is that crate's
@@ -27,6 +35,13 @@ pub const MAX_HEAD: usize = 8 * 1024;
 /// How many header fields are accepted before the request is refused.
 pub const MAX_HEADERS: usize = 64;
 
+/// The largest request body accepted, in bytes.
+///
+/// Every route that takes a body takes a handful of short strings: three config values, a name.
+/// 16 KiB is generous for that and small enough that a body cannot be how this process is made to
+/// spend memory — the same reasoning as [`MAX_HEAD`], applied to the other half of the request.
+pub const MAX_BODY: usize = 16 * 1024;
+
 /// The methods this binary serves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
@@ -48,7 +63,7 @@ impl Method {
     }
 }
 
-/// A parsed request head. The body is never read: nothing here accepts one.
+/// A parsed request: its head, and its body when it declared one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
     pub method: Method,
@@ -58,9 +73,21 @@ pub struct Request {
     pub query: String,
     /// Header names lowercased, values trimmed, in the order they arrived.
     pub headers: Vec<(String, String)>,
+    /// The body, when the request declared one and [`read`] read it. Empty otherwise: a route
+    /// that takes no body sees a request indistinguishable from one that sent nothing, which is
+    /// what the router's own refusal turns on.
+    pub body: Vec<u8>,
 }
 
 impl Request {
+    /// The body as text, when it is UTF-8.
+    ///
+    /// `None` is not an empty body: it is a body this server cannot read as the JSON it expects,
+    /// and the caller answers `400` rather than pretending it received nothing.
+    pub fn body_text(&self) -> Option<&str> {
+        std::str::from_utf8(&self.body).ok()
+    }
+
     /// A header's value, by case-insensitive name. The first occurrence wins.
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
@@ -79,9 +106,11 @@ pub enum ParseError {
     UnsupportedMethod,
     /// The head exceeded [`MAX_HEAD`] or [`MAX_HEADERS`].
     Oversized,
-    /// The request declares a body. Nothing here reads one, and pretending otherwise would answer
-    /// "done" to a request whose content was never seen.
+    /// The request is chunked. This layer accepts a body only with a declared `Content-Length`, so
+    /// a chunked one is refused rather than half-read.
     Body,
+    /// The request declares a body larger than [`MAX_BODY`].
+    TooLarge,
 }
 
 /// Why [`read`] did not produce a request.
@@ -93,15 +122,18 @@ pub enum ReadError {
     Parse(ParseError),
 }
 
-/// Read one request head from `stream`.
+/// Read one request from `stream`: the head, then the body it declared.
+///
+/// The bytes after the head are already in `buffer` when the head ends, and they are the beginning
+/// of the body rather than something to discard — a browser sends a small body in the same packet
+/// as its head, so a reader that dropped what it had already seen would lose it and then wait for
+/// bytes that had arrived.
 pub fn read(stream: &mut impl Read) -> Result<Request, ReadError> {
     let mut buffer = Vec::with_capacity(1024);
     let mut chunk = [0u8; 1024];
-    loop {
+    let end = loop {
         if let Some(end) = head_end(&buffer) {
-            let head = std::str::from_utf8(&buffer[..end])
-                .map_err(|_| ReadError::Parse(ParseError::Malformed))?;
-            return parse(head).map_err(ReadError::Parse);
+            break end;
         }
         if buffer.len() >= MAX_HEAD {
             return Err(ReadError::Parse(ParseError::Oversized));
@@ -117,7 +149,44 @@ pub fn read(stream: &mut impl Read) -> Result<Request, ReadError> {
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(ReadError::Io(error)),
         }
+    };
+
+    let head =
+        std::str::from_utf8(&buffer[..end]).map_err(|_| ReadError::Parse(ParseError::Malformed))?;
+    let mut request = parse(head).map_err(ReadError::Parse)?;
+
+    let declared = declared_length(&request.headers).unwrap_or(0);
+    if declared > 0 {
+        let mut body = buffer[end..].to_vec();
+        body.truncate(declared);
+        while body.len() < declared {
+            match stream.read(&mut chunk) {
+                Ok(0) => {
+                    return Err(ReadError::Io(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "the client closed before sending the body it declared",
+                    )))
+                }
+                Ok(count) => body.extend_from_slice(&chunk[..count]),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(ReadError::Io(error)),
+            }
+        }
+        request.body = body;
     }
+
+    Ok(request)
+}
+
+/// The `Content-Length` a request declared, when it declared a usable one.
+///
+/// [`parse`] has already refused a value that is not a number or is past [`MAX_BODY`], so this
+/// only reads back what was accepted.
+fn declared_length(headers: &[(String, String)]) -> Option<usize> {
+    headers
+        .iter()
+        .find(|(name, _)| name == "content-length")
+        .and_then(|(_, value)| value.trim().parse().ok())
 }
 
 /// Parse a request head (the lines before the blank separator, without a body).
@@ -164,13 +233,16 @@ pub fn parse(head: &str) -> Result<Request, ParseError> {
         headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
     }
 
-    // A declared body is refused before anything acts on the request. `Content-Length: 0` is the
-    // spelling a browser sends for an empty POST, so it is accepted; anything else is not read.
+    // A declared length is checked here rather than while reading, so a request that would be
+    // refused is refused before any of its body is buffered.
     if let Some((_, value)) = headers.iter().find(|(name, _)| name == "content-length") {
-        if value.trim() != "0" {
-            return Err(ParseError::Body);
+        let length: usize = value.trim().parse().map_err(|_| ParseError::Malformed)?;
+        if length > MAX_BODY {
+            return Err(ParseError::TooLarge);
         }
     }
+    // Chunked is refused rather than decoded: the bound above is what makes a body safe to read,
+    // and a chunked body has no length to bound it by until it has all arrived.
     if headers.iter().any(|(name, _)| name == "transfer-encoding") {
         return Err(ParseError::Body);
     }
@@ -180,6 +252,9 @@ pub fn parse(head: &str) -> Result<Request, ParseError> {
         path,
         query,
         headers,
+        // Filled in by `read`, which is the only place that has the bytes. `parse` is given a
+        // head and nothing else, and a caller that parses by hand gets a request with no body.
+        body: Vec::new(),
     })
 }
 
@@ -345,25 +420,96 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_post_body_is_accepted_and_any_other_body_is_refused() {
-        // A browser sends `Content-Length: 0` for an empty POST; that is a request with nothing in
-        // it, so it parses. A body with content is refused, because nothing here reads one.
+    fn a_declared_length_is_accepted_up_to_the_bound_and_refused_past_it() {
+        // A browser sends `Content-Length: 0` for an empty POST, and the panel sends a few
+        // hundred bytes of JSON. Both are requests this server reads.
         assert!(parse(
             "POST /api/apps/notes/start HTTP/1.1\r\nHost: 127.0.0.1:4270\r\nContent-Length: 0\r\n"
         )
         .is_ok());
+        assert!(parse(&format!(
+            "POST /api/config HTTP/1.1\r\nHost: 127.0.0.1:4270\r\nContent-Length: {MAX_BODY}\r\n"
+        ))
+        .is_ok());
+
+        // One byte past it is not a request to cooperate with: it is a decision about how much
+        // memory this process spends, and the answer is `413` rather than a buffer.
         assert_eq!(
-            parse(
-                "POST /api/apps/notes/start HTTP/1.1\r\nHost: 127.0.0.1:4270\r\nContent-Length: 12\r\n"
-            )
+            parse(&format!(
+                "POST /api/config HTTP/1.1\r\nHost: 127.0.0.1:4270\r\nContent-Length: {}\r\n",
+                MAX_BODY + 1
+            ))
             .unwrap_err(),
-            ParseError::Body
+            ParseError::TooLarge
         );
+
+        // Chunked has no length to bound before it has all arrived, so it is refused rather than
+        // decoded.
         assert_eq!(
             parse("POST / HTTP/1.1\r\nHost: 127.0.0.1:4270\r\nTransfer-Encoding: chunked\r\n")
                 .unwrap_err(),
             ParseError::Body
         );
+
+        // A length that is not a number is a malformed request, not an oversized one.
+        assert_eq!(
+            parse("POST / HTTP/1.1\r\nHost: 127.0.0.1:4270\r\nContent-Length: many\r\n")
+                .unwrap_err(),
+            ParseError::Malformed
+        );
+    }
+
+    #[test]
+    fn the_body_that_followed_the_head_is_read_whole() {
+        // The case that matters and is easy to get wrong: a browser sends a small body in the same
+        // packet as the head. A reader that consumed the head and then waited for more would hang
+        // on bytes it had already received.
+        let wire = b"POST /api/config HTTP/1.1\r\nHost: 127.0.0.1:4270\r\nContent-Length: 20\r\n\r\n{\"model\":\"deepseek\"}";
+        let request = read(&mut wire.as_slice()).unwrap();
+        assert_eq!(request.method, Method::Post);
+        assert_eq!(request.body_text(), Some("{\"model\":\"deepseek\"}"));
+    }
+
+    #[test]
+    fn a_body_that_arrives_after_the_head_is_read_whole_too() {
+        // The same request split across two writes, which is what a slow client or a larger body
+        // looks like on the wire.
+        struct Trickle {
+            chunks: Vec<Vec<u8>>,
+        }
+        impl Read for Trickle {
+            fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+                if self.chunks.is_empty() {
+                    return Ok(0);
+                }
+                let next = self.chunks.remove(0);
+                out[..next.len()].copy_from_slice(&next);
+                Ok(next.len())
+            }
+        }
+
+        let mut stream = Trickle {
+            chunks: vec![
+                b"POST /api/config HTTP/1.1\r\nHost: 127.0.0.1:4270\r\nContent-Length: 9\r\n\r\n"
+                    .to_vec(),
+                b"abcdef".to_vec(),
+                b"ghi".to_vec(),
+            ],
+        };
+        assert_eq!(read(&mut stream).unwrap().body_text(), Some("abcdefghi"));
+    }
+
+    #[test]
+    fn a_body_shorter_than_it_declared_is_a_broken_client_not_a_request() {
+        let wire =
+            b"POST /api/config HTTP/1.1\r\nHost: 127.0.0.1:4270\r\nContent-Length: 40\r\n\r\nshort";
+        assert!(matches!(read(&mut wire.as_slice()), Err(ReadError::Io(_))));
+    }
+
+    #[test]
+    fn a_request_with_no_body_reads_as_one() {
+        let wire = b"GET / HTTP/1.1\r\nHost: 127.0.0.1:4270\r\n\r\n";
+        assert!(read(&mut wire.as_slice()).unwrap().body.is_empty());
     }
 
     #[test]

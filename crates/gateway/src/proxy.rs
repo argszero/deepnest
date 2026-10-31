@@ -640,6 +640,8 @@ mod tests {
             path: path.to_string(),
             query: String::new(),
             headers: vec![("host".to_string(), "127.0.0.1:4270".to_string())],
+            // A forwarded request carries no body: `can_forward` refuses every method that could.
+            body: Vec::new(),
         }
     }
 
@@ -659,6 +661,7 @@ mod tests {
                 ("sec-websocket-version".to_string(), "13".to_string()),
                 ("origin".to_string(), "http://127.0.0.1:4270".to_string()),
             ],
+            body: Vec::new(),
         }
     }
 

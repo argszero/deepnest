@@ -20,20 +20,20 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// The file name inside the deepnest home directory.
 pub const FILE_NAME: &str = "config.toml";
 
 /// A parsed `config.toml`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub llm: Llm,
 }
 
 /// The model endpoint the user supplies.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Llm {
     /// The endpoint's base URL, e.g. `https://api.deepseek.com`.
@@ -60,6 +60,8 @@ pub enum ConfigError {
         field: &'static str,
         reason: &'static str,
     },
+    /// The config could not be written — a read-only home, a full disk.
+    Unwritable { path: PathBuf, source: io::Error },
 }
 
 impl fmt::Display for ConfigError {
@@ -76,6 +78,9 @@ impl fmt::Display for ConfigError {
                 field,
                 reason,
             } => write!(f, "{}: `{field}` {reason}", path.display()),
+            Self::Unwritable { path, source } => {
+                write!(f, "cannot write {}: {source}", path.display())
+            }
         }
     }
 }
@@ -83,10 +88,55 @@ impl fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Unreadable { source, .. } => Some(source),
+            Self::Unreadable { source, .. } | Self::Unwritable { source, .. } => Some(source),
             _ => None,
         }
     }
+}
+
+/// Write `llm` to `path`, mode `0600`, atomically.
+///
+/// The same three checks [`load`] applies run *before* anything is written, so a form that submits
+/// `api.deepseek.com` without a scheme is refused now, by the field name, rather than at the next
+/// start — a config the binary would refuse to boot on is worse than a form that says no.
+///
+/// Written to a temporary file beside it and renamed: a half-written `config.toml` would be a file
+/// that does not parse, and [`load`] treats that as a startup failure. `0600` because the file
+/// holds the user's API key, and it is applied at creation so the key is never briefly readable.
+pub fn save(path: &Path, llm: &Llm) -> Result<(), ConfigError> {
+    let config = Config { llm: llm.clone() };
+    config.check(path)?;
+
+    let text = toml::to_string(&config).map_err(|error| ConfigError::Unparseable {
+        path: path.to_path_buf(),
+        detail: error.to_string(),
+    })?;
+
+    let temporary = path.with_extension(format!("toml.tmp-{}", std::process::id()));
+    let unwritable = |source: io::Error| ConfigError::Unwritable {
+        path: path.to_path_buf(),
+        source,
+    };
+
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temporary).map_err(unwritable)?;
+    use io::Write as _;
+    file.write_all(text.as_bytes()).map_err(unwritable)?;
+    // Before the rename, so the bytes are on disk under the name that matters rather than at the
+    // rename's mercy.
+    file.sync_all().map_err(unwritable)?;
+    drop(file);
+
+    fs::rename(&temporary, path).map_err(|error| {
+        let _ = fs::remove_file(&temporary);
+        unwritable(error)
+    })
 }
 
 /// Read the config at `path`.

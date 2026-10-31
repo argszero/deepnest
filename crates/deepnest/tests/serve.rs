@@ -68,6 +68,10 @@ impl Scratch {
         self.base.join(token::FILE_NAME)
     }
 
+    fn config_path(&self) -> PathBuf {
+        self.base.join(deepnest::config::FILE_NAME)
+    }
+
     fn apps(&self) -> PathBuf {
         deepnest_apps::apps_dir(&self.base)
     }
@@ -88,6 +92,7 @@ fn start(scratch: &Scratch, model: Option<&str>) -> (server::Server, Token) {
         model: model.map(str::to_string),
         apps_dir: Some(scratch.apps()),
         lifecycle: None,
+        config_path: Some(scratch.config_path()),
         keepalive: Duration::from_millis(20),
         bind: brisk(),
     })
@@ -106,9 +111,11 @@ fn the_panel_and_the_health_route_answer_over_a_real_socket() {
     assert!(panel.contains("deepnest"));
     assert!(panel.contains(&format!("127.0.0.1:{}", addr.port())));
     assert!(panel.contains("deepseek-flash"));
-    // The panel says what it is not. A placeholder that looked finished would be worse.
-    assert!(panel.contains("crates/web"));
-    assert!(panel.contains("Content-Security-Policy"));
+    // The panel's script is a route, not an inline block, so the policy can refuse an inline one:
+    // a string that reaches the page from an app's directory cannot become code.
+    assert!(panel.contains("/panel.js"), "{panel}");
+    assert!(panel.contains("Content-Security-Policy"), "{panel}");
+    assert!(panel.contains("script-src 'self'"), "{panel}");
 
     let health = get(addr, "/api/health", "");
     assert!(health.starts_with("HTTP/1.1 200 OK"), "{health}");
@@ -200,22 +207,23 @@ fn a_method_this_server_does_not_serve_is_refused_with_a_method_not_allowed() {
 }
 
 #[test]
-fn a_request_with_a_body_is_refused_rather_than_half_read() {
+fn a_body_sent_to_a_route_that_reads_none_is_refused_rather_than_ignored() {
     let scratch = Scratch::new("body");
     let (running, token) = start(&scratch, None);
     let addr = running.addr();
 
-    // Nothing in this build reads a body. Answering the route anyway would report "done" to a
-    // request whose content was never seen, so the request is refused before routing.
+    // `POST /api/config` is the one route that reads a body. Answering any other route anyway would
+    // report "done" to a request whose content was never seen.
     let answer = request(
         addr,
         &format!(
-            "POST /api/apps/notes/start HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {}\r\nContent-Length: 9\r\n\r\nanything",
+            "POST /api/apps/notes/start HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {}\r\nContent-Length: 8\r\n\r\nanything",
             addr.port(),
             token.as_str()
         ),
     );
-    assert!(answer.starts_with("HTTP/1.1 411"), "{answer}");
+    assert!(answer.starts_with("HTTP/1.1 400"), "{answer}");
+    assert!(answer.contains("/api/config"), "{answer}");
 
     running.shutdown();
 }
@@ -327,6 +335,7 @@ fn the_whole_home_is_assembled_the_way_the_binary_assembles_it() {
         model: Some(config.model().to_string()),
         apps_dir: Some(scratch.apps()),
         lifecycle: None,
+        config_path: Some(scratch.config_path()),
         keepalive: Duration::from_secs(30),
         bind: brisk(),
     })
@@ -349,4 +358,84 @@ fn the_whole_home_is_assembled_the_way_the_binary_assembles_it() {
             "the token file is the one thing that keeps a web page out of the API"
         );
     }
+}
+
+#[test]
+fn the_first_run_form_writes_the_config_over_a_real_socket() {
+    // The whole path a first-run form takes: socket, head, body, file, and the running process
+    // reading it back. The body exists because of what it carries — a key in a URL would be written
+    // into the browser's history and into whatever logs the URL.
+    let scratch = Scratch::new("config-post");
+    let (running, token) = start(&scratch, None);
+    let addr = running.addr();
+    assert!(!scratch.config_path().exists(), "first run has no config");
+
+    let body = r#"{"base_url":"https://api.deepseek.com","api_key":"sk-from-the-form","model":"deepseek-flash"}"#;
+    let answer = request(
+        addr,
+        &format!(
+            "POST /api/config HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {}\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            addr.port(),
+            token.as_str(),
+            body.len(),
+            body
+        ),
+    );
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    assert!(
+        !answer.contains("sk-from-the-form"),
+        "the key was echoed back: {answer}"
+    );
+
+    let saved = deepnest::config::load(&scratch.config_path())
+        .unwrap()
+        .expect("the config was written");
+    assert_eq!(saved.llm.model, "deepseek-flash");
+    assert_eq!(saved.llm.api_key, "sk-from-the-form");
+
+    // No restart: the process that took the form is the process using the answer.
+    let health = get(addr, "/api/health", "");
+    assert!(
+        health.contains("\"model_endpoint_configured\":true"),
+        "{health}"
+    );
+
+    running.shutdown();
+}
+
+#[test]
+fn a_body_past_the_bound_is_refused_before_it_is_buffered() {
+    // The bound is what makes reading a body safe at all, and the status is how the refusal travels.
+    let scratch = Scratch::new("body-limit");
+    let (running, token) = start(&scratch, None);
+    let addr = running.addr();
+
+    let answer = request(
+        addr,
+        &format!(
+            "POST /api/config HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {}\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            addr.port(),
+            token.as_str(),
+            deepnest::http::MAX_BODY + 1
+        ),
+    );
+    assert!(answer.starts_with("HTTP/1.1 413"), "{answer}");
+    assert!(!scratch.config_path().exists());
+
+    // And a chunked body is refused by name: it has no length to bound it by until it has all
+    // arrived, so this layer does not read it at all.
+    let chunked = request(
+        addr,
+        &format!(
+            "POST /api/config HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {}\r\n\
+             Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+            addr.port(),
+            token.as_str()
+        ),
+    );
+    assert!(chunked.starts_with("HTTP/1.1 411"), "{chunked}");
+
+    running.shutdown();
 }

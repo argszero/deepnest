@@ -8,6 +8,7 @@ members = [
     "crates/agent",
     "crates/apps",
     "crates/gateway",
+    "crates/web",
     "crates/deepnest",
 ]
 

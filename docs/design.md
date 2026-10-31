@@ -44,10 +44,27 @@ crates that read well and nothing that starts leaves the first integration failu
 which is the most expensive place to meet it. It answers the routes below on the one port, and says
 by name what it does not answer:
 
-- `GET /` — the panel. Until `crates/web` exists it is a placeholder that reports what is
-  configured, how many apps are installed, and states plainly that the real panel is not here yet.
+- `GET /` — the panel (`crates/web`): the model endpoint that is configured or is not, the apps on
+  disk with every entry there that is not one, a form for the endpoint, a form for a new app, and
+  the five verbs per app. Its facts are rendered into the markup, so the page is true with script
+  off or with a script that failed to load; the app list is fetched, because a directory changes
+  between two page loads.
+- `GET /panel.js` — the panel's script, from `crates/web`'s own file. A route rather than an inline
+  block, so `/` can be served with `script-src 'self'`: a string that reaches the page from the
+  filesystem — an app's name, a slug — cannot become code. The page carries the control token in a
+  `<meta>` element. That costs nothing a process on this machine could not already read out of the
+  `0600` file, and it saves the user from pasting a secret into a form to open their own panel.
 - `GET /api/health` — liveness as JSON. The one `/api/` route without the token check: it carries
   no user data, and making the simplest probe require a `0600` read is the wrong trade.
+- `GET` and `POST /api/config` — the model endpoint, behind the token. `GET` answers whether one is
+  configured and its model name, never the key. `POST` is the first-run form and **the one route
+  that reads a request body**: a key in a URL is written into the browser's history and into
+  whatever logs the URL, which is the same reason the token travels in a header rather than in the
+  path. The body is bounded (`MAX_BODY`, 16 KiB) and accepted only with a declared
+  `Content-Length`. The file is written through `config::save` — `0600`, atomically, and after the
+  same checks the binary applies at startup — so a value it would refuse to boot on is refused by
+  the form instead. The running process picks the change up immediately: nothing else caches the
+  config, so there is no restart to ask for.
 - `GET /api/apps` — the apps under `~/.deepnest/apps`, and every entry there that is not one, with
   the reason. Behind the token, because it names the user's apps and the paths they live at. It
   reads the directory per request, so an app that appeared a second ago is in the next answer
@@ -69,9 +86,11 @@ by name what it does not answer:
   answer `405` with `Allow: GET, HEAD`, because this layer carries no request body and forwarding
   one without it would tell the app a request arrived that said nothing.
 - Anything else → `404` JSON; a method it does not serve → `405` with
-  `Allow: GET, HEAD, POST, DELETE`; a request that declares a body → `411`. Nothing in this build
-  reads a body: answering "done" to a request whose content it never saw is worse than refusing
-  it.
+  `Allow: GET, HEAD, POST, DELETE`. A body sent to any route but `/api/config` → `400` naming the
+  one route that reads one: answering "done" to content this server never looked at is worse than
+  refusing it. `411` for a chunked body, because a body with no declared length has no bound, and
+  `413` when a declared length is past `MAX_BODY` — that bound is about how much memory this
+  process can be made to spend.
 
 Three deviations from §2, each deliberate, each to be closed by the crate that owns it:
 
@@ -84,8 +103,9 @@ Three deviations from §2, each deliberate, each to be closed by the crate that 
   answer carries the app's own content type and headers, so the response type has to be able to
   hold them; a type that can is the gateway's business, not the binary's. The binary re-exports it
   (`pub use deepnest_gateway::http`), so a name that reads `crate::http` still resolves.
-- **Nothing opens the browser yet.** Opening a placeholder page on every start is worth exactly
-  as much as the panel behind it.
+- **Nothing opens the browser yet.** The panel is real now, so opening it on start is worth doing
+  rather than pointless — but it is a decision about the user's desktop that this slice does not
+  take. The URL is printed; `open`ing it is one line for whoever lands that.
 
 `config.toml` is one `[llm]` table: `base_url`, `api_key`, `model`. §3 spells the second `key`;
 both spellings are accepted, because the design and EMRG's own config name the same thing
@@ -245,7 +265,15 @@ The forward is a `Forwarder` trait, for the same reason `Spawner` and `Prober` a
 
 ### `crates/web` — the control panel
 
-First run: the model endpoint form. After that: app list, app creation, and the app page with the floating dialog. Escalation approvals are modal here, one hop at a time, and the approval itself is the audit record (`host 20:20`).
+**Landed**: the panel itself — the endpoint state and its form, the app list including the entries
+that are not apps and why, app creation, the five verbs per app, and an `Open` link to
+`/app/<slug>/`. One HTML page, one stylesheet, one script: no CSS framework, no icon set, no
+bundler, because a panel that needs a build step is a panel nobody reads in the repository.
+
+**Still to come**: the app page with the floating dialog, and escalation approvals — modal here,
+one hop at a time, the approval itself the audit record (`host 20:20`). Both wait on the gateway
+injecting the dialog into every `/app/<slug>/` response, so an agent rewriting the app's own page
+cannot delete it, and on an agent being in the binary at all.
 
 ### `crates/packaging` — the single file
 
@@ -292,8 +320,9 @@ One module per cycle, each landing with its tests:
    allocation, start/stop/restart), and the template and the build (`POST /api/apps/<slug>/create`
    and `/build`). All three are wired into the binary, so this is not a module that sits unread.
 7. `crates/gateway` + `crates/web` — the single door, the panel, the dialog. **In progress**: the
-   gateway's forward, the HTTP layer under it, the WebSocket upgrade and unbuffered streaming are
-   in, and the binary serves connections concurrently; the dialog injection and the panel remain.
+   gateway's forward, the HTTP layer under it, the WebSocket upgrade, unbuffered streaming and the
+   panel are in, and the binary serves connections concurrently; the dialog injection and the
+   escalation UI remain.
 8. `crates/skills` — loader, catalog, installer.
 9. `crates/packaging` — payload, first-run unpack, signing.
 

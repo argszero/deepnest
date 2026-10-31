@@ -1,0 +1,247 @@
+// The panel's script. No framework and no build step: this file is served as written, so what a
+// user's browser runs is what is in the repository.
+//
+// Two rules hold throughout, and both are about the fact that the strings this page renders come
+// from the filesystem — an app's directory name, an error the server wrote:
+//
+// 1. Text from anywhere is inserted with `textContent`, never `innerHTML`. The policy forbids inline
+//    script, so a string cannot execute on its own; `textContent` is what stops it from becoming
+//    markup that a later mistake could act on.
+// 2. The control token is read from the DOM and sent as a bearer credential. It is never put in a
+//    URL, so it never lands in the browser's history or in a `Referer`.
+
+(function () {
+  "use strict";
+
+  function meta(name) {
+    var element = document.querySelector('meta[name="' + name + '"]');
+    return element ? element.getAttribute("content") : "";
+  }
+
+  var TOKEN = meta("deepnest-token");
+  var PORT = meta("deepnest-port");
+
+  var status = document.getElementById("status");
+  var endpointLine = document.getElementById("endpoint");
+  var firstRun = document.getElementById("first-run");
+  var appsBox = document.getElementById("apps");
+
+  // One place the answer is parsed, so a refusal the server wrote reaches the user as text rather
+  // than as "[object Object]" or as silence.
+  function api(path, options) {
+    options = options || {};
+    options.headers = options.headers || {};
+    options.headers["Authorization"] = "Bearer " + TOKEN;
+    if (options.body) {
+      options.headers["Content-Type"] = "application/json";
+    }
+    options.mode = "same-origin";
+    options.cache = "no-store";
+    return fetch(path, options).then(function (response) {
+      return response.text().then(function (text) {
+        var body = null;
+        if (text) {
+          try {
+            body = JSON.parse(text);
+          } catch (error) {
+            body = { error: text };
+          }
+        }
+        if (!response.ok) {
+          var reason =
+            body && (body.error || body.detail)
+              ? body.error || body.detail
+              : response.status + " " + response.statusText;
+          throw new Error(reason);
+        }
+        return body;
+      });
+    });
+  }
+
+  function say(text, kind) {
+    status.textContent = text || "";
+    status.className = "note" + (kind ? " " + kind : "");
+  }
+
+  function element(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) {
+      node.className = className;
+    }
+    if (text !== undefined && text !== null) {
+      node.textContent = String(text);
+    }
+    return node;
+  }
+
+  function button(label, onClick) {
+    var node = element("button", "", label);
+    node.type = "button";
+    node.addEventListener("click", function () {
+      node.disabled = true;
+      Promise.resolve(onClick()).then(
+        function () {
+          node.disabled = false;
+        },
+        function (error) {
+          node.disabled = false;
+          say(String(error.message || error), "bad");
+        }
+      );
+    });
+    return node;
+  }
+
+  // ---- the model endpoint -------------------------------------------------------------------
+
+  function renderEndpoint(state) {
+    endpointLine.textContent = "";
+    if (state && state.configured) {
+      endpointLine.appendChild(document.createTextNode("Model endpoint: configured ("));
+      endpointLine.appendChild(element("code", "", state.model || "unnamed model"));
+      endpointLine.appendChild(document.createTextNode(")."));
+      firstRun.hidden = true;
+    } else {
+      endpointLine.appendChild(document.createTextNode("Model endpoint: "));
+      endpointLine.appendChild(element("strong", "bad", "not configured"));
+      endpointLine.appendChild(
+        document.createTextNode(" — deepnest needs one before it can write anything.")
+      );
+      firstRun.hidden = false;
+    }
+  }
+
+  function refreshEndpoint() {
+    // `/api/config` rather than `/api/health`: the health probe carries no user data and therefore
+    // names no model, which is exactly why it can be read without the token.
+    return api("/api/config").then(renderEndpoint);
+  }
+
+  document.getElementById("endpoint-form").addEventListener("submit", function (event) {
+    event.preventDefault();
+    var payload = {
+      base_url: document.getElementById("base-url").value.trim(),
+      api_key: document.getElementById("api-key").value,
+      model: document.getElementById("model").value.trim()
+    };
+    say("Saving the endpoint…");
+    api("/api/config", { method: "POST", body: JSON.stringify(payload) })
+      .then(function (saved) {
+        // The key's own field is cleared: it is in `config.toml` now, and a password input that
+        // still holds it is one screenshot away from being a leak.
+        document.getElementById("api-key").value = "";
+        say("Saved. deepnest is using it now.", "good");
+        return renderEndpoint(saved);
+      })
+      .catch(function (error) {
+        say("Could not save: " + (error.message || error), "bad");
+      });
+  });
+
+  // ---- the app list -------------------------------------------------------------------------
+
+  function renderApp(app) {
+    var card = element("div", "app");
+    var head = element("div", "row");
+    head.appendChild(element("h3", "", app.name || app.slug));
+    head.appendChild(element("span", "slug", app.slug));
+    if (app.template) {
+      head.appendChild(element("span", "slug", app.template));
+    }
+    card.appendChild(head);
+    if (app.path) {
+      card.appendChild(element("div", "note mono", app.path));
+    }
+
+    var actions = element("div", "actions");
+    var open = element("a", "", "Open");
+    open.href = "/app/" + encodeURIComponent(app.slug) + "/";
+    open.target = "_blank";
+    open.rel = "noopener";
+    actions.appendChild(open);
+
+    // The four verbs the API has. Each names the route it calls, so a failure reports which one
+    // failed rather than "something went wrong".
+    ["build", "start", "stop", "restart"].forEach(function (action) {
+      actions.appendChild(
+        button(action, function () {
+          say("Requesting " + action + " for " + app.slug + "…");
+          var path = "/api/apps/" + encodeURIComponent(app.slug) + "/" + action;
+          return api(path, { method: "POST" }).then(
+            function (answer) {
+              var state = answer && answer.state ? answer.state : "ok";
+              say(app.slug + ": " + action + " answered " + state, "good");
+              return refreshApps();
+            },
+            function (error) {
+              throw new Error(app.slug + ": " + (error.message || error));
+            }
+          );
+        })
+      );
+    });
+    card.appendChild(actions);
+    return card;
+  }
+
+  function renderApps(listing) {
+    appsBox.textContent = "";
+    var apps = (listing && listing.apps) || [];
+    if (!apps.length) {
+      appsBox.appendChild(element("p", "note", "No apps yet. Create one below."));
+    }
+    apps.forEach(function (app) {
+      appsBox.appendChild(renderApp(app));
+    });
+
+    // Directories that are not apps are reported by path and reason: an app that failed to parse
+    // must not look like an app that does not exist.
+    var skipped = (listing && listing.skipped) || [];
+    if (skipped.length) {
+      var box = element("div", "app");
+      box.appendChild(element("h3", "bad", "Not usable as apps"));
+      skipped.forEach(function (entry) {
+        box.appendChild(element("p", "note", entry.path + " — " + entry.reason));
+      });
+      appsBox.appendChild(box);
+    }
+  }
+
+  function refreshApps() {
+    return api("/api/apps").then(renderApps);
+  }
+
+  document.getElementById("create-form").addEventListener("submit", function (event) {
+    event.preventDefault();
+    var slug = document.getElementById("new-slug").value.trim();
+    var name = document.getElementById("new-name").value.trim();
+    say("Creating " + slug + "…");
+    var path = "/api/apps/" + encodeURIComponent(slug) + "/create?name=" + encodeURIComponent(name);
+    api(path, { method: "POST" })
+      .then(function (created) {
+        say("Created " + created.slug + " in " + created.dir, "good");
+        document.getElementById("new-slug").value = "";
+        document.getElementById("new-name").value = "";
+        return refreshApps();
+      })
+      .catch(function (error) {
+        say("Could not create: " + (error.message || error), "bad");
+      });
+  });
+
+  // ---- start ---------------------------------------------------------------------------------
+
+  // Health first: it answers without the token, so it is the one call that separates "deepnest is
+  // not answering" from "the token was refused".
+  api("/api/health")
+    .then(refreshEndpoint)
+    .catch(function (error) {
+      say("Cannot reach deepnest on 127.0.0.1:" + PORT + " — " + (error.message || error), "bad");
+    });
+
+  refreshApps().catch(function (error) {
+    appsBox.textContent = "";
+    appsBox.appendChild(element("p", "bad", "Cannot read the app list: " + (error.message || error)));
+  });
+})();
