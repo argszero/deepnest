@@ -414,6 +414,23 @@ pub fn summary(skills: &[Skill]) -> String {
 mod tests {
     use super::*;
 
+    /// Makes a symlink, and reports whether this host allowed it.
+    #[cfg(unix)]
+    fn symlink(target: &Path, link: &Path) -> bool {
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
+
+    #[cfg(windows)]
+    fn symlink(target: &Path, link: &Path) -> bool {
+        std::os::windows::fs::symlink_file(target, link).is_ok()
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn symlink(target: &Path, link: &Path) -> bool {
+        let _ = (target, link);
+        false
+    }
+
     struct Scratch {
         base: PathBuf,
     }
@@ -647,12 +664,12 @@ mod tests {
         );
         let link = scratch.home().join(USER_DIR).join("notes.md");
         fs::create_dir_all(link.parent().unwrap()).unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&real, &link).unwrap();
-        #[cfg(not(unix))]
-        {
-            // Windows needs a privilege for symlinks; the rule is asserted on unix and the test
-            // still has to say something true elsewhere.
+        if !symlink(&real, &link) {
+            // The rule is std's (`symlink_metadata` reports it on every platform), but making one
+            // is not: Windows requires `SeCreateSymbolicLinkPrivilege`, which a developer-mode
+            // machine or an elevated runner holds and a plain user account does not. Ask rather
+            // than assume, and where the answer is no, say so instead of asserting nothing.
+            eprintln!("skipped: this host will not create a symlink for the test");
             return;
         }
 
