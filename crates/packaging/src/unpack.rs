@@ -631,7 +631,8 @@ mod tests {
         assert!(!Path::new("/etc/payload").exists());
     }
 
-    #[cfg(unix)]
+    // No platform gate: this refusal is decided by reading the entry's path, before anything is
+    // written for it — so it is the same answer where a link can be made and where it cannot.
     #[test]
     fn a_link_that_points_outside_is_refused() {
         let scratch = Scratch::new("link-out");
@@ -705,17 +706,18 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    /// The depth that counts is the entry's, not the target's, and it is measured before writing.
+    ///
+    /// One `..` from the root of the tree is out, so a link at the root may not carry one — while
+    /// the same target from inside `bin/` is still inside. Nothing is written either way, so this
+    /// is the same answer on every platform.
     #[test]
-    fn a_link_that_would_not_escape_before_it_arrives_is_still_checked_as_written() {
+    fn a_link_at_the_root_may_not_climb_one_step_up() {
         let scratch = Scratch::new("link-depth");
         let home = scratch.home();
+        let bytes = archive(&[Part::Symlink("rustc", "../anything")]);
 
-        // One `..` from the root of the tree is out, so a link at the root may not carry one —
-        // while the same target from inside `bin/` is still inside. The depth is the entry's, not
-        // the target's.
-        let escaping = archive(&[Part::Symlink("rustc", "../anything")]);
-        let refused = unpack_bytes(&home, &escaping, "payload-1").unwrap_err();
+        let refused = unpack_bytes(&home, &bytes, "payload-1").unwrap_err();
         assert!(
             matches!(
                 refused,
@@ -726,12 +728,25 @@ mod tests {
             ),
             "{refused}"
         );
+        assert!(
+            home.join("toolchain/0.1.0").symlink_metadata().is_err(),
+            "a refused payload was published anyway"
+        );
+    }
 
-        let inside = archive(&[
+    /// A target that does not exist is not a refusal: the check is lexical, and what the link
+    /// points at is the toolchain's business once the payload is published.
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_link_inside_the_tree_is_kept_as_written() {
+        let scratch = Scratch::new("link-dangling");
+        let home = scratch.home();
+        let bytes = archive(&[
             Part::Dir("bin"),
             Part::Symlink("bin/rustc", "../rustc-real"),
         ]);
-        let unpacked = unpack_bytes(&home, &inside, "payload-1").unwrap();
+
+        let unpacked = unpack_bytes(&home, &bytes, "payload-1").unwrap();
         assert_eq!(
             fs::read_link(unpacked.dir.join("bin/rustc")).unwrap(),
             Path::new("../rustc-real")
