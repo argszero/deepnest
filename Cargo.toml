@@ -1,6 +1,14 @@
 [workspace]
 resolver = "2"
-members = ["crates/llm", "crates/sandbox", "crates/command_scan", "crates/tools", "crates/agent", "crates/deepnest"]
+members = [
+    "crates/llm",
+    "crates/sandbox",
+    "crates/command_scan",
+    "crates/tools",
+    "crates/agent",
+    "crates/apps",
+    "crates/deepnest",
+]
 
 [workspace.package]
 version = "0.1.0"

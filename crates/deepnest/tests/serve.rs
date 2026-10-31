@@ -63,6 +63,10 @@ impl Scratch {
     fn token_path(&self) -> PathBuf {
         self.base.join(token::FILE_NAME)
     }
+
+    fn apps(&self) -> PathBuf {
+        deepnest_apps::apps_dir(&self.base)
+    }
 }
 
 impl Drop for Scratch {
@@ -78,6 +82,7 @@ fn start(scratch: &Scratch, model: Option<&str>) -> (server::Server, Token) {
         token: Some(token.clone()),
         token_path: Some(scratch.token_path()),
         model: model.map(str::to_string),
+        apps_dir: Some(scratch.apps()),
         keepalive: Duration::from_millis(20),
         bind: brisk(),
     })
@@ -110,20 +115,27 @@ fn the_panel_and_the_health_route_answer_over_a_real_socket() {
 
 #[test]
 fn the_token_gate_is_enforced_end_to_end() {
+    // The unit tests call the router directly; this one goes through the socket, the header parse
+    // and the write path, because that is where an auth check stops being a check.
     let scratch = Scratch::new("auth");
+    deepnest_apps::Manifest::new("Notes")
+        .save(&scratch.apps().join("notes"))
+        .unwrap();
     let (running, token) = start(&scratch, None);
     let addr = running.addr();
 
     let refused = get(addr, "/api/apps", "");
     assert!(refused.starts_with("HTTP/1.1 401"), "{refused}");
+    assert!(!refused.contains("notes"), "the refusal leaked the list");
 
     let accepted = get(
         addr,
         "/api/apps",
         &format!("Authorization: Bearer {token}\r\n"),
     );
-    // 404 because `/api/apps` does not exist yet — the point is that it is no longer 401.
-    assert!(accepted.starts_with("HTTP/1.1 404"), "{accepted}");
+    assert!(accepted.starts_with("HTTP/1.1 200"), "{accepted}");
+    assert!(accepted.contains("\"slug\":\"notes\""), "{accepted}");
+    assert!(accepted.contains("\"name\":\"Notes\""), "{accepted}");
 
     running.shutdown();
 }
@@ -250,6 +262,7 @@ fn the_whole_home_is_assembled_the_way_the_binary_assembles_it() {
         token: Some(token),
         token_path: Some(scratch.token_path()),
         model: Some(config.model().to_string()),
+        apps_dir: Some(scratch.apps()),
         keepalive: Duration::from_secs(30),
         bind: brisk(),
     })

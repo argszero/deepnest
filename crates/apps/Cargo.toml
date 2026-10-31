@@ -1,0 +1,12 @@
+[package]
+name = "deepnest-apps"
+description = "What an app is: the slug that names it, the manifest that marks it, the listing that finds it and the log it writes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+toml = "0.8"
