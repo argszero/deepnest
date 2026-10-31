@@ -41,13 +41,17 @@ A random token is written to `~/.deepnest/deepnest.token` (mode `0600`) and re-a
 
 `crates/deepnest` is the binary, and it lands **before** `crates/apps` on purpose: five library
 crates that read well and nothing that starts leaves the first integration failure to packaging,
-which is the most expensive place to meet it. It answers three routes on the one port, and says
+which is the most expensive place to meet it. It answers four routes on the one port, and says
 by name what it does not answer:
 
 - `GET /` — the panel. Until `crates/web` exists it is a placeholder that reports what is
-  configured and states plainly that the real panel is not here yet.
+  configured, how many apps are installed, and states plainly that the real panel is not here yet.
 - `GET /api/health` — liveness as JSON. The one `/api/` route without the token check: it carries
   no user data, and making the simplest probe require a `0600` read is the wrong trade.
+- `GET /api/apps` — the apps under `~/.deepnest/apps`, and every entry there that is not one, with
+  the reason. Behind the token, because it names the user's apps and the paths they live at. It
+  reads the directory per request, so an app that appeared a second ago is in the next answer
+  without a restart.
 - `GET /app/<slug>/` → `404` naming `crates/gateway`. A bare `404` on a correctly spelled path
   reads like a bug in the path.
 - Anything else → `404` JSON; a method other than `GET`/`HEAD` → `405` with `Allow: GET, HEAD`.
@@ -80,19 +84,21 @@ cause.
 ├── skills/.state.json       managed: true ⇒ updater may refresh it
 ├── toolchain/               unpacked Rust + bun, first-run, atomically
 ├── apps/<slug>/
+│   ├── deepnest.toml        name and template version — what makes it an app
 │   ├── src/                 the app's own source
 │   ├── app.sqlite           WAL, busy_timeout, single writer
 │   ├── target/              build output
 │   └── .agent/
 │       ├── history.jsonl    conversation, replayable per turn
 │       └── memory/*.md      long-term memory + MEMORY.md index
-└── logs/
+└── logs/<slug>.log          one log per app, read from its end
 ```
 
-Two rules carry weight here:
+Three rules carry weight here:
 
 - **Agent state lives inside the app directory**, so deleting an app deletes its agent's history and memory with it, and backing an app up backs them up too (`host 20:58` — memory is part of "EMRG-level capability", not an optional feature).
 - **The agent's history is not stored in `app.sqlite`.** That database belongs to the user's app, and a second writer on it is exactly the `database is locked` failure the WAL measurement already documented.
+- **A directory is an app because `deepnest.toml` says so** (`decided in implementation, 2026-10-31`). Treating every directory under `apps/` as an app has no way to report a broken one: it would be listed as an app whose source happens to be missing, and the failure would surface much later as a build error about a file nobody was editing. The manifest also carries the template version the app was created from — recorded now, because the cheap moment to start recording it is before there is anything to migrate.
 
 ## 4. Modules
 
@@ -151,6 +157,14 @@ Front-end build is bun; **no HMR**. Refresh is triggered by a "this version is d
 
 The template also pins the gateway contract: relative asset paths, and the app must tolerate running under a path prefix.
 
+**What has landed so far: the directory contract** (`decided in implementation`, 2026-10-31). `crates/apps` owns the slug, the manifest, discovery and the log tail, and answers `GET /api/apps` from the binary. It lands first because the lifecycle is written against this shape, and a lifecycle written against an unagreed shape is a lifecycle rewritten. Three decisions were made while building it:
+
+- **The slug is validated against both namespaces it lives in, once.** It becomes a directory on three platforms and a path segment in `/app/<slug>/`, and the union of those rules is stricter than either. The alphabet is lowercase letters, digits and `-`; a name starts and ends with a letter or a digit; `CON`/`PRN`/`AUX`/`NUL`/`COM1-9`/`LPT1-9` are refused because Windows cannot create a directory with those names, and uppercase is refused because NTFS and a default macOS APFS are case-insensitive, so `Notes` and `notes` would be one directory. Normalization is never applied on the way in — no trimming, no case folding — because each of those would name a directory other than the one the user wrote.
+- **Discovery reports what it could not use, by name.** `list` returns the apps and, separately, every entry that is not one with the reason. A single list would make "no apps yet" and "your app's manifest has a typo" the same reading, and the user's only clue to the second would be a panel that seems emptier than it should be. A symlink is reported rather than followed: following one would let a directory the sandbox never agreed to appear as an app, and the writable set is built from app directories.
+- **The log tail is bounded by bytes.** Counting lines from the start means reading the whole file, and a build log is exactly the file allowed to grow without limit. The reader seeks to the last 64 KiB, drops the partial line the window starts in, and says on its own last line when earlier lines were left out — a silently partial tail reads as a short log.
+
+Not yet in it, and next: the template, the build, start/stop/restart, port allocation. An install with no apps has no `apps/` directory at all, and the listing reports that as "none yet" rather than as a fault.
+
 ### `crates/gateway` — the single door
 
 The router described in §2. Its hardest requirement is not routing but **not lying to the app**: header rewriting, stream handling and WebSocket upgrade have to be transparent enough that an ordinary axum or Express app runs unchanged under `/app/<slug>/`.
@@ -199,7 +213,9 @@ One module per cycle, each landing with its tests:
    lifecycle so that "does this even start, on all three platforms?" is answered while the answer
    is still cheap. From here on every module either lands wired into the binary or says in its PR
    why it does not.
-6. `crates/apps` — template, build, lifecycle, logs.
+6. `crates/apps` — template, build, lifecycle, logs. Lands in slices: the directory contract
+   first (slug, manifest, discovery, log tail, `GET /api/apps`), then the template and the process
+   lifecycle. The binary already serves the first slice, so this is not a module that sits unread.
 7. `crates/gateway` + `crates/web` — the single door, the panel, the dialog.
 8. `crates/skills` — loader, catalog, installer.
 9. `crates/packaging` — payload, first-run unpack, signing.

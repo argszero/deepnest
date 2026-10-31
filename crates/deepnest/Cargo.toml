@@ -12,6 +12,7 @@ name = "deepnest"
 path = "src/main.rs"
 
 [dependencies]
+deepnest-apps = { path = "../apps" }
 getrandom = "0.2"
 serde = { workspace = true }
 serde_json = { workspace = true }

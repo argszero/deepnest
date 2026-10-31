@@ -129,11 +129,16 @@ fn serve() -> Result<(), Failure> {
     let token_path = home.join(token::FILE_NAME);
     let token = token::ensure(&token_path).map_err(token_failure)?;
 
+    // Where apps live. It is not created here: an install with no apps yet has no `apps/`
+    // directory, and the listing reports that as "none yet" rather than as a fault.
+    let apps_dir = deepnest_apps::apps_dir(&home);
+
     let options = ServerOptions {
         port: server::DEFAULT_PORT,
         token: Some(token),
         token_path: Some(token_path.clone()),
         model: config.as_ref().map(|config| config.model().to_string()),
+        apps_dir: Some(apps_dir.clone()),
         ..Default::default()
     };
 
@@ -154,6 +159,7 @@ fn serve() -> Result<(), Failure> {
     );
     println!("  config: {}", config_path.display());
     println!("  token:  {} (mode 0600)", token_path.display());
+    println!("  apps:   {}", apps_dir.display());
     let _ = std::io::stdout().flush();
 
     // The listener runs on its own thread; this one waits for the process to be ended. There is

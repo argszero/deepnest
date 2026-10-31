@@ -13,8 +13,17 @@
 //! Everything this build does not serve says so, by name. A `404` on `/app/<slug>/` that reads
 //! "the app gateway is not part of this build yet" is worth more to the next person than a bare
 //! `404`, which looks like a bug in a path they spelled correctly.
+//!
+//! `/api/apps` is the one route backed by a directory rather than by a value held in this struct:
+//! it lists `~/.deepnest/apps` at request time, so an app that appeared a second ago is in the
+//! next answer without a restart. What it cannot use it reports rather than drops — see
+//! `deepnest_apps::list` — because the panel showing fewer apps than the user created has no other
+//! way to say why.
 
-use serde_json::json;
+use std::fmt::Write as _;
+use std::path::PathBuf;
+
+use serde_json::{json, Value};
 
 use crate::http::{Method, Request, Response};
 use crate::token::Token;
@@ -27,12 +36,26 @@ pub struct Router {
     model: Option<String>,
     /// The control token. `None` only in tests — the binary always has one.
     token: Option<Token>,
+    /// `~/.deepnest/apps`, when the caller knows where the home is. `None` reports that the list
+    /// is unavailable instead of answering "no apps", which would be a different claim.
+    apps_dir: Option<PathBuf>,
 }
 
 impl Router {
     /// A router for a server bound on `port`.
     pub fn new(port: u16, model: Option<String>, token: Option<Token>) -> Self {
-        Self { port, model, token }
+        Self {
+            port,
+            model,
+            token,
+            apps_dir: None,
+        }
+    }
+
+    /// List apps from `dir`. Without it, `/api/apps` says the directory is unknown.
+    pub fn with_apps_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.apps_dir = Some(dir.into());
+        self
     }
 
     /// Answer one request.
@@ -53,12 +76,18 @@ impl Router {
                 "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'",
             ),
             "/api/health" => Response::json(200, self.health()),
+            "/api/apps" => {
+                if !self.authorized(request) {
+                    return unauthorized();
+                }
+                let (status, body) = self.apps();
+                Response::json(status, body)
+            }
             other if other.starts_with("/api/") => {
                 if self.authorized(request) {
                     Response::json(404, error_body("no such endpoint"))
                 } else {
-                    Response::json(401, error_body("this endpoint needs the control token"))
-                        .header("WWW-Authenticate", "Bearer realm=\"deepnest\"")
+                    unauthorized()
                 }
             }
             other if other.starts_with("/app/") => Response::json(
@@ -131,6 +160,97 @@ impl Router {
         PANEL
             .replace("@@PORT@@", &self.port.to_string())
             .replace("@@STATE@@", &state)
+            .replace("@@APPS@@", &self.apps_summary())
+    }
+
+    /// One line about the apps directory, for the panel.
+    ///
+    /// It counts what could not be used and points at the route that explains each one: a page that
+    /// silently showed fewer apps than exist would leave the user with nothing to act on.
+    fn apps_summary(&self) -> String {
+        let Some(dir) = &self.apps_dir else {
+            return "Apps: <strong>not configured</strong> — this process was started without an apps directory.".to_string();
+        };
+        let shown = escape_html(&dir.display().to_string());
+        match deepnest_apps::list(dir) {
+            Ok(listing) if listing.is_empty() && listing.skipped.is_empty() => {
+                format!("Apps: <strong>none yet</strong> in <code>{shown}</code>.")
+            }
+            Ok(listing) => {
+                let mut line = format!(
+                    "Apps: <strong>{}</strong> in <code>{shown}</code>.",
+                    listing.apps.len()
+                );
+                if !listing.skipped.is_empty() {
+                    let _ = write!(
+                        line,
+                        " {} entries there are not apps — <code>GET /api/apps</code> says why.",
+                        listing.skipped.len()
+                    );
+                }
+                line
+            }
+            Err(error) => format!(
+                "Apps: <strong>cannot be listed</strong> — <code>{}</code>: {}.",
+                shown,
+                escape_html(&error.to_string())
+            ),
+        }
+    }
+
+    /// The app listing as JSON, and the status that goes with it.
+    fn apps(&self) -> (u16, String) {
+        let Some(dir) = &self.apps_dir else {
+            return (
+                200,
+                json!({
+                    "apps_directory": Value::Null,
+                    "apps": [],
+                    "skipped": [],
+                    "note": "this process was started without an apps directory",
+                })
+                .to_string(),
+            );
+        };
+        let shown = dir.display().to_string();
+
+        match deepnest_apps::list(dir) {
+            Ok(listing) => (
+                200,
+                json!({
+                    "apps_directory": shown,
+                    "apps": listing
+                        .apps
+                        .iter()
+                        .map(|app| json!({
+                            "slug": app.slug.as_str(),
+                            "name": app.display_name(),
+                            "template": app.manifest.app.template,
+                            "path": app.dir.display().to_string(),
+                        }))
+                        .collect::<Vec<_>>(),
+                    "skipped": listing
+                        .skipped
+                        .iter()
+                        .map(|skipped| json!({
+                            "path": skipped.path.display().to_string(),
+                            "reason": skipped.reason,
+                        }))
+                        .collect::<Vec<_>>(),
+                })
+                .to_string(),
+            ),
+            // A listing that could not be taken is not an empty listing, and saying "no apps"
+            // would send the user looking for the wrong fault.
+            Err(error) => (
+                500,
+                json!({
+                    "apps_directory": shown,
+                    "error": format!("cannot list {shown}: {error}"),
+                })
+                .to_string(),
+            ),
+        }
     }
 
     fn health(&self) -> String {
@@ -166,10 +286,11 @@ const PANEL: &str = r#"<!doctype html>
   <h1>deepnest</h1>
   <p class="sub">running on <code>127.0.0.1:@@PORT@@</code></p>
   <p>@@STATE@@</p>
+  <p>@@APPS@@</p>
   <div class="todo">
     <p>This is the process, not the product. The control panel arrives with <code>crates/web</code>,
     and app pages at <code>/app/&lt;slug&gt;/</code> with <code>crates/gateway</code>.</p>
-    <p>Liveness: <code>GET /api/health</code>.</p>
+    <p>Liveness: <code>GET /api/health</code>. Apps: <code>GET /api/apps</code>.</p>
   </div>
 </main>
 </body>
@@ -178,6 +299,15 @@ const PANEL: &str = r#"<!doctype html>
 
 fn error_body(message: &str) -> String {
     json!({ "error": message }).to_string()
+}
+
+/// The one answer for a `/api/` request that does not carry the token.
+fn unauthorized() -> Response {
+    Response::json(
+        401,
+        error_body("this endpoint needs the control token — it is in the deepnest home's deepnest.token file"),
+    )
+    .header("WWW-Authenticate", "Bearer realm=\"deepnest\"")
 }
 
 /// Escape the five characters that would otherwise end the text they sit in.
@@ -287,12 +417,133 @@ mod tests {
     #[test]
     fn an_api_route_with_the_token_reaches_the_router_and_finds_nothing() {
         let request = parse(&format!(
-            "GET /api/apps HTTP/1.1\r\nHost: 127.0.0.1:4270\r\nauthorization: bearer {}\r\n",
+            "GET /api/nothing-here HTTP/1.1\r\nHost: 127.0.0.1:4270\r\nauthorization: bearer {}\r\n",
             "a".repeat(64)
         ))
         .unwrap();
-        // 404, not 401: the token was accepted, and `/api/apps` genuinely does not exist yet.
+        // 404, not 401: the token was accepted, and this endpoint genuinely does not exist.
         assert_eq!(router().respond(&request).status, 404);
+    }
+
+    /// A request that carries the token.
+    fn authorized_get(path: &str) -> Request {
+        parse(&format!(
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:4270\r\nauthorization: bearer {}\r\n",
+            "a".repeat(64)
+        ))
+        .unwrap()
+    }
+
+    struct Scratch {
+        base: PathBuf,
+    }
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let base =
+                std::env::temp_dir().join(format!("deepnest-router-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&base);
+            std::fs::create_dir_all(&base).unwrap();
+            Self { base }
+        }
+
+        fn apps(&self) -> PathBuf {
+            self.base.join("apps")
+        }
+
+        fn app(&self, slug: &str, name: &str) {
+            deepnest_apps::Manifest::new(name)
+                .save(&self.apps().join(slug))
+                .unwrap();
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.base);
+        }
+    }
+
+    #[test]
+    fn the_app_list_needs_the_token_like_every_other_api_route() {
+        let scratch = Scratch::new("apps-token");
+        scratch.app("notes", "Notes");
+        let router = router().with_apps_dir(scratch.apps());
+
+        // The listing names the user's apps and the paths they live at; reaching the port is not
+        // enough to read that.
+        assert_eq!(
+            router.respond(&get("/api/apps", "127.0.0.1:4270")).status,
+            401
+        );
+        assert_eq!(router.respond(&authorized_get("/api/apps")).status, 200);
+    }
+
+    #[test]
+    fn the_app_list_names_what_is_there() {
+        let scratch = Scratch::new("apps-list");
+        scratch.app("notes", "Notes");
+        scratch.app("budget", "Budget");
+        let router = router().with_apps_dir(scratch.apps());
+
+        let response = router.respond(&authorized_get("/api/apps"));
+        assert_eq!(response.status, 200);
+        let body = body(&response);
+        assert!(body.contains("\"slug\":\"notes\""), "{body}");
+        assert!(body.contains("\"name\":\"Budget\""), "{body}");
+        // Sorted, so a panel does not reorder itself between two reads.
+        assert!(
+            body.find("budget").unwrap() < body.find("notes").unwrap(),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn an_app_that_could_not_be_read_is_reported_rather_than_dropped() {
+        let scratch = Scratch::new("apps-skipped");
+        scratch.app("good", "Good");
+        std::fs::create_dir_all(scratch.apps().join("Notes")).unwrap();
+        let router = router().with_apps_dir(scratch.apps());
+
+        let body = body(&router.respond(&authorized_get("/api/apps")));
+        assert!(body.contains("\"slug\":\"good\""), "{body}");
+        assert!(body.contains("\"skipped\""), "{body}");
+        assert!(body.contains("Notes"), "{body}");
+        assert!(body.contains("lowercase"), "{body}");
+    }
+
+    #[test]
+    fn a_router_without_an_apps_directory_says_so_instead_of_claiming_there_are_none() {
+        // "No apps" and "this process does not know where apps live" are different readings, and
+        // only one of them is true here.
+        let body = body(&router().respond(&authorized_get("/api/apps")));
+        assert!(body.contains("\"apps_directory\":null"), "{body}");
+        assert!(body.contains("without an apps directory"), "{body}");
+    }
+
+    #[test]
+    fn an_apps_directory_that_cannot_be_read_is_a_server_error_not_an_empty_list() {
+        let scratch = Scratch::new("apps-unreadable");
+        // A file where the directory should be: it exists, so this is not "first run".
+        std::fs::write(scratch.apps(), "not a directory").unwrap();
+        let router = router().with_apps_dir(scratch.apps());
+
+        let response = router.respond(&authorized_get("/api/apps"));
+        assert_eq!(response.status, 500);
+        assert!(body(&response).contains("cannot list"), "{:?}", response);
+    }
+
+    #[test]
+    fn the_panel_counts_the_apps_and_points_at_the_route_that_explains_the_rest() {
+        let scratch = Scratch::new("apps-panel");
+        scratch.app("notes", "Notes");
+        std::fs::create_dir_all(scratch.apps().join("Broken")).unwrap();
+        let router = router().with_apps_dir(scratch.apps());
+
+        let page = body(&router.respond(&get("/", "127.0.0.1:4270")));
+        assert!(page.contains("<strong>1</strong>"), "{page}");
+        assert!(page.contains("/api/apps"), "{page}");
+        assert!(page.contains("are not apps"), "{page}");
     }
 
     #[test]

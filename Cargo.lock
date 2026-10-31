@@ -21,6 +21,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 name = "deepnest"
 version = "0.1.0"
 dependencies = [
+ "deepnest-apps",
  "getrandom",
  "serde",
  "serde_json",
@@ -37,6 +38,14 @@ dependencies = [
  "deepnest-tools",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "deepnest-apps"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "toml",
 ]
 
 [[package]]

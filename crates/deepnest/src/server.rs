@@ -142,6 +142,9 @@ pub struct ServerOptions {
     pub token_path: Option<PathBuf>,
     /// The model name from the config, for the panel.
     pub model: Option<String>,
+    /// `~/.deepnest/apps`, for the panel and `/api/apps`. `None` reports that the directory is
+    /// unknown rather than answering that there are no apps.
+    pub apps_dir: Option<PathBuf>,
     /// How often the keepalive re-asserts the token file.
     pub keepalive: Duration,
     pub bind: BindAttempts,
@@ -154,6 +157,7 @@ impl Default for ServerOptions {
             token: None,
             token_path: None,
             model: None,
+            apps_dir: None,
             keepalive: Duration::from_secs(30),
             bind: BindAttempts::default(),
         }
@@ -251,11 +255,11 @@ pub fn start(options: ServerOptions) -> Result<Server, StartError> {
         })
     })?;
 
-    let router = Arc::new(Router::new(
-        addr.port(),
-        options.model.clone(),
-        options.token.clone(),
-    ));
+    let mut router = Router::new(addr.port(), options.model.clone(), options.token.clone());
+    if let Some(dir) = options.apps_dir.clone() {
+        router = router.with_apps_dir(dir);
+    }
+    let router = Arc::new(router);
     let keepalive = match (options.token_path.clone(), options.token) {
         (Some(path), Some(token)) => Some((path, token)),
         _ => None,
