@@ -461,7 +461,7 @@ right:
   cannot get a token out of the box either.
 
 **The escalation prompt is in that dialog** (`decided in implementation`, 2026-10-31). One hop, one
-call, approved by a person — and the person is looking at this page. Four decisions carry it:
+call, approved by a person — and the person is looking at this page. Five decisions carry it:
 
 - **The request rides in the call that needs the room.** `request_mode` and `justification` are two
   argument keys on the tool call, read and removed before the tool sees them. A tool of its own would
@@ -479,6 +479,15 @@ call, approved by a person — and the person is looking at this page. Four deci
 - **A second cookie, not a wider one.** The page already holds a cookie scoped to the chat route; the
   question route gets its own value and its own path, so the capability to spend an agent turn cannot
   answer a widening request. A value names an app *and* a route, and the router checks both.
+- **A refusal carries the person's words, and an approval carries none.** `Answer::Denied` is
+  documented as "their words, if they gave any — shown to the model rather than summarised", and an
+  empty reason is what makes a refusal unreadable to the model: it has been told no and told nothing
+  about why, when the whole point of keeping `Denied` apart from `Unanswered` is that its next move
+  differs. So the question block has a field for the reason, and it is optional: a person who just
+  wants to say no says exactly that. The key is added only when refusing and only when the field is
+  non-empty — an approval sends `{approve: true}` alone, because `Verdict` refuses a key it does not
+  know and an approval has nothing to explain. The field is cleared with the question, so a reason
+  typed at one request cannot answer the next one.
 
 ### `crates/packaging` — the single file
 

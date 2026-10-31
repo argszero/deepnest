@@ -184,6 +184,34 @@
   font-style: italic;
 }
 
+/* Why not. Styled like the message box rather than like the two lines above it: it is a field the
+ * person types into, and `all: initial` left it with nothing. */
+
+#deepnest-dialog-reason {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 2.4rem;
+  margin: 0 0 0.5rem;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 7px;
+  background: #16161a;
+  color: #f4f4f6;
+  font: 12px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  text-align: left;
+  resize: vertical;
+}
+
+#deepnest-dialog-reason::placeholder {
+  color: rgba(244, 244, 246, 0.42);
+}
+
+#deepnest-dialog-reason:focus-visible {
+  outline: 2px solid #7aa7ff;
+  outline-offset: 1px;
+}
+
 #deepnest-dialog-allow,
 #deepnest-dialog-refuse {
   display: inline-block;
