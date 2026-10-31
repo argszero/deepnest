@@ -35,7 +35,7 @@ use deepnest_apps::{
 };
 use serde_json::{json, Value};
 
-use deepnest_gateway::{ForwardError, Forwarder, StdForwarder, Target};
+use deepnest_gateway::{Answer, ForwardError, Forwarder, StdForwarder, Target};
 
 use crate::http::{Method, Request, Response};
 use crate::token::Token;
@@ -131,12 +131,22 @@ impl Router {
     /// Both are needed: `dir` is where the apps are, and `home` is where `logs/` sits — the log
     /// path is spelled in `deepnest_apps::logs` and not a second time here.
     pub fn with_lifecycle(
-        mut self,
+        self,
         supervisor: Arc<Supervisor>,
         home: impl Into<PathBuf>,
         dir: impl Into<PathBuf>,
     ) -> Self {
-        self.lifecycle = Some(Lifecycle::new(supervisor, home));
+        self.with_parts(Lifecycle::new(supervisor, home), dir)
+    }
+
+    /// The same, with a lifecycle built elsewhere.
+    ///
+    /// It takes the lifecycle whole rather than picking its fields apart, so what a caller chose —
+    /// a builder, a forwarder — arrives with it. A server that rebuilt a lifecycle from its
+    /// supervisor and home would silently drop the other two, and "the forwarder you passed was
+    /// not the one used" is a defect that only shows up as a test measuring the wrong thing.
+    pub fn with_parts(mut self, lifecycle: Lifecycle, dir: impl Into<PathBuf>) -> Self {
+        self.lifecycle = Some(lifecycle);
         self.apps_dir = Some(dir.into());
         self
     }
@@ -162,45 +172,51 @@ impl Router {
     }
 
     /// Answer one request.
-    pub fn respond(&self, request: &Request) -> Response {
+    ///
+    /// The answer is one of two things, and the second one is why this is not a `Response`: an app
+    /// reached through `/app/<slug>/` may hold the connection open — a WebSocket that just
+    /// upgraded, an event stream with no end — and a caller handed a buffer would have to invent
+    /// the rest of it. Every route of deepnest's own answers a body; the app's answer depends on
+    /// what the app did.
+    pub fn respond(&self, request: &Request) -> Answer {
         if request.method == Method::Head {
             // Nothing below distinguishes HEAD from GET: the body is dropped at write time, and
             // that is the correct semantic. Naming it here documents the intent.
         }
 
         if let Err(refusal) = self.host_is_ours(request) {
-            return refusal;
+            return Answer::Full(refusal);
         }
 
         let path = request.path.as_str();
         match path {
-            "/" | "/index.html" => Response::html(200, self.panel()).header(
-                "Content-Security-Policy",
-                "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'",
+            "/" | "/index.html" => Answer::Full(
+                Response::html(200, self.panel()).header(
+                    "Content-Security-Policy",
+                    "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'",
+                ),
             ),
-            "/api/health" => Response::json(200, self.health()),
+            "/api/health" => Answer::Full(Response::json(200, self.health())),
             "/api/apps" => {
                 if !self.authorized(request) {
-                    return unauthorized();
+                    return Answer::Full(unauthorized());
                 }
                 let (status, body) = self.apps();
-                Response::json(status, body)
+                Answer::Full(Response::json(status, body))
             }
             other if other.starts_with("/api/apps/") => {
                 if !self.authorized(request) {
-                    return unauthorized();
+                    return Answer::Full(unauthorized());
                 }
-                self.app_action(request)
+                Answer::Full(self.app_action(request))
             }
-            other if other.starts_with("/api/") => {
-                if self.authorized(request) {
-                    Response::json(404, error_body("no such endpoint"))
-                } else {
-                    unauthorized()
-                }
-            }
+            other if other.starts_with("/api/") => Answer::Full(if self.authorized(request) {
+                Response::json(404, error_body("no such endpoint"))
+            } else {
+                unauthorized()
+            }),
             other if other.starts_with("/app/") => self.app_page(request),
-            _ => Response::json(404, error_body("no such path")),
+            _ => Answer::Full(Response::json(404, error_body("no such path"))),
         }
     }
 
@@ -370,7 +386,11 @@ impl Router {
     /// clicking a link that then demanded a header is a page that never loads. What keeps it from
     /// being an open door is that it can only reach an app's own loopback port — the app's
     /// authorisation, its own, arrives with the request.
-    fn app_page(&self, request: &Request) -> Response {
+    ///
+    /// The one route that may answer with a connection rather than a body: an app that upgrades or
+    /// streams is entitled to keep talking, and every refusal above the forward is still a body,
+    /// because "the app is not running" is an answer this layer can finish.
+    fn app_page(&self, request: &Request) -> Answer {
         let rest = request.path.strip_prefix("/app/").unwrap_or_default();
         let slug_text = rest.split('/').next().unwrap_or_default();
         // A path that names no app is `404`, not `400`: this spelling arrived from an address bar,
@@ -378,70 +398,79 @@ impl Router {
         let slug = match Slug::parse(slug_text) {
             Ok(slug) => slug,
             Err(_) => {
-                return Response::json(404, error_body(&format!("no app named `{slug_text}`")))
+                return Answer::Full(Response::json(
+                    404,
+                    error_body(&format!("no app named `{slug_text}`")),
+                ))
             }
         };
 
         let Some(lifecycle) = &self.lifecycle else {
-            return Response::json(
+            return Answer::Full(Response::json(
                 503,
                 error_body("this process cannot serve apps: it was started without a lifecycle"),
-            );
+            ));
         };
         let Some(apps_dir) = &self.apps_dir else {
-            return Response::json(
+            return Answer::Full(Response::json(
                 503,
                 error_body(
                     "this process cannot find apps: it was started without an apps directory",
                 ),
-            );
+            ));
         };
         if !apps_dir.join(slug.as_str()).is_dir() {
-            return Response::json(
+            return Answer::Full(Response::json(
                 404,
                 error_body(&format!("no app named `{slug}` in {}", apps_dir.display())),
-            );
+            ));
         }
 
         // This layer reads one request per connection and no body, so a request that carried one
         // would arrive at the app saying nothing. Refusing by name is the honest answer; a
         // forward that dropped the content would report success for something it never sent.
         if !deepnest_gateway::proxy::can_forward(request.method) {
-            return Response::text(
-                405,
-                format!(
-                    "{} is not forwarded to an app: this server carries GET and HEAD only\n",
-                    request.method.as_str()
-                ),
-            )
-            .header("Allow", "GET, HEAD");
+            return Answer::Full(
+                Response::text(
+                    405,
+                    format!(
+                        "{} is not forwarded to an app: this server carries GET and HEAD only\n",
+                        request.method.as_str()
+                    ),
+                )
+                .header("Allow", "GET, HEAD"),
+            );
         }
 
         let target = match lifecycle.supervisor.state(&slug) {
             State::Running { port, .. } => Target::new(slug.as_str(), port),
             State::Stopped => {
-                return Response::text(
+                return Answer::Full(Response::text(
                     503,
                     format!("`{slug}` is not running — POST /api/apps/{slug}/start\n"),
-                )
+                ))
             }
             State::Failed { reason } => {
-                return Response::text(503, format!("`{slug}` is not running: {reason}\n"))
+                return Answer::Full(Response::text(
+                    503,
+                    format!("`{slug}` is not running: {reason}\n"),
+                ))
             }
         };
 
         match lifecycle.forwarder.forward(&target, request) {
-            Ok(response) => response,
+            // Already an answer: a body, or the connection the app is holding.
+            Ok(answer) => answer,
             // The app was running a moment ago and its port answers nothing now: from the browser's
             // side that is a gateway whose upstream is gone, and the useful next step is the log.
-            Err(error @ ForwardError::Connect { .. }) => Response::text(
+            Err(error @ ForwardError::Connect { .. }) => Answer::Full(Response::text(
                 502,
                 format!(
                     "{error}\n\nthe app's log is {}\n",
                     deepnest_apps::log_path(&lifecycle.home, &slug).display()
                 ),
-            ),
-            Err(error) => Response::text(502, format!("{error}\n")),
+            )),
+            Err(error) => Answer::Full(Response::text(502, format!("{error}\n"))),
         }
     }
 
@@ -839,7 +868,7 @@ mod tests {
     fn the_root_serves_the_panel_on_both_spellings_of_loopback() {
         let router = router();
         for host in ["127.0.0.1:4270", "localhost:4270", "LOCALHOST:4270"] {
-            let response = router.respond(&get("/", host));
+            let response = router.respond(&get("/", host)).complete();
             assert_eq!(response.status, 200, "Host: {host}");
             assert!(body(&response).contains("127.0.0.1:4270"));
         }
@@ -849,20 +878,22 @@ mod tests {
     fn a_foreign_host_is_refused() {
         // DNS rebinding: the name resolves to loopback, so the port is reachable; the Host
         // header is the one thing the attacking page cannot make truthful.
-        let response = router().respond(&get("/", "evil.example"));
+        let response = router().respond(&get("/", "evil.example")).complete();
         assert_eq!(response.status, 403);
     }
 
     #[test]
     fn a_request_without_host_is_refused() {
         let request = parse("GET / HTTP/1.1\r\n").unwrap();
-        assert_eq!(router().respond(&request).status, 400);
+        assert_eq!(router().respond(&request).complete().status, 400);
     }
 
     #[test]
     fn health_answers_without_the_token() {
         // A probe should not have to read a 0600 file, and this route carries no user data.
-        let response = router().respond(&get("/api/health", "127.0.0.1:4270"));
+        let response = router()
+            .respond(&get("/api/health", "127.0.0.1:4270"))
+            .complete();
         assert_eq!(response.status, 200);
         let body = body(&response);
         assert!(body.contains("\"status\":\"ok\""), "{body}");
@@ -878,7 +909,9 @@ mod tests {
 
     #[test]
     fn an_api_route_without_the_token_is_unauthorized() {
-        let response = router().respond(&get("/api/apps", "127.0.0.1:4270"));
+        let response = router()
+            .respond(&get("/api/apps", "127.0.0.1:4270"))
+            .complete();
         assert_eq!(response.status, 401);
         assert!(response
             .headers
@@ -893,7 +926,7 @@ mod tests {
             "b".repeat(64)
         ))
         .unwrap();
-        assert_eq!(router().respond(&request).status, 401);
+        assert_eq!(router().respond(&request).complete().status, 401);
     }
 
     #[test]
@@ -904,7 +937,7 @@ mod tests {
         ))
         .unwrap();
         // 404, not 401: the token was accepted, and this endpoint genuinely does not exist.
-        assert_eq!(router().respond(&request).status, 404);
+        assert_eq!(router().respond(&request).complete().status, 404);
     }
 
     /// A request that carries the token.
@@ -963,10 +996,19 @@ mod tests {
         // The listing names the user's apps and the paths they live at; reaching the port is not
         // enough to read that.
         assert_eq!(
-            router.respond(&get("/api/apps", "127.0.0.1:4270")).status,
+            router
+                .respond(&get("/api/apps", "127.0.0.1:4270"))
+                .complete()
+                .status,
             401
         );
-        assert_eq!(router.respond(&authorized_get("/api/apps")).status, 200);
+        assert_eq!(
+            router
+                .respond(&authorized_get("/api/apps"))
+                .complete()
+                .status,
+            200
+        );
     }
 
     #[test]
@@ -976,7 +1018,7 @@ mod tests {
         scratch.app("budget", "Budget");
         let router = router().with_apps_dir(scratch.apps());
 
-        let response = router.respond(&authorized_get("/api/apps"));
+        let response = router.respond(&authorized_get("/api/apps")).complete();
         assert_eq!(response.status, 200);
         let body = body(&response);
         assert!(body.contains("\"slug\":\"notes\""), "{body}");
@@ -995,7 +1037,7 @@ mod tests {
         std::fs::create_dir_all(scratch.apps().join("Notes")).unwrap();
         let router = router().with_apps_dir(scratch.apps());
 
-        let body = body(&router.respond(&authorized_get("/api/apps")));
+        let body = body(&router.respond(&authorized_get("/api/apps")).complete());
         assert!(body.contains("\"slug\":\"good\""), "{body}");
         assert!(body.contains("\"skipped\""), "{body}");
         assert!(body.contains("Notes"), "{body}");
@@ -1006,7 +1048,7 @@ mod tests {
     fn a_router_without_an_apps_directory_says_so_instead_of_claiming_there_are_none() {
         // "No apps" and "this process does not know where apps live" are different readings, and
         // only one of them is true here.
-        let body = body(&router().respond(&authorized_get("/api/apps")));
+        let body = body(&router().respond(&authorized_get("/api/apps")).complete());
         assert!(body.contains("\"apps_directory\":null"), "{body}");
         assert!(body.contains("without an apps directory"), "{body}");
     }
@@ -1018,7 +1060,7 @@ mod tests {
         std::fs::write(scratch.apps(), "not a directory").unwrap();
         let router = router().with_apps_dir(scratch.apps());
 
-        let response = router.respond(&authorized_get("/api/apps"));
+        let response = router.respond(&authorized_get("/api/apps")).complete();
         assert_eq!(response.status, 500);
         assert!(body(&response).contains("cannot list"), "{:?}", response);
     }
@@ -1030,7 +1072,7 @@ mod tests {
         std::fs::create_dir_all(scratch.apps().join("Broken")).unwrap();
         let router = router().with_apps_dir(scratch.apps());
 
-        let page = body(&router.respond(&get("/", "127.0.0.1:4270")));
+        let page = body(&router.respond(&get("/", "127.0.0.1:4270")).complete());
         assert!(page.contains("<strong>1</strong>"), "{page}");
         assert!(page.contains("/api/apps"), "{page}");
         assert!(page.contains("are not apps"), "{page}");
@@ -1043,7 +1085,7 @@ mod tests {
             "a".repeat(64)
         ))
         .unwrap();
-        assert_eq!(router().respond(&request).status, 401);
+        assert_eq!(router().respond(&request).complete().status, 401);
     }
 
     /// A forwarder that records where it was asked to go, and answers a page.
@@ -1070,12 +1112,15 @@ mod tests {
             &self,
             target: &Target,
             _request: &Request,
-        ) -> Result<Response, deepnest_gateway::ForwardError> {
+        ) -> Result<deepnest_gateway::Answer, deepnest_gateway::ForwardError> {
             self.seen
                 .lock()
                 .unwrap()
                 .push((target.slug.clone(), target.port));
-            Ok(Response::html(self.answer, "<html><head></head></html>"))
+            Ok(deepnest_gateway::Answer::Full(Response::html(
+                self.answer,
+                "<html><head></head></html>",
+            )))
         }
     }
 
@@ -1106,10 +1151,12 @@ mod tests {
         let forwarder = RecordingForwarder::answering(200);
         let (router, supervisor) = supervised_forwarding(&scratch, forwarder.clone());
 
-        let started = router.respond(&post("/api/apps/notes/start"));
+        let started = router.respond(&post("/api/apps/notes/start")).complete();
         assert_eq!(started.status, 200, "{}", body(&started));
 
-        let response = router.respond(&get("/app/notes/", "127.0.0.1:4270"));
+        let response = router
+            .respond(&get("/app/notes/", "127.0.0.1:4270"))
+            .complete();
         assert_eq!(response.status, 200);
         assert_eq!(forwarder.seen().len(), 1, "the forward did not happen");
 
@@ -1129,7 +1176,9 @@ mod tests {
         let forwarder = RecordingForwarder::answering(200);
         let router = supervised(&scratch).with_forwarder(forwarder.clone());
 
-        let response = router.respond(&get("/app/notes/", "127.0.0.1:4270"));
+        let response = router
+            .respond(&get("/app/notes/", "127.0.0.1:4270"))
+            .complete();
         assert_eq!(response.status, 503);
         let text = body(&response);
         assert!(text.contains("is not running"), "{text}");
@@ -1146,7 +1195,9 @@ mod tests {
         let scratch = Scratch::new("page-absent");
         let router = supervised(&scratch);
 
-        let response = router.respond(&get("/app/notes/", "127.0.0.1:4270"));
+        let response = router
+            .respond(&get("/app/notes/", "127.0.0.1:4270"))
+            .complete();
         assert_eq!(response.status, 404);
         assert!(
             body(&response).contains("no app named `notes`"),
@@ -1157,7 +1208,7 @@ mod tests {
         // A path that cannot even be a slug is the same reading, not a 400: it came from an
         // address bar, and the reader cannot act on a validation message.
         for path in ["/app/Notes/", "/app/../etc/passwd", "/app/"] {
-            let response = router.respond(&get(path, "127.0.0.1:4270"));
+            let response = router.respond(&get(path, "127.0.0.1:4270")).complete();
             assert_eq!(response.status, 404, "{path}");
         }
     }
@@ -1169,7 +1220,7 @@ mod tests {
         let forwarder = RecordingForwarder::answering(200);
         let router = supervised(&scratch).with_forwarder(forwarder.clone());
 
-        let response = router.respond(&post("/app/notes/save"));
+        let response = router.respond(&post("/app/notes/save")).complete();
         assert_eq!(response.status, 405);
         assert_eq!(
             response
@@ -1186,6 +1237,55 @@ mod tests {
     }
 
     #[test]
+    fn an_app_answer_that_is_a_connection_is_handed_back_as_one() {
+        // The router must not flatten a tunnel into a body. Once an app has upgraded, this layer
+        // owns a connection and no longer has an answer to write: turning it into a `Response`
+        // would mean inventing bytes the app never sent.
+        struct Holding;
+
+        impl Forwarder for Holding {
+            fn forward(
+                &self,
+                _target: &Target,
+                _request: &Request,
+            ) -> Result<deepnest_gateway::Answer, deepnest_gateway::ForwardError> {
+                let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+                let addr = listener.local_addr().unwrap();
+                std::thread::spawn(move || {
+                    let _ = listener.accept();
+                });
+                let upstream = std::net::TcpStream::connect(addr).unwrap();
+                Ok(deepnest_gateway::Answer::Stream(
+                    deepnest_gateway::Stream::new(
+                        upstream,
+                        b"HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\n\r\n".to_vec(),
+                        deepnest_gateway::StreamKind::Upgrade,
+                    ),
+                ))
+            }
+        }
+
+        let scratch = Scratch::new("page-stream");
+        scratch.built_app("notes", "Notes");
+        let router = supervised(&scratch).with_forwarder(Arc::new(Holding));
+        assert_eq!(
+            router
+                .respond(&post("/api/apps/notes/start"))
+                .complete()
+                .status,
+            200
+        );
+
+        match router.respond(&get("/app/notes/socket", "127.0.0.1:4270")) {
+            deepnest_gateway::Answer::Stream(stream) => assert_eq!(
+                stream.head(),
+                b"HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\n\r\n"
+            ),
+            other => panic!("a connection was flattened into an answer: {other:?}"),
+        }
+    }
+
+    #[test]
     fn a_failed_forward_is_a_bad_gateway_naming_the_log() {
         // The app answered a moment ago and its port is silent now. That is not a 404 — the app
         // exists — and it is not a 500 either: the failure is upstream of this server.
@@ -1195,7 +1295,7 @@ mod tests {
                 &self,
                 target: &Target,
                 _request: &Request,
-            ) -> Result<Response, deepnest_gateway::ForwardError> {
+            ) -> Result<deepnest_gateway::Answer, deepnest_gateway::ForwardError> {
                 Err(deepnest_gateway::ForwardError::Connect {
                     port: target.port,
                     source: std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused"),
@@ -1206,9 +1306,17 @@ mod tests {
         let scratch = Scratch::new("page-502");
         scratch.built_app("notes", "Notes");
         let router = supervised(&scratch).with_forwarder(Arc::new(Refusing));
-        assert_eq!(router.respond(&post("/api/apps/notes/start")).status, 200);
+        assert_eq!(
+            router
+                .respond(&post("/api/apps/notes/start"))
+                .complete()
+                .status,
+            200
+        );
 
-        let response = router.respond(&get("/app/notes/", "127.0.0.1:4270"));
+        let response = router
+            .respond(&get("/app/notes/", "127.0.0.1:4270"))
+            .complete();
         assert_eq!(response.status, 502);
         let text = body(&response);
         assert!(text.contains("notes.log"), "{text}");
@@ -1219,6 +1327,7 @@ mod tests {
         assert_eq!(
             router()
                 .respond(&get("/nothing/here", "127.0.0.1:4270"))
+                .complete()
                 .status,
             404
         );
@@ -1227,11 +1336,13 @@ mod tests {
     #[test]
     fn an_unconfigured_install_says_so_instead_of_pretending() {
         let router = Router::new(PORT, None, None);
-        let response = router.respond(&get("/", "127.0.0.1:4270"));
+        let response = router.respond(&get("/", "127.0.0.1:4270")).complete();
         assert_eq!(response.status, 200);
         assert!(body(&response).contains("not configured"));
 
-        let health = router.respond(&get("/api/health", "127.0.0.1:4270"));
+        let health = router
+            .respond(&get("/api/health", "127.0.0.1:4270"))
+            .complete();
         assert!(body(&health).contains("\"model_endpoint_configured\":false"));
     }
 
@@ -1354,7 +1465,9 @@ mod tests {
     fn a_start_runs_the_app_and_reports_the_port_it_took() {
         let scratch = Scratch::new("life-start");
         scratch.built_app("notes", "Notes");
-        let response = supervised(&scratch).respond(&post("/api/apps/notes/start"));
+        let response = supervised(&scratch)
+            .respond(&post("/api/apps/notes/start"))
+            .complete();
         assert_eq!(response.status, 200, "{:?}", response);
         let body = body(&response);
         assert!(body.contains("\"state\":\"running\""), "{body}");
@@ -1368,7 +1481,9 @@ mod tests {
         // A browser prefetches links. A state change behind GET would be one it makes by looking.
         let scratch = Scratch::new("life-get");
         scratch.built_app("notes", "Notes");
-        let response = supervised(&scratch).respond(&authorized_get("/api/apps/notes/start"));
+        let response = supervised(&scratch)
+            .respond(&authorized_get("/api/apps/notes/start"))
+            .complete();
         assert_eq!(response.status, 405);
         assert!(response
             .headers
@@ -1381,7 +1496,9 @@ mod tests {
         // Nothing is wrong with deepnest here: the step before this one has not been run.
         let scratch = Scratch::new("life-unbuilt");
         scratch.app("notes", "Notes");
-        let response = supervised(&scratch).respond(&post("/api/apps/notes/start"));
+        let response = supervised(&scratch)
+            .respond(&post("/api/apps/notes/start"))
+            .complete();
         assert_eq!(response.status, 409, "{:?}", response);
         assert!(
             body(&response).contains("build the app first"),
@@ -1395,8 +1512,14 @@ mod tests {
         let scratch = Scratch::new("life-twice");
         scratch.built_app("notes", "Notes");
         let router = supervised(&scratch);
-        assert_eq!(router.respond(&post("/api/apps/notes/start")).status, 200);
-        let again = router.respond(&post("/api/apps/notes/start"));
+        assert_eq!(
+            router
+                .respond(&post("/api/apps/notes/start"))
+                .complete()
+                .status,
+            200
+        );
+        let again = router.respond(&post("/api/apps/notes/start")).complete();
         assert_eq!(again.status, 409);
         assert!(body(&again).contains("already running"), "{:?}", again);
     }
@@ -1407,9 +1530,15 @@ mod tests {
         scratch.built_app("notes", "Notes");
         let router = supervised(&scratch);
 
-        assert_eq!(router.respond(&post("/api/apps/notes/start")).status, 200);
+        assert_eq!(
+            router
+                .respond(&post("/api/apps/notes/start"))
+                .complete()
+                .status,
+            200
+        );
 
-        let stopped = router.respond(&post("/api/apps/notes/stop"));
+        let stopped = router.respond(&post("/api/apps/notes/stop")).complete();
         assert_eq!(stopped.status, 200);
         assert!(
             body(&stopped).contains("\"state\":\"stopped\""),
@@ -1417,7 +1546,7 @@ mod tests {
             stopped
         );
 
-        let restarted = router.respond(&post("/api/apps/notes/restart"));
+        let restarted = router.respond(&post("/api/apps/notes/restart")).complete();
         assert_eq!(restarted.status, 200);
         assert!(
             body(&restarted).contains("\"state\":\"running\""),
@@ -1431,14 +1560,18 @@ mod tests {
         // The caller's intent is the postcondition, and it already holds.
         let scratch = Scratch::new("life-stop-idle");
         scratch.built_app("notes", "Notes");
-        let response = supervised(&scratch).respond(&post("/api/apps/notes/stop"));
+        let response = supervised(&scratch)
+            .respond(&post("/api/apps/notes/stop"))
+            .complete();
         assert_eq!(response.status, 200);
     }
 
     #[test]
     fn an_app_that_is_not_there_is_not_found() {
         let scratch = Scratch::new("life-missing");
-        let response = supervised(&scratch).respond(&post("/api/apps/ghost/start"));
+        let response = supervised(&scratch)
+            .respond(&post("/api/apps/ghost/start"))
+            .complete();
         assert_eq!(response.status, 404);
         assert!(body(&response).contains("no app named"), "{:?}", response);
     }
@@ -1450,7 +1583,7 @@ mod tests {
         let scratch = Scratch::new("life-bad-slug");
         let router = supervised(&scratch);
         for path in ["/api/apps/../start", "/api/apps/Notes/start"] {
-            let response = router.respond(&post(path));
+            let response = router.respond(&post(path)).complete();
             assert_eq!(response.status, 400, "{path}: {:?}", response);
         }
     }
@@ -1461,7 +1594,7 @@ mod tests {
         scratch.built_app("notes", "Notes");
         let router = supervised(&scratch);
 
-        let unknown = router.respond(&post("/api/apps/notes/delete"));
+        let unknown = router.respond(&post("/api/apps/notes/delete")).complete();
         assert_eq!(unknown.status, 404);
         assert!(
             body(&unknown).contains("create, build, start, stop or restart"),
@@ -1471,7 +1604,7 @@ mod tests {
 
         // A slug with no action at all is the same refusal one level up: it names the shape that
         // would have worked instead of leaving the caller to guess.
-        let bare = router.respond(&post("/api/apps/notes"));
+        let bare = router.respond(&post("/api/apps/notes")).complete();
         assert_eq!(bare.status, 404);
         assert!(
             body(&bare).contains("create, build, start, stop or restart"),
@@ -1487,7 +1620,7 @@ mod tests {
         let router = supervised(&scratch);
         let request =
             parse("POST /api/apps/notes/start HTTP/1.1\r\nHost: 127.0.0.1:4270\r\n").unwrap();
-        assert_eq!(router.respond(&request).status, 401);
+        assert_eq!(router.respond(&request).complete().status, 401);
     }
 
     #[test]
@@ -1496,7 +1629,7 @@ mod tests {
         scratch.built_app("notes", "Notes");
         // Listing only: this router can say which apps exist and cannot run one.
         let router = router().with_apps_dir(scratch.apps());
-        let response = router.respond(&post("/api/apps/notes/start"));
+        let response = router.respond(&post("/api/apps/notes/start")).complete();
         assert_eq!(response.status, 503);
         assert!(
             body(&response).contains("without a lifecycle"),
@@ -1520,7 +1653,9 @@ mod tests {
         let scratch = Scratch::new("create");
         let router = supervised(&scratch);
 
-        let created = router.respond(&post_query("/api/apps/notes/create", "name=Notes"));
+        let created = router
+            .respond(&post_query("/api/apps/notes/create", "name=Notes"))
+            .complete();
         assert_eq!(created.status, 201, "{:?}", created);
         let created_body = body(&created);
         assert!(
@@ -1530,7 +1665,7 @@ mod tests {
         assert!(created_body.contains("Cargo.toml"), "{created_body}");
 
         // The listing agrees with what the create said it wrote.
-        let listing = body(&router.respond(&authorized_get("/api/apps")));
+        let listing = body(&router.respond(&authorized_get("/api/apps")).complete());
         assert!(listing.contains("\"slug\":\"notes\""), "{listing}");
         assert!(listing.contains("\"name\":\"Notes\""), "{listing}");
     }
@@ -1541,13 +1676,15 @@ mod tests {
         // non-ASCII letter have to survive the trip.
         let scratch = Scratch::new("create-encoded");
         let router = supervised(&scratch);
-        let response = router.respond(&post_query(
-            "/api/apps/notes/create",
-            "name=My%20Notes%20%E2%80%94%20v2",
-        ));
+        let response = router
+            .respond(&post_query(
+                "/api/apps/notes/create",
+                "name=My%20Notes%20%E2%80%94%20v2",
+            ))
+            .complete();
         assert_eq!(response.status, 201, "{:?}", response);
 
-        let listing = body(&router.respond(&authorized_get("/api/apps")));
+        let listing = body(&router.respond(&authorized_get("/api/apps")).complete());
         assert!(listing.contains("My Notes — v2"), "{listing}");
     }
 
@@ -1558,7 +1695,9 @@ mod tests {
         let before =
             std::fs::read_to_string(scratch.apps().join("notes").join("deepnest.toml")).unwrap();
 
-        let response = supervised(&scratch).respond(&post_query("/api/apps/notes/create", ""));
+        let response = supervised(&scratch)
+            .respond(&post_query("/api/apps/notes/create", ""))
+            .complete();
         assert_eq!(response.status, 409, "{:?}", response);
         assert!(
             body(&response).contains("never overwritten"),
@@ -1576,8 +1715,9 @@ mod tests {
         let scratch = Scratch::new("build-ok");
         scratch.built_app("notes", "Notes");
         let builder = Arc::new(FakeBuilder::succeeds());
-        let response =
-            supervised_with(&scratch, builder.clone()).respond(&post("/api/apps/notes/build"));
+        let response = supervised_with(&scratch, builder.clone())
+            .respond(&post("/api/apps/notes/build"))
+            .complete();
 
         assert_eq!(response.status, 200, "{:?}", response);
         let answer = body(&response);
@@ -1591,7 +1731,8 @@ mod tests {
         let scratch = Scratch::new("build-fail");
         scratch.built_app("notes", "Notes");
         let response = supervised_with(&scratch, Arc::new(FakeBuilder::fails()))
-            .respond(&post("/api/apps/notes/build"));
+            .respond(&post("/api/apps/notes/build"))
+            .complete();
 
         assert_eq!(response.status, 500, "{:?}", response);
         let answer = body(&response);
@@ -1602,7 +1743,9 @@ mod tests {
     #[test]
     fn building_an_app_that_is_not_there_is_not_found() {
         let scratch = Scratch::new("build-missing");
-        let response = supervised(&scratch).respond(&post("/api/apps/ghost/build"));
+        let response = supervised(&scratch)
+            .respond(&post("/api/apps/ghost/build"))
+            .complete();
         assert_eq!(response.status, 404, "{:?}", response);
     }
 
@@ -1611,7 +1754,9 @@ mod tests {
         // A directory with no manifest is the wrong directory, not a build that failed.
         let scratch = Scratch::new("build-not-app");
         std::fs::create_dir_all(scratch.apps().join("junk")).unwrap();
-        let response = supervised(&scratch).respond(&post("/api/apps/junk/build"));
+        let response = supervised(&scratch)
+            .respond(&post("/api/apps/junk/build"))
+            .complete();
         assert_eq!(response.status, 404, "{:?}", response);
         assert!(body(&response).contains("not an app"), "{:?}", response);
     }
@@ -1623,7 +1768,7 @@ mod tests {
         for path in ["/api/apps/notes/create", "/api/apps/notes/build"] {
             let request =
                 parse(&format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1:4270\r\n")).unwrap();
-            assert_eq!(router.respond(&request).status, 401, "{path}");
+            assert_eq!(router.respond(&request).complete().status, 401, "{path}");
         }
     }
 
@@ -1655,7 +1800,7 @@ mod tests {
     #[test]
     fn a_model_name_with_markup_is_escaped() {
         let router = Router::new(PORT, Some("<script>x</script>".to_string()), None);
-        let page = body(&router.respond(&get("/", "127.0.0.1:4270")));
+        let page = body(&router.respond(&get("/", "127.0.0.1:4270")).complete());
         assert!(page.contains("&lt;script&gt;"));
         assert!(!page.contains("<script>x</script>"));
     }

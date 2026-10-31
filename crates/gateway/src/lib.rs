@@ -16,14 +16,16 @@
 //! all have to be adjusted, and adjusted in a way that leaves an app that already does the right
 //! thing alone.
 //!
+//! **An answer is not always a body** (`decided in implementation`, 2026-10-31). A WebSocket
+//! upgrade and an SSE stream both begin with a head and continue for as long as the user is there,
+//! so the forward returns one of two things: a [`Response`], read whole and adapted to the prefix,
+//! or an [`Answer::Stream`] — the app's head plus its live connection, passed on as bytes arrive.
+//! That is the whole difference between a proxy that carries pages and one that carries a
+//! conversation, and it is why the listening loop in the binary is no longer one connection at a
+//! time.
+//!
 //! What this does **not** do yet, and what each one is:
 //!
-//! - **No WebSocket upgrade.** An upgrade is not a forward: the connection stops being two
-//!   request/response pairs and becomes one tunnel, and the hand-written layer here reads one
-//!   request per connection. It is the next slice, and it is the one that changes this crate's
-//!   connection model rather than adding to it.
-//! - **No streaming.** The body is read whole before it is answered, so an SSE endpoint answers
-//!   only when it ends. Unbuffered streaming is the same slice as the upgrade.
 //! - **No floating dialog, and so no CSP rewrite.** The dialog is injected into every
 //!   `/app/<slug>/` response so that an agent rewriting the app's page wholesale cannot delete it;
 //!   until there is a dialog to inject, rewriting the app's CSP would be loosening a policy for
@@ -33,4 +35,7 @@ pub mod http;
 pub mod proxy;
 pub mod rewrite;
 
-pub use proxy::{exchange, forward, ForwardError, Forwarder, StdForwarder, Target};
+pub use proxy::{
+    exchange, forward, is_upgrade, Answer, ForwardError, Forwarder, StdForwarder, Stream,
+    StreamKind, Target,
+};
