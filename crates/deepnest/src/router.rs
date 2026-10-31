@@ -86,6 +86,10 @@ pub struct Lifecycle {
     /// the change. Held here because it outlives any one request — a queue rebuilt per request
     /// would forget the build that is already running and start a second one beside it.
     pub rebuild: Arc<rebuild::Rebuilder>,
+    /// Where the update check asks the forge. On the lifecycle so a test can point it at a
+    /// loopback server: `Github::new` reaches `api.github.com`, and a route test that called it
+    /// would be measuring GitHub's answer today instead of this crate's wiring.
+    pub releases: Arc<dyn deepnest_skills::Releases>,
 }
 
 impl Lifecycle {
@@ -94,6 +98,7 @@ impl Lifecycle {
         let home = home.into();
         let builder: Arc<dyn Runner> = Arc::new(StdRunner::new());
         Self {
+            releases: Arc::new(crate::updates::Github::new()),
             rebuild: Arc::new(rebuild::Rebuilder::new(
                 Arc::clone(&supervisor),
                 Arc::clone(&builder),
@@ -111,6 +116,15 @@ impl Lifecycle {
     /// The same lifecycle with a different forwarder.
     pub fn with_forwarder(mut self, forwarder: Arc<dyn Forwarder>) -> Self {
         self.forwarder = forwarder;
+        self
+    }
+
+    /// The same lifecycle with a different answer to "is there a newer release".
+    ///
+    /// The same reason [`Lifecycle::with_builder`] exists: what a test has to control is the answer,
+    /// and the real one is a request to somebody else's server today.
+    pub fn with_releases(mut self, releases: Arc<dyn deepnest_skills::Releases>) -> Self {
+        self.releases = releases;
         self
     }
 
@@ -245,6 +259,18 @@ impl Router {
         self
     }
 
+    /// Answer the update check with `releases` instead of asking the forge.
+    ///
+    /// The same shape as the two around it, and for the same reason: the lifecycle this router
+    /// already holds is the one that changes, so a test that calls two of these builders does not
+    /// silently lose the first.
+    pub fn with_releases(mut self, releases: Arc<dyn deepnest_skills::Releases>) -> Self {
+        if let Some(lifecycle) = self.lifecycle.take() {
+            self.lifecycle = Some(lifecycle.with_releases(releases));
+        }
+        self
+    }
+
     /// Forward app requests with `forwarder` instead of over a real socket.
     pub fn with_forwarder(mut self, forwarder: Arc<dyn Forwarder>) -> Self {
         if let Some(lifecycle) = self.lifecycle.take() {
@@ -334,6 +360,12 @@ impl Router {
                 }
                 let (status, body) = self.apps();
                 Answer::Full(Response::json(status, body))
+            }
+            SKILL_UPDATES => {
+                if !self.authorized(request) {
+                    return Answer::Full(unauthorized());
+                }
+                Answer::Full(self.skill_updates(request))
             }
             other if other.starts_with("/api/apps/") => {
                 // Two ways in, and only one of them is a general credential: the control token
@@ -586,6 +618,35 @@ impl Router {
                 .map(|skipped| (skipped.path.display().to_string(), skipped.reason))
                 .collect(),
         }
+    }
+
+    /// `GET /api/skills/updates` — whether a newer release of any installed skill is published.
+    ///
+    /// A route of its own rather than a line in [`Router::skills_report`], and that is the whole
+    /// design decision here. The skills report reads the disk and is rendered into the markup, which
+    /// is right for a list that changes only when the user edits a file. An update check is the
+    /// opposite kind of fact: one request per skill to somebody else's server, which on an offline
+    /// machine takes until it times out. Rendering that would make the panel — the product's only
+    /// interface — wait on a network it does not need, and the page can have the local answer now
+    /// and this one a moment later.
+    ///
+    /// `GET` only: it asks a question and changes nothing, and a `POST` here would suggest a refresh
+    /// it does not do.
+    fn skill_updates(&self, request: &Request) -> Response {
+        if !matches!(request.method, Method::Get | Method::Head) {
+            return Response::json(
+                405,
+                error_body("the update check is read with GET: it asks the forge a question and changes nothing here"),
+            );
+        }
+        let Some(lifecycle) = self.lifecycle.as_ref() else {
+            return Response::json(
+                503,
+                error_body("this process was started without a deepnest home, so there are no skills to check"),
+            );
+        };
+        let rows = crate::updates::report(&lifecycle.home, lifecycle.releases.as_ref());
+        Response::json(200, crate::updates::body(&rows).to_string())
     }
 
     /// `GET` and `POST /api/config`, and a refusal naming both for anything else.
@@ -1419,6 +1480,12 @@ fn takes_a_body(path: &str) -> bool {
 }
 
 const CONFIG_PATH: &str = "/api/config";
+
+/// Where the update check answers.
+///
+/// A constant because two sides name it: this router and the panel's script, and a test in
+/// `crates/web` that reads the script back.
+pub const SKILL_UPDATES: &str = "/api/skills/updates";
 
 /// The body `POST /api/apps/<slug>/escalation` reads: the person's answer, and why when it is no.
 ///
@@ -3399,6 +3466,91 @@ mod tests {
             rebuild::Status::Idle,
             "a turn that wrote to the app left nothing building"
         );
+    }
+
+    /// A `Releases` that answers from a script, so the route runs with no socket.
+    struct ScriptedReleases {
+        body: String,
+    }
+
+    impl deepnest_skills::Releases for ScriptedReleases {
+        fn latest(&self, _repo: &str) -> std::io::Result<String> {
+            Ok(self.body.clone())
+        }
+    }
+
+    #[test]
+    fn the_update_check_reaches_the_route_and_says_which_skill_has_a_newer_release() {
+        let scratch = Scratch::new("skill-updates");
+        // The real bundled catalog names `browser-harness` with a `github_release` check, so the
+        // entry the report matches against is the one the binary actually ships rather than a
+        // fixture that could drift from it.
+        std::fs::create_dir_all(deepnest_skills::user_root(&scratch.base)).unwrap();
+        std::fs::write(
+            deepnest_skills::catalog::path(&deepnest_skills::user_root(&scratch.base)),
+            deepnest_skills::BUNDLED,
+        )
+        .unwrap();
+        scratch.skill("browser-harness", "drives a browser");
+
+        let router = router()
+            .with_lifecycle(
+                Arc::new(deepnest_apps::Supervisor::with_parts(
+                    Box::new(FakeSpawner),
+                    Box::new(AlwaysReady),
+                )),
+                scratch.base.clone(),
+                scratch.apps(),
+            )
+            .with_releases(Arc::new(ScriptedReleases {
+                body: r#"{"tag_name":"v0.4.0"}"#.to_string(),
+            }));
+
+        let response = router
+            .respond(&get(SKILL_UPDATES, "127.0.0.1:4270"))
+            .complete();
+        // Behind the token like every route that is not a page: the panel's script has it, and a
+        // page an app serves does not.
+        assert_eq!(response.status, 401, "{:?}", response);
+
+        let answer = router
+            .respond(
+                &parse(&format!(
+                    "GET {SKILL_UPDATES} HTTP/1.1\r\nHost: 127.0.0.1:4270\r\n\
+                     authorization: bearer {}\r\n\r\n",
+                    "a".repeat(64)
+                ))
+                .unwrap(),
+            )
+            .complete();
+        assert_eq!(answer.status, 200, "{}", body(&answer));
+        let said: Value = serde_json::from_str(&body(&answer)).unwrap();
+        assert_eq!(said["checked"], 1, "{said}");
+        // Nothing is recorded about what is installed, so there is nothing to compare with — and
+        // that is `unknown`, not `up to date`. Reporting it as current would be the silent failure
+        // the four-answer check exists to prevent.
+        assert_eq!(said["unchecked"], 0, "{said}");
+        assert_eq!(said["skills"][0]["name"], "browser-harness", "{said}");
+        assert_eq!(said["skills"][0]["state"], "unknown", "{said}");
+        assert_eq!(said["skills"][0]["version"], "0.4.0", "{said}");
+    }
+
+    #[test]
+    fn the_update_check_is_read_and_not_written_through_the_same_path() {
+        // A `POST` here would suggest a refresh this route does not do, and the refusal says so by
+        // naming the method rather than answering 404 as if the route were not there.
+        let scratch = Scratch::new("skill-updates-post");
+        let router = router().with_lifecycle(
+            Arc::new(deepnest_apps::Supervisor::with_parts(
+                Box::new(FakeSpawner),
+                Box::new(AlwaysReady),
+            )),
+            scratch.base.clone(),
+            scratch.apps(),
+        );
+        let refused = router.respond(&post(SKILL_UPDATES)).complete();
+        assert_eq!(refused.status, 405, "{}", body(&refused));
+        assert!(body(&refused).contains("GET"), "{}", body(&refused));
     }
 
     #[test]
