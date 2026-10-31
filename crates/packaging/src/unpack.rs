@@ -652,7 +652,7 @@ mod tests {
     }
 
     // This expectation holds only where a link can be made at all: Windows refuses the entry
-    // instead of creating one, which is a separate behaviour with its own reason.
+    // instead of creating one, which is a separate behaviour with its own test below.
     #[cfg(unix)]
     #[test]
     fn a_link_that_points_inside_is_kept() {
@@ -669,6 +669,39 @@ mod tests {
         assert_eq!(
             fs::read_link(&link).unwrap(),
             Path::new("../lib/rustc-real")
+        );
+    }
+
+    /// Where a link cannot be made, the entry is refused by name and the payload is not published.
+    ///
+    /// The refusal is the other half of the decision above: a link that cannot be created is not
+    /// silently turned into a copy, because a copy is a different tree.
+    #[cfg(not(unix))]
+    #[test]
+    fn a_link_is_refused_rather_than_copied_where_a_link_cannot_be_made() {
+        let scratch = Scratch::new("link-platform");
+        let home = scratch.home();
+        let bytes = archive(&[
+            Part::Dir("bin"),
+            Part::File("lib/rustc-real", b"binary", 0o755),
+            Part::Symlink("bin/rustc", "../lib/rustc-real"),
+        ]);
+
+        let error = unpack_bytes(&home, &bytes, "payload-1").unwrap_err();
+        match &error {
+            UnpackError::Write { entry, source } => {
+                assert_eq!(entry, "bin/rustc");
+                assert_eq!(source.kind(), io::ErrorKind::Unsupported);
+                assert_eq!(
+                    source.to_string(),
+                    "a toolchain payload may not carry symbolic links on this platform"
+                );
+            }
+            other => panic!("{other}"),
+        }
+        assert!(
+            home.join("toolchain/0.1.0").symlink_metadata().is_err(),
+            "a payload carrying a link was published anyway"
         );
     }
 
