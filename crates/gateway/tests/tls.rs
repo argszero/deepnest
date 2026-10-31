@@ -374,6 +374,42 @@ fn streaming_is_still_a_refusal_rather_than_a_lie() {
     assert!(error.body.contains("no streaming path"), "{}", error.body);
 }
 
+#[test]
+fn a_get_crosses_the_handshake_with_no_body_and_no_length() {
+    // What the skills release check asks for (`design.md` §9): an answer's body back, and nothing
+    // sent but the request line and its headers. Driven through `HttpTransport` because that is the
+    // one the binary constructs, so the scheme dispatch is measured here too.
+    let (url, seen) = serve(
+        LOOPBACK_CERT,
+        LOOPBACK_KEY,
+        declared(r#"{"tag_name":"v1.2.3"}"#),
+    );
+
+    let answer = HttpTransport::with_tls(TlsHttp::with_connector(trusting(LOOPBACK_CERT)))
+        .get(
+            &url,
+            &[("Accept".into(), "application/vnd.github+json".into())],
+        )
+        .expect("a trusted certificate is accepted");
+
+    assert_eq!(answer.status, 200);
+    assert_eq!(answer.body, r#"{"tag_name":"v1.2.3"}"#);
+
+    let sent = seen.recv().expect("the server saw a request");
+    assert!(
+        sent.starts_with("GET /v1/chat/completions HTTP/1.1\r\n"),
+        "{sent}"
+    );
+    // The `POST` above observes both of these, and one rule is added: no declared length, because
+    // there is nothing to declare.
+    assert!(sent.contains("Connection: close"), "{sent}");
+    assert!(!sent.to_lowercase().contains("content-length"), "{sent}");
+    assert!(
+        sent.contains("Accept: application/vnd.github+json"),
+        "{sent}"
+    );
+}
+
 /// A live request against a public `https` host, opt-in because CI has to stay deterministic and a
 /// test that needs the internet fails for reasons that are not about this code.
 ///

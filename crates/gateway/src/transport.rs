@@ -23,6 +23,14 @@
 //! sentence (see [`handshake_failure`]); where a platform does not name the mismatch, the message
 //! still says the certificate was refused instead of falling back to "connection failed".
 //!
+//! **Two verbs, and the second one is not the model client's.** A model call is a `POST` carrying a
+//! JSON body; the skills release check is a `GET` carrying none (`design.md` §9: "`GET` was not
+//! borrowed from the model client, and does not need to be"). So the verb is a parameter of the one
+//! exchange below, `llm::HttpRequest` keeps its single posted shape, and `llm::Transport` keeps its
+//! `post` and is given no `get`. A `GET` is sent with **no `Content-Length` at all** rather than with
+//! a length of zero, because a request that declares a body is one whose next bytes a server waits
+//! for, and this one has none to send.
+//!
 //! Three rules the code below is shaped by:
 //!
 //! - **A body shorter than its `Content-Length` is an error, not a short answer.** A connection
@@ -56,6 +64,42 @@ pub struct PlainHttp;
 impl PlainHttp {
     pub fn new() -> Self {
         Self
+    }
+
+    /// One exchange over a plaintext connection, for whichever verb the caller named.
+    ///
+    /// The scheme is refused here rather than at each verb, because the two verbs have the same
+    /// reason: sending these bytes in the clear at a TLS port is either a hang the user would blame
+    /// on their key or a key sent in the clear. Neither is a fallback.
+    fn send(
+        &self,
+        verb: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: Option<&str>,
+    ) -> Result<HttpResponse, LlmError> {
+        check_headers(headers)?;
+        let target = parse(url)?;
+        if target.scheme == Scheme::Https {
+            return Err(LlmError::transport(format!(
+                "`{url}` is https, and this adapter carries plaintext only: use `HttpTransport`, which \
+                 picks the half that matches the scheme"
+            )));
+        }
+        let mut stream = connect(&target, url)?;
+        let raw = exchange(&mut stream, verb, &target, headers, body)?;
+        read_response(&raw)
+    }
+
+    /// A `GET`: the URL and whatever headers the endpoint wants, and no body.
+    ///
+    /// This belongs to the adapter rather than to `deepnest_llm::Transport`, which is the model
+    /// client's seam: the release check that asks a `GET` has a seam of its own
+    /// (`crates/skills::release::Releases`, an `owner/name` in and the answer's body out), so
+    /// nothing about it is shaped like a model call. There is no body parameter because a `GET`
+    /// that carried one would be a `POST` spelled differently.
+    pub fn get(&self, url: &str, headers: &[(String, String)]) -> Result<HttpResponse, LlmError> {
+        self.send("GET", url, headers, None)
     }
 }
 
@@ -128,20 +172,7 @@ fn parse(url: &str) -> Result<Target, LlmError> {
 
 impl Transport for PlainHttp {
     fn post(&self, request: &HttpRequest) -> Result<HttpResponse, LlmError> {
-        check_headers(request)?;
-        let target = parse(&request.url)?;
-        if target.scheme == Scheme::Https {
-            // The alternative — sending this in the clear at a TLS port — is a hang the user would
-            // blame on their key, or a key sent in the clear. Neither is a fallback.
-            return Err(LlmError::transport(format!(
-                "`{}` is https, and this adapter carries plaintext only: use `HttpTransport`, which \
-                 picks the half that matches the scheme",
-                request.url
-            )));
-        }
-        let mut stream = connect(&target, &request.url)?;
-        let raw = exchange(&mut stream, request, &target)?;
-        read_response(&raw)
+        self.send("POST", &request.url, &request.headers, Some(&request.body))
     }
 
     fn post_stream(
@@ -188,30 +219,46 @@ impl TlsHttp {
             ))
         })
     }
-}
 
-impl Transport for TlsHttp {
-    fn post(&self, request: &HttpRequest) -> Result<HttpResponse, LlmError> {
-        check_headers(request)?;
-        let target = parse(&request.url)?;
+    /// One exchange over a connection this machine's trust store vouched for, for either verb.
+    fn send(
+        &self,
+        verb: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: Option<&str>,
+    ) -> Result<HttpResponse, LlmError> {
+        check_headers(headers)?;
+        let target = parse(url)?;
         if target.scheme == Scheme::Http {
             return Err(LlmError::transport(format!(
-                "`{}` is http, and this adapter carries TLS only: use `HttpTransport`, which picks \
-                 the half that matches the scheme",
-                request.url
+                "`{url}` is http, and this adapter carries TLS only: use `HttpTransport`, which picks \
+                 the half that matches the scheme"
             )));
         }
-        let connector = self.connector(&request.url)?;
+        let connector = self.connector(url)?;
         // The socket timeouts are set before the handshake, so a peer that accepts the connection
         // and then says nothing is bounded by the same budget as a stalled read.
-        let stream = connect(&target, &request.url)?;
+        let stream = connect(&target, url)?;
         // The domain handed to the handshake is the host from the URL, which is what makes a
         // certificate for another name a refusal rather than a warning.
         let mut tls = connector
             .connect(&target.host, stream)
-            .map_err(|error| handshake_failure(&request.url, &target.host, error))?;
-        let raw = exchange(&mut tls, request, &target)?;
+            .map_err(|error| handshake_failure(url, &target.host, error))?;
+        let raw = exchange(&mut tls, verb, &target, headers, body)?;
         read_response(&raw)
+    }
+
+    /// A `GET` over the same handshake; [`PlainHttp::get`] says why the verb is here rather than in
+    /// `deepnest_llm::Transport`.
+    pub fn get(&self, url: &str, headers: &[(String, String)]) -> Result<HttpResponse, LlmError> {
+        self.send("GET", url, headers, None)
+    }
+}
+
+impl Transport for TlsHttp {
+    fn post(&self, request: &HttpRequest) -> Result<HttpResponse, LlmError> {
+        self.send("POST", &request.url, &request.headers, Some(&request.body))
     }
 
     fn post_stream(
@@ -243,6 +290,18 @@ impl HttpTransport {
         Self {
             plain: PlainHttp::new(),
             tls,
+        }
+    }
+
+    /// A `GET` through whichever half the URL's scheme names.
+    ///
+    /// Dispatched on the prefix for the same reason [`Transport::post`] is: the adapter that cannot
+    /// carry this scheme must never be the one that reports the fault.
+    pub fn get(&self, url: &str, headers: &[(String, String)]) -> Result<HttpResponse, LlmError> {
+        if names_https(url) {
+            self.tls.get(url, headers)
+        } else {
+            self.plain.get(url, headers)
         }
     }
 }
@@ -290,8 +349,8 @@ fn no_streaming_path() -> LlmError {
 
 /// Refuse a header that would inject a second request, before any socket is opened — so that a test
 /// of the refusal measures the refusal rather than the network.
-fn check_headers(request: &HttpRequest) -> Result<(), LlmError> {
-    for (name, value) in &request.headers {
+fn check_headers(headers: &[(String, String)]) -> Result<(), LlmError> {
+    for (name, value) in headers {
         // Nothing here produces a line break, and a transport that trusts its caller is how it
         // starts.
         if name.contains(['\r', '\n']) || value.contains(['\r', '\n']) {
@@ -379,25 +438,36 @@ fn without_trailing_full_stop(detail: &str) -> &str {
 }
 
 /// Write one request and read everything the connection answers with.
+///
+/// `verb` is the request's method, and it is a parameter because this adapter sends two of them.
+/// `body` is what decides the `Content-Length` line, so a `GET` — which passes `None` — goes out
+/// with no length declared at all.
 fn exchange<C: Read + Write>(
     stream: &mut C,
-    request: &HttpRequest,
+    verb: &str,
     target: &Target,
+    headers: &[(String, String)],
+    body: Option<&str>,
 ) -> Result<Vec<u8>, LlmError> {
     let mut head = format!(
-        "POST {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: {}\r\n",
+        "{verb} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n",
         target.path,
         host_header(target),
-        request.body.len()
     );
-    for (name, value) in &request.headers {
+    if let Some(body) = body {
+        head.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    for (name, value) in headers {
         head.push_str(&format!("{name}: {value}\r\n"));
     }
     head.push_str("\r\n");
 
     stream
         .write_all(head.as_bytes())
-        .and_then(|()| stream.write_all(request.body.as_bytes()))
+        .and_then(|()| match body {
+            Some(body) => stream.write_all(body.as_bytes()),
+            None => Ok(()),
+        })
         .and_then(|()| stream.flush())
         .map_err(|e| LlmError::transport(format!("the request could not be sent: {e}")))?;
 
@@ -581,6 +651,13 @@ mod tests {
         })
     }
 
+    fn get_from(url: &str) -> Result<HttpResponse, LlmError> {
+        PlainHttp::new().get(
+            url,
+            &[("Accept".into(), "application/vnd.github+json".into())],
+        )
+    }
+
     #[test]
     fn a_whole_answer_comes_back_with_its_status_and_body() {
         let (url, seen) = serve(
@@ -711,6 +788,87 @@ mod tests {
     fn a_port_that_is_not_a_number_is_refused() {
         let error = post_to("http://127.0.0.1:not-a-port/v1").unwrap_err();
         assert!(error.body.contains("not a number"), "{}", error.body);
+    }
+
+    #[test]
+    fn a_get_asks_without_a_body_and_reads_the_answer() {
+        let (url, seen) = serve(
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 9\r\n\r\n{\"tag\":1}",
+        );
+        let answer = get_from(&url).expect("a plaintext answer");
+        assert_eq!(answer.status, 200);
+        assert_eq!(answer.body, r#"{"tag":1}"#);
+
+        let request = seen.recv().expect("the server saw a request");
+        assert!(
+            request.starts_with("GET /v1/chat/completions HTTP/1.1\r\n"),
+            "{request}"
+        );
+        // Absent, not `Content-Length: 0`: a request that declares a body is one whose next bytes a
+        // server waits for, and this one has none to send.
+        assert!(
+            !request.to_lowercase().contains("content-length"),
+            "{request}"
+        );
+        assert!(
+            request.contains("Accept: application/vnd.github+json"),
+            "{request}"
+        );
+        // Head, one blank line, and then nothing at all.
+        assert!(request.ends_with("\r\n\r\n"), "{request}");
+    }
+
+    #[test]
+    fn a_plaintext_get_refuses_an_https_endpoint_by_name() {
+        // The release check's own endpoint, which is `https`: the refusal has to name the adapter
+        // that carries it rather than say the request failed.
+        let error = PlainHttp::new()
+            .get(
+                "https://api.github.com/repos/owner/name/releases/latest",
+                &[],
+            )
+            .unwrap_err();
+        assert!(
+            error.body.contains("carries plaintext only"),
+            "{}",
+            error.body
+        );
+        assert!(error.body.contains("HttpTransport"), "{}", error.body);
+    }
+
+    #[test]
+    fn a_tls_get_refuses_an_http_endpoint_by_name() {
+        let error = TlsHttp::with_connector(native_tls::TlsConnector::builder().build().unwrap())
+            .get("http://127.0.0.1:1/v1", &[])
+            .unwrap_err();
+        assert!(error.body.contains("carries TLS only"), "{}", error.body);
+    }
+
+    #[test]
+    fn a_header_line_break_is_refused_on_a_get_too() {
+        // The verb changed; the rule that a caller's header cannot inject a second request did not.
+        let error = PlainHttp::new()
+            .get(
+                "http://127.0.0.1:1/v1",
+                &[("X-Thing".into(), "a\r\nX-Injected: b".into())],
+            )
+            .unwrap_err();
+        assert!(error.body.contains("line break"), "{}", error.body);
+    }
+
+    #[test]
+    fn the_dispatching_transport_sends_a_plain_get_to_the_plaintext_half() {
+        // `HttpTransport` is what the binary wires in. Dispatch is on the URL's prefix, so an `http`
+        // GET must not reach the TLS half — that half would refuse it as "TLS only".
+        let (url, seen) = serve(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\n{\"tag\":1}");
+        let answer = HttpTransport::new()
+            .get(&url, &[])
+            .expect("an http answer through the dispatch");
+        assert_eq!(answer.body, r#"{"tag":1}"#);
+        assert!(seen
+            .recv()
+            .expect("the server saw a request")
+            .starts_with("GET "));
     }
 
     #[test]
