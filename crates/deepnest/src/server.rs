@@ -410,13 +410,18 @@ fn serve(
                     continue;
                 };
                 let router = Arc::clone(&router);
+                // The connection is told when the server is stopping, because closing its socket
+                // is not enough to end a stream on every platform: a thread blocked in `read` on
+                // a duplicated handle is not guaranteed to wake (measured on windows-latest,
+                // 2026-10-31). The flag is what a stream that is saying nothing can still see.
+                let stopping = Arc::clone(&stop);
                 // Detached on purpose: `shutdown` ends connections by closing their sockets, not
                 // by waiting on these handles.
                 let spawned = thread::Builder::new()
                     .name("deepnest-conn".to_string())
                     .spawn(move || {
                         let _seat = seat;
-                        let _ = answer(stream, &router);
+                        let _ = answer(stream, &router, stopping);
                     });
                 // A refused spawn closes the connection by dropping it, which is what the client
                 // sees either way. There is no reason to stop accepting.
@@ -455,7 +460,7 @@ fn refuse_busy(mut stream: TcpStream) {
     let _ = stream.shutdown(Shutdown::Write);
 }
 
-fn answer(mut stream: TcpStream, router: &Router) -> io::Result<()> {
+fn answer(mut stream: TcpStream, router: &Router, stop: Arc<AtomicBool>) -> io::Result<()> {
     // Blocking, explicitly. BSD — and therefore macOS — hands the accepted socket the listening
     // socket's non-blocking state, while Linux does not. Inheriting it turns "the head has not
     // arrived in one packet yet" into a client error, and the half-written answer that follows
@@ -515,7 +520,7 @@ fn answer(mut stream: TcpStream, router: &Router) -> io::Result<()> {
         // An app that upgraded or is streaming. Its head goes out exactly as the app framed it —
         // its framing headers are the framing of everything after — and then the two connections
         // are joined for as long as both sides stay.
-        Answer::Stream(through) => through.pump(&mut stream, head_only),
+        Answer::Stream(through) => through.pump(&mut stream, head_only, stop),
     }
 }
 

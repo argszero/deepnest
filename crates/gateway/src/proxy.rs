@@ -14,6 +14,8 @@
 
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -34,6 +36,14 @@ const IO_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The largest answer head accepted from an app, in bytes.
 const MAX_ANSWER_HEAD: usize = 64 * 1024;
+
+/// How long a tunnel's copy waits on a socket before looking at the stop flag.
+///
+/// A blocked `read` cannot hear a flag, and a stream is idle most of the time, so the copy is
+/// bounded instead: a quarter of a second of silence costs one wakeup and, when the server is
+/// stopping, ends the connection. Polling a socket is cheap precisely because the read returns as
+/// soon as a byte arrives — this adds no latency to anything that is saying something.
+const TUNNEL_POLL: Duration = Duration::from_millis(250);
 
 /// Where an app is: what it is called, and the port it is on right now.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,12 +175,22 @@ impl Stream {
     /// Two threads, one per direction, because a single one would have to poll both sockets and a
     /// WebSocket is idle in both directions at once: a thread that waits for the browser cannot
     /// hear the app. Each direction writes its own socket and no other, so no lock is needed.
-    pub fn pump(self, client: &mut TcpStream, head_only: bool) -> io::Result<()> {
-        // From here on, silence is normal. A stream with no timeout ends when a side closes it, or
-        // when the server shuts the connection down.
-        let _ = self.upstream.set_read_timeout(None);
+    ///
+    /// `stop` is how the server ends a connection it owns. Shutting the sockets down is not enough
+    /// on its own — whether a blocked read on a duplicated handle wakes is a platform's business,
+    /// and on Windows this was measured not to (`CI`, windows-latest, 2026-10-31: shutdown waited
+    /// the full grace period) — so each direction also looks at the flag between reads.
+    pub fn pump(
+        self,
+        client: &mut TcpStream,
+        head_only: bool,
+        stop: Arc<AtomicBool>,
+    ) -> io::Result<()> {
+        // From here on, silence is normal, so the timeouts are the poll interval rather than a
+        // deadline: a stream that says nothing for a minute is a working stream.
+        let _ = self.upstream.set_read_timeout(Some(TUNNEL_POLL));
         let _ = self.upstream.set_write_timeout(None);
-        let _ = client.set_read_timeout(None);
+        let _ = client.set_read_timeout(Some(TUNNEL_POLL));
         let _ = client.set_write_timeout(None);
 
         client.write_all(&self.head)?;
@@ -189,15 +209,16 @@ impl Stream {
         let mut client_reader = client.try_clone()?;
         let mut client_writer = client.try_clone()?;
 
+        let upward_stop = Arc::clone(&stop);
         let upward = thread::spawn(move || {
-            let result = copy(&mut client_reader, &mut app_writer);
+            let result = copy(&mut client_reader, &mut app_writer, &upward_stop);
             // The app is told the conversation is over, so a server waiting for its next request
             // is not left holding a socket whose peer already left.
             let _ = app_writer.shutdown(Shutdown::Write);
             result
         });
 
-        let downward = copy(&mut app_reader, &mut client_writer);
+        let downward = copy(&mut app_reader, &mut client_writer, &stop);
         // Same in this direction: half-close the browser's side so its reader sees the end of the
         // stream instead of waiting for a byte that will never come.
         let _ = client_writer.shutdown(Shutdown::Write);
@@ -206,10 +227,13 @@ impl Stream {
     }
 }
 
-/// Copy until `from` ends, reporting the first failure.
-fn copy(from: &mut TcpStream, to: &mut TcpStream) -> io::Result<()> {
+/// Copy until `from` ends or the server is stopping, reporting the first failure.
+fn copy(from: &mut TcpStream, to: &mut TcpStream, stop: &AtomicBool) -> io::Result<()> {
     let mut buffer = [0u8; 8192];
     loop {
+        if stop.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         match from.read(&mut buffer) {
             Ok(0) => return Ok(()),
             Ok(count) => {
@@ -217,6 +241,16 @@ fn copy(from: &mut TcpStream, to: &mut TcpStream) -> io::Result<()> {
                 to.flush()?;
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            // The poll interval elapsed. Silence is normal here, so this is not a failure; the
+            // flag at the top of the loop is what decides whether to keep waiting.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue
+            }
             Err(error) => return Err(error),
         }
     }
@@ -598,6 +632,7 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
     use std::sync::mpsc;
+    use std::time::Instant;
 
     fn get(path: &str) -> Request {
         Request {
@@ -921,6 +956,11 @@ mod tests {
         handle.join().unwrap();
     }
 
+    /// A stop flag that never goes up: the ordinary case, where a tunnel ends because a side does.
+    fn running() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
+    }
+
     /// The forward against a real app, through the same code path the server uses.
     fn forward_to_streaming(addr: SocketAddr) -> Answer {
         let target = Target::new("notes", addr.port());
@@ -967,7 +1007,7 @@ mod tests {
             .unwrap();
 
         let pump = thread::spawn(move || {
-            let _ = stream.pump(&mut server_side, false);
+            let _ = stream.pump(&mut server_side, false, running());
         });
 
         // The head arrives before anything is sent: the browser is told the upgrade happened.
@@ -989,6 +1029,63 @@ mod tests {
         browser.shutdown(Shutdown::Both).unwrap();
         pump.join().unwrap();
         app.join().unwrap();
+    }
+
+    #[test]
+    fn a_silent_tunnel_ends_when_the_server_stops() {
+        // The defect this exists for: a tunnel is idle most of the time, so both of its copies are
+        // parked in a read. Closing the socket does not reliably wake them — a blocked read on a
+        // duplicated handle is a platform's business, and windows-latest was measured serving out
+        // the whole shutdown grace period with a quiet WebSocket open. So the pump looks at the
+        // flag between reads, and what is asserted here is that a conversation saying nothing at
+        // all still ends promptly.
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let app_addr = listener.local_addr().unwrap();
+        let app = thread::spawn(move || {
+            // Hold the connection open and say nothing: an idle WebSocket.
+            let (_stream, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_secs(10));
+        });
+
+        let upstream = TcpStream::connect(app_addr).unwrap();
+        let stream = Stream::new(
+            upstream,
+            b"HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\n\r\n"
+                .to_vec(),
+            StreamKind::Upgrade,
+        );
+
+        let browser_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let browser_addr = browser_listener.local_addr().unwrap();
+        let mut server_side = TcpStream::connect(browser_addr).unwrap();
+        let (mut browser, _) = browser_listener.accept().unwrap();
+        browser
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let pump_stop = Arc::clone(&stop);
+        let pump = thread::spawn(move || stream.pump(&mut server_side, false, pump_stop));
+
+        // The head still arrives, so this is a tunnel rather than a connection that was dropped.
+        let mut head = [0u8; 128];
+        let read = browser.read(&mut head).unwrap();
+        assert!(String::from_utf8_lossy(&head[..read]).starts_with("HTTP/1.1 101"));
+
+        let started = Instant::now();
+        stop.store(true, Ordering::SeqCst);
+        let ended = pump.join().expect("the pump thread must not panic");
+        ended.expect("an idle tunnel ends cleanly when the server stops");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "an idle tunnel took {:?} to notice the server was stopping",
+            started.elapsed()
+        );
+
+        // And the browser sees the tunnel end rather than being left holding it.
+        let mut rest = Vec::new();
+        browser.read_to_end(&mut rest).unwrap();
+        drop(app);
     }
 
     #[test]
@@ -1014,7 +1111,7 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
 
-        stream.pump(&mut server_side, true).unwrap();
+        stream.pump(&mut server_side, true, running()).unwrap();
         let mut received = Vec::new();
         browser.read_to_end(&mut received).unwrap();
         assert_eq!(received, b"HTTP/1.1 101 Switching Protocols\r\n\r\n");
