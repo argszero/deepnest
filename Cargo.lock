@@ -113,6 +113,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "deepnest-skills"
+version = "0.1.0"
+
+[[package]]
 name = "deepnest-tools"
 version = "0.1.0"
 dependencies = [

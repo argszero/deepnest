@@ -187,6 +187,16 @@ Four decisions were made while implementing it and are recorded here rather than
 
 Loader reads two roots (`~/.deepnest/skills/`, `<app>/.agent/skills/`) and both layouts (`<name>.md`, `<name>/SKILL.md`); a same-named agent skill shadows the user skill. Progressive disclosure: only `name` + `description` + `path` enter the prompt. A file with no `description` is not loaded (`impl, ref: emrg/skills/loader.py`).
 
+**What has landed so far: the loader** (`decided in implementation`, 2026-10-31). `crates/skills` reads both roots and both layouts and returns the list the prompt is built from. Five decisions came with it:
+
+- **The directory layout wins a collision inside one root, and the file it beat is reported.** `<name>/SKILL.md` is the layout that can carry the scripts and assets a skill refers to, so a skill being migrated into it keeps working mid-move. The losing file is a `skipped` entry, because a user editing `notes.md` while `notes/SKILL.md` is the one being read has nothing else to look at.
+- **The app's skill shadows the user's, silently.** That is the design's direction, and it is the useful one: an app that needs a different `notes` skill should not have to rename the user's. A shadow is not a fault, so it produces no `skipped` entry.
+- **Everything that is not a usable skill is reported with its reason.** The same shape `crates/apps` uses for a directory that is not an app, and for the same reason: one list would make "no skills yet" and "your skill's header has a typo" read the same, and the user's only clue to the second would be a prompt that seems emptier than it should be.
+- **A symlink is reported rather than followed.** Following one would let a skill live somewhere the user never put it, and "where did this come from" is the question a skill list has to be able to answer.
+- **The header is read line by line, and an indented line is nested, not a field.** A skill may carry a `metadata:` block, and a nested `description:` must not overwrite the top-level one — the failure EMRG already paid for (`impl, ref: emrg/skills/loader.py`). Reading lines also makes the closing delimiter a line rather than the first three hyphens anywhere, which is what lets a description contain them.
+
+**Not wired into the binary, on purpose.** A skill reaches the agent through its system prompt, and the binary has no agent loop yet — so a route serving skills today would be an endpoint with no consumer, and one that reads a directory per request for a page nobody opens. The loader lands first because the agent is written against it, the way the app lifecycle was written against the directory contract.
+
 The catalog that ships inside the binary is itself an ordinary skill file carrying a `skills:` list (`name`, `description`, `repo`, `install`, `dest`, `check`); `dest` points at `~/.deepnest/skills/`. `browser-harness` and `baoyu-design` are the first two entries (`host 20:26`). Installation state lives in `.state.json`: only `managed: true` entries may be refreshed by the updater; anything else is the user's and is never touched (`impl, ref: emrg/skills/installer.py`).
 
 ### `crates/apps` — app lifecycle
@@ -338,7 +348,9 @@ One module per cycle, each landing with its tests:
    and the dialog injection with its CSP rewrite are in, and the binary serves connections
    concurrently; the escalation prompt inside the dialog remains, and it needs the agent in the
    binary first.
-8. `crates/skills` — loader, catalog, installer.
+8. `crates/skills` — loader, catalog, installer. **In progress**: the loader has landed (two
+   roots, two layouts, shadowing, skip reporting, and the prompt summary); the catalog that ships in
+   the binary and the installer that fetches what it names remain.
 9. `crates/packaging` — payload, first-run unpack, signing.
 
 ## 7. Non-negotiables
