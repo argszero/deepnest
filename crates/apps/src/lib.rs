@@ -20,24 +20,30 @@
 //!   an app that does not appear indistinguishable from an app that does not exist, and the user's
 //!   only clue would be that the panel is emptier than they expected.
 //!
-//! [`process`] is the other half: an app's port (allocated per start, never persisted, never
-//! visible), the supervisor that starts it and waits until it **answers** rather than until it was
-//! spawned, and stop/restart. Building the app is not here — `start` runs a binary that already
-//! exists and names the path it expected when one does not.
+//! [`process`] is the second: an app's port (allocated per start, never persisted, never visible),
+//! the supervisor that starts it and waits until it **answers** rather than until it was spawned,
+//! and stop/restart. It runs a binary that already exists and names the path it expected when one
+//! does not.
 //!
-//! What this crate deliberately does **not** do yet: it does not create an app or build it. That is
-//! the template, which is the one remaining piece of `crates/apps`.
+//! [`template`] and [`build`] are the two that produce that binary. Creating an app writes text and
+//! touches no toolchain, so a creation that fails halfway leaves a directory that is not an app;
+//! building it runs the steps in [`build::plan`] and reports which one said no. They are separate
+//! because their failures are: one is "this directory is now wrong", the other is "this toolchain
+//! said no".
 
+pub mod build;
 pub mod listing;
 pub mod logs;
 pub mod manifest;
 pub mod process;
 pub mod slug;
+pub mod template;
 
 use std::path::{Path, PathBuf};
 
+pub use build::{build, plan, BuildError, Built, Outcome, Runner, StdRunner, Step, STEP_TIMEOUT};
 pub use listing::{list, App, Listing, Skipped};
-pub use logs::{log_path, tail, LOGS_DIR, MAX_TAIL_BYTES};
+pub use logs::{build_log_path, log_path, tail, LOGS_DIR, MAX_TAIL_BYTES};
 pub use manifest::{
     AppInfo, Manifest, ManifestError, CURRENT_TEMPLATE, FILE_NAME as MANIFEST_FILE,
 };
@@ -46,6 +52,7 @@ pub use process::{
     StdSpawner, Supervisor, TcpProber, DEFAULT_READINESS, EXPECTED_BINARY, PORT_ENV,
 };
 pub use slug::{Slug, SlugError, MAX_CHARS as MAX_SLUG_CHARS};
+pub use template::{create, Created, TemplateError, BINARY_NAME, FILES as TEMPLATE_FILES};
 
 /// The directory under the deepnest home that holds every app.
 pub const DIR_NAME: &str = "apps";

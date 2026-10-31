@@ -155,10 +155,7 @@ fn serve() -> Result<(), Failure> {
         token_path: Some(token_path.clone()),
         model: config.as_ref().map(|config| config.model().to_string()),
         apps_dir: Some(apps_dir.clone()),
-        lifecycle: Some(Lifecycle {
-            supervisor: Arc::clone(&supervisor),
-            home: home.clone(),
-        }),
+        lifecycle: Some(Lifecycle::new(Arc::clone(&supervisor), home.clone())),
         ..Default::default()
     };
 

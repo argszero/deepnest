@@ -52,11 +52,14 @@ by name what it does not answer:
   the reason. Behind the token, because it names the user's apps and the paths they live at. It
   reads the directory per request, so an app that appeared a second ago is in the next answer
   without a restart.
-- `POST /api/apps/<slug>/start | stop | restart` — the three state changes, behind the token
-  like the listing. `POST` and nothing else, because a browser prefetches a `GET`, so a state
-  change behind one is a change it makes by drawing a link. The slug is validated against the
-  same rules that make it a directory name, and a directory that is not there is `404` — "no app
-  named that" is a different answer from any failure to start one.
+- `POST /api/apps/<slug>/create | build | start | stop | restart` — the five state changes,
+  behind the token like the listing. `POST` and nothing else, because a browser prefetches a
+  `GET`, so a state change behind one is a change it makes by drawing a link. The slug is
+  validated against the same rules that make it a directory name, and a directory that is not
+  there is `404` — "no app named that" is a different answer from any failure to start one.
+  `create` answers `201` and returns the directory and the file list, because the client's next
+  question is always where it went. `build` is the slow one: it runs the toolchain, takes tens of
+  seconds on a warm cache, and holds the connection that asked for it.
 - `GET /app/<slug>/` → `404` naming `crates/gateway`. A bare `404` on a correctly spelled path
   reads like a bug in the path.
 - Anything else → `404` JSON; a method it does not serve → `405` with
@@ -178,9 +181,28 @@ The template also pins the gateway contract: relative asset paths, and the app m
 - **The supervisor is a seam, not a `Command::spawn`.** Spawning and probing are traits for the reason every other such seam here exists: the interesting behaviour is a state machine with timeouts, and testing it against real processes would make the suite fail in proportion to the CI machine's load rather than to the code.
 - **A stop that stops nothing is a success.** The caller's intent is the postcondition — "it must not be running" — and a stop that failed because the app had already exited would report the wrong thing. A restart is a stop and a start rather than a signal, because the port is fresh and the coming-up process must not collide with the going-down one.
 
-What this slice does **not** do: an app process outlives a killed deepnest. There is no graceful shutdown path in this build to run the apps down on (the process waits on a park and ends by signal), so `Supervisor::stop_all` exists and is untested against a real exit; the shutdown sequence that calls it belongs to `crates/gateway`, with the real server loop.
+What the process slice does **not** do: an app process outlives a killed deepnest. There is no graceful shutdown path in this build to run the apps down on (the process waits on a park and ends by signal), so `Supervisor::stop_all` exists and is untested against a real exit; the shutdown sequence that calls it belongs to `crates/gateway`, with the real server loop.
 
-Not yet in it, and next: the template and the build. An install with no apps has no `apps/` directory at all, and the listing reports that as "none yet" rather than as a fault.
+**What has landed last: the template and the build** (`decided in implementation`, 2026-10-31). `create` writes an app's files; `build` runs the toolchain over them. They are two steps and not one because they fail differently: a create that stops halfway leaves a directory that is not an app — re-run it — while a build that fails leaves a source tree that is perfectly good and a toolchain that said no, and the only useful thing to hand the user is which step and its output.
+
+On the create side, four decisions:
+
+- **The manifest is written last.** It is what makes a directory an app, so a creation that fails halfway leaves a directory that is not one — the truthful reading, and the one that offers "create it again" as the fix. Writing it first would leave a listed app whose source is missing, which reads as a broken app and points the user at a file they never saw.
+- **A non-empty directory is never overwritten.** An app directory holds the user's data, their database and their agent's conversation, and there is no undo. A create that clobbered those would be the most destructive thing this program could do, so it refuses, and says which directory it refused.
+- **The slug and the display name are two names, and are not interchanged.** `Smoke & Test` is a fine name and is not a Cargo package, a directory or a URL segment. The slug is the machine name on every axis the directory contract already validated; the display name appears only in the manifest and in the HTML and JSX the template writes. The first version filled the `Cargo.toml` name from the display name, and the compiler rejected it — a real build caught in one run what no amount of reading the template would have.
+- **The binary's path is one constant that both sides name.** [`process::EXPECTED_BINARY`] is `target/release/app` and the template's `Cargo.toml` declares its `[[bin]]` as `app` for exactly that reason. One of the two moving is a rename; both moving silently is a supervisor looking for a file that is not there, so each names the other in a comment and the build asserts the two agree.
+
+On the build side, three:
+
+- **The plan is data, not a shell script.** The steps come back as a list of (directory, program, arguments). A generated `#!/bin/sh` file would have been a line shorter and untestable, and would have been written for a shell that is not the one the platform runs.
+- **The front end builds before the server.** The order is not load-bearing for linking — the server reads `frontend/dist` per request — it is chosen so that a build failing on the front end has not already spent a minute compiling SQLite.
+- **Success means the binary is there.** Exit codes say the toolchain was happy; the supervisor's contract is a path, and a build reporting success without it turns into "nothing has been built yet" on the next start, one step away from the cause.
+
+**Running a generated app is what found its second bug.** `bun build` writes `frontend/dist/main.js` and leaves `frontend/index.html` where the template put it, so a server that served only `dist` answered every asset and `404`'d the page itself. The server now looks in `frontend/dist` first and `frontend/` second. The template had been right about the contract — relative paths, a matching path prefix — and wrong about where the bundler puts the page, which is the class of mistake a compiling build does not catch and a running one does. The check was **throwaway** — generate an app, build it, answer a few requests, delete it — and stays out of the suite on purpose: a test that needs bun and a C compiler on all three platforms fails for reasons unrelated to this code. Measured once by hand: 2.1 MB at `target/release/app`, about 31 s.
+
+An install with no apps has no `apps/` directory at all, and the listing reports that as "none yet" rather than as a fault. That is now the whole of `crates/apps`: the directory contract, the process lifecycle, the template and the build.
+
+What none of it does: build in the background, or report progress while it runs. A build occupies the request that asked for it, and this binary serves one connection at a time, so the panel waits. Showing progress while the panel stays live belongs to `crates/gateway`, with the real server loop.
 
 ### `crates/gateway` — the single door
 
@@ -230,10 +252,10 @@ One module per cycle, each landing with its tests:
    lifecycle so that "does this even start, on all three platforms?" is answered while the answer
    is still cheap. From here on every module either lands wired into the binary or says in its PR
    why it does not.
-6. `crates/apps` — template, build, lifecycle, logs. Lands in slices: the directory contract
-   first (slug, manifest, discovery, log tail, `GET /api/apps`), then the process lifecycle (port
-   allocation, start/stop/restart, `POST /api/apps/<slug>/...`), then the template and the build.
-   The first two are in, both wired into the binary, so this is not a module that sits unread.
+6. `crates/apps` — template, build, lifecycle, logs. **Landed**, in three slices: the directory
+   contract (slug, manifest, discovery, log tail, `GET /api/apps`), the process lifecycle (port
+   allocation, start/stop/restart), and the template and the build (`POST /api/apps/<slug>/create`
+   and `/build`). All three are wired into the binary, so this is not a module that sits unread.
 7. `crates/gateway` + `crates/web` — the single door, the panel, the dialog.
 8. `crates/skills` — loader, catalog, installer.
 9. `crates/packaging` — payload, first-run unpack, signing.

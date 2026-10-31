@@ -218,7 +218,7 @@ fn a_request_with_a_body_is_refused_rather_than_half_read() {
 
 #[test]
 fn the_lifecycle_route_answers_over_a_real_socket() {
-    // This server was started without a supervisor, so the answer is the honest one: the route
+    // This server was started without a lifecycle, so the answer is the honest one: the route
     // exists, needs the token, and says this process cannot run an app. What the supervisor does
     // with a real app is `deepnest-apps`' test, and the router's with a stand-in.
     let scratch = Scratch::new("lifecycle");
@@ -243,7 +243,7 @@ fn the_lifecycle_route_answers_over_a_real_socket() {
         ),
     );
     assert!(answered.starts_with("HTTP/1.1 503"), "{answered}");
-    assert!(answered.contains("without a supervisor"), "{answered}");
+    assert!(answered.contains("without a lifecycle"), "{answered}");
 
     running.shutdown();
 }
