@@ -40,6 +40,12 @@ const PATIENCE: Duration = Duration::from_secs(30);
 
 /// How long the binary gets to end after being asked to stop, which includes the bounded wait for
 /// its connections to notice the listener is gone.
+///
+/// Unix only, like the test that uses it — and gated the same way for a reason worth stating: this
+/// file is compiled on all three platforms, clippy runs with `-D warnings`, and a helper left
+/// behind by a `#[cfg]`'d test is a `dead_code` error on the platform that skips it. That is how
+/// this constant broke the windows-latest leg of PR #36, before the gate existed.
+#[cfg(unix)]
 const EXIT_PATIENCE: Duration = Duration::from_secs(15);
 
 /// The port is fixed by the design, so two tests in this file cannot run at the same time: whoever
@@ -592,6 +598,9 @@ fn port_from(answer: &str) -> u16 {
 
 /// Whether nothing answers on this port any more, allowing the process it belonged to a moment to
 /// finish dying: the supervisor sends the kill and returns without waiting for it.
+///
+/// Unix only, with the test above: nothing else in this file watches a process it did not start.
+#[cfg(unix)]
 fn closes(port: u16) -> bool {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
