@@ -8,3 +8,6 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+# The model adapter lives here (`design.md`): it implements `deepnest-llm`'s `Transport`, so a
+# model call's bytes move in the crate that owns the door, and `crates/llm` keeps no sockets.
+deepnest-llm = { path = "../llm" }

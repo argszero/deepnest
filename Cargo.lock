@@ -56,9 +56,14 @@ name = "deepnest"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "deepnest-agent",
  "deepnest-apps",
  "deepnest-gateway",
+ "deepnest-llm",
  "deepnest-packaging",
+ "deepnest-sandbox",
+ "deepnest-skills",
+ "deepnest-tools",
  "deepnest-web",
  "getrandom",
  "serde",
@@ -97,6 +102,9 @@ dependencies = [
 [[package]]
 name = "deepnest-gateway"
 version = "0.1.0"
+dependencies = [
+ "deepnest-llm",
+]
 
 [[package]]
 name = "deepnest-llm"

@@ -180,10 +180,41 @@ The system prompt is **written from scratch**. It is where most of the agent's b
 
 Four decisions were made while implementing it and are recorded here rather than in a commit message (`decided in implementation`, 2026-10-31):
 
-- **The model is reached through a `Model` trait, not through `deepnest_llm::Client`.** The loop is then testable with no network and no HTTP adapter, and the adapter (which belongs to `crates/gateway`) is swappable. `Client` implements the trait, so the binary wires the real one in one line.
+- **The model is reached through a `Model` trait, not through `deepnest_llm::Client`.** The loop is then testable with no network and no HTTP adapter, and the adapter (which belongs to `crates/gateway`) is swappable. `Client` implements the trait, so the binary wires the real one in one line — but its impl reads a stream, and a plaintext adapter cannot serve one, which is why the binary calls `Client::turn` instead (see the wiring above).
 - **The trim budget is by characters and defaults to 120,000 per request**, with two repairs that a provider otherwise rejects outright: the kept tail must begin at a `user` message, and a `tool` result whose `assistant` call was trimmed away is dropped with it. A request that reports itself too long halves the budget and retries at most twice; a **refusal is never** retried that way.
 - **Cancellation is a shared flag checked before every request and before every tool call in a batch**, so a cancelled turn runs no further command. The calls that did not run are recorded in `history.jsonl` as a note, so a reader can tell a cancelled batch from a model that asked for less.
 - **The layout under `~/.deepnest/apps/<slug>/.agent/`** is `history.jsonl`, `memory/<id>.md`, `memory/MEMORY.md`, and `subagents/<NNNN>/history.jsonl` — one conversation file per subagent call, because a child appending to its parent's file is two writers on one conversation.
+
+**The agent is in the binary, and it answers a message** (`decided in implementation`, 2026-10-31).
+`POST /api/apps/<slug>/chat` reads `{"message": "…"}` from the body and returns the turn. Three
+refusals come first, and each names a different next step: a body that is not a message (`400`), a
+process with no config file to read (`503`), a config with no model in it yet (`412`, with the
+first-run form one request away). Then `crates/deepnest::chat` assembles **one agent per app** — the
+six leaf tools over a `workspace-write` policy for that app, its conversation and memory under
+`<app>/.agent/`, and a system prompt built from the real skill loader — and hands it to the loop.
+Five decisions came with the wiring:
+
+- **The HTTP adapter is plaintext, and refuses `https` by name.** `crates/gateway::transport`
+  implements `deepnest_llm::Transport` over `std::net::TcpStream`, so no crate gains a socket
+  dependency and `crates/llm` stays testable with no network. There is **no TLS client**: a
+  certificate store, a cipher suite and a trust decision are a compile-time and supply-chain step
+  this build has not taken, and the two honest options are to refuse an `https` endpoint with a
+  message naming what is missing, or to send a request that cannot arrive and hang until the user
+  blames their key. A local model server over `http://127.0.0.1` works today; a cloud endpoint does
+  not, and says so.
+- **A turn is answered whole, not streamed.** `Client`'s `Model` impl goes through `chat_stream`,
+  which this adapter cannot serve, so `crates/deepnest`'s `model::Endpoint` calls `Client::turn`:
+  the same `AssistantTurn`, arriving all at once. What is missing is watching the answer being
+  written, not the answer.
+- **The endpoint is read per request, not held at startup.** `POST /api/config` can change it, and
+  an agent assembled once would keep asking the old one until the next start.
+- **A writing turn says `changed` and does not rebuild.** `bash` and `write`/`edit` set the flag, the
+  reply carries it, and building stays the existing `POST /api/apps/<slug>/build` followed by
+  `/restart`. A build inside this request would hold one connection through a minute of
+  `bun install`, which is longer than any browser waits.
+- **A refusal is the user's to fix, not this server's failure.** `Refused` is `422`, a model that
+  could not be reached is `502`, a conversation file that could not be written is `500` — three
+  different next steps, so three different statuses.
 
 ### `crates/skills` — Anthropic Agent Skills
 
@@ -197,7 +228,7 @@ Loader reads two roots (`~/.deepnest/skills/`, `<app>/.agent/skills/`) and both 
 - **A symlink is reported rather than followed.** Following one would let a skill live somewhere the user never put it, and "where did this come from" is the question a skill list has to be able to answer.
 - **The header is read line by line, and an indented line is nested, not a field.** A skill may carry a `metadata:` block, and a nested `description:` must not overwrite the top-level one — the failure EMRG already paid for (`impl, ref: emrg/skills/loader.py`). Reading lines also makes the closing delimiter a line rather than the first three hyphens anywhere, which is what lets a description contain them.
 
-**Not wired into the binary, on purpose.** A skill reaches the agent through its system prompt, and the binary has no agent loop yet — so a route serving skills today would be an endpoint with no consumer, and one that reads a directory per request for a page nobody opens. The loader lands first because the agent is written against it, the way the app lifecycle was written against the directory contract.
+**Wired now, through the prompt and not through a route.** A skill reaches the agent through its system prompt and nowhere else, so there is no skills route and there should not be: the chat path calls this loader per turn and puts `name`, `description` and `path` in front of the model. What the loader reports as skipped still reaches nobody but a caller that asks — a panel view of that list is the missing half, and it is a page rather than an API.
 
 The catalog that ships inside the binary is itself an ordinary skill file carrying a `skills:` list (`name`, `description`, `repo`, `install`, `dest`, `check`); `dest` points at `~/.deepnest/skills/`. `browser-harness` and `baoyu-design` are the first two entries (`host 20:26`). Installation state lives in `.state.json`: only `managed: true` entries may be refreshed by the updater; anything else is the user's and is never touched (`impl, ref: emrg/skills/installer.py`).
 
@@ -210,7 +241,7 @@ The catalog that ships inside the binary is itself an ordinary skill file carryi
 
 **The bundled catalog is a floor, not a source of truth.** `catalog::ensure` writes it only when the file is absent, which covers a fresh install and an upgrade whose file was deleted, and never overwrites a catalog the user curated.
 
-**Still to come: the release check.** Comparing an installed version against a package's releases needs an HTTP client the crate does not have, and it belongs behind the agent, which is the thing that would act on an update.
+**Still to come: the release check.** Comparing an installed version against a package's releases is a `GET` of a release list, and the seam that now exists for model calls is a `POST` returning an `LlmError` — reusing it would put a skills concern inside the model client's vocabulary. This crate opens its own one-request seam when the check lands, beside the agent that would act on an update.
 
 **What has landed since: the install itself** (`decided in implementation`, 2026-10-31). `installer` drives the one side effect the catalog describes — for `install: self-publishing`, it runs the package and takes the skill file it prints — and records the result. Five decisions came with it:
 
@@ -222,7 +253,7 @@ The catalog that ships inside the binary is itself an ordinary skill file carryi
 
 The `Publisher` is a trait for the same reason `Runner`, `Spawner`, `Probe` and `Prober` are: every refusal worth testing happens *after* a program has run, and a test that ran a real one would measure whatever that program does on the machine running the suite. The real one waits as long as the package takes — a limit worth naming, and one whose fix goes behind this seam rather than into the logic.
 
-**Not wired into the binary, like the loader.** Installing is a side effect on the user's machine and belongs to the agent, which does not exist yet; `docs/design.md` §2's routes therefore gain nothing from this slice.
+**Not wired into the binary, unlike the loader.** Installing is a side effect on the user's machine, and the agent that would run it now exists — but an install writes outside the app directory and can replace a file the user edited, which is exactly the kind of call the dialog is meant to ask about. It lands with that prompt, not before it.
 
 ### `crates/apps` — app lifecycle
 
@@ -319,10 +350,11 @@ written for a different page cannot hide it). The split with `crates/gateway` is
 gateway decides *where* the dialog goes and what policy it needs, which is rewriting, while the ball
 is a page a person clicks in, which is this crate's.
 
-**Still to come**: escalation approvals inside that dialog — modal here, one hop at a time, the
-approval itself the audit record (`host 20:20`). It waits on an agent being in the binary at all:
-until a tool call can ask for a wider tier, there is nothing to approve, and the dialog says what it
-can rather than offering a button that does nothing.
+**Still to come**: the message box and the escalation approvals inside that dialog — modal here, one
+hop at a time, the approval itself the audit record (`host 20:20`). The agent is in the binary now,
+so `POST /api/apps/<slug>/chat` answers; what is missing is the half a person sees — a box that
+posts a message and a modal that answers a request for a wider tier — and both are this crate's,
+which is why the route landed first.
 
 ### `crates/packaging` — the single file
 
@@ -379,7 +411,9 @@ One module per cycle, each landing with its tests:
 5. `crates/deepnest` — the binary, plus the three-platform CI matrix. It comes **before** the app
    lifecycle so that "does this even start, on all three platforms?" is answered while the answer
    is still cheap. From here on every module either lands wired into the binary or says in its PR
-   why it does not.
+   why it does not. **It hosts the agent now** (`decided in implementation`, 2026-10-31):
+   `POST /api/apps/<slug>/chat` runs one turn through a real per-app agent, so the five crates
+   underneath are reachable from a message rather than only from a test.
 6. `crates/apps` — template, build, lifecycle, logs. **Landed**, in three slices: the directory
    contract (slug, manifest, discovery, log tail, `GET /api/apps`), the process lifecycle (port
    allocation, start/stop/restart), and the template and the build (`POST /api/apps/<slug>/create`
@@ -387,8 +421,8 @@ One module per cycle, each landing with its tests:
 7. `crates/gateway` + `crates/web` — the single door, the panel, the dialog. **In progress**: the
    gateway's forward, the HTTP layer under it, the WebSocket upgrade, unbuffered streaming, the panel
    and the dialog injection with its CSP rewrite are in, and the binary serves connections
-   concurrently; the escalation prompt inside the dialog remains, and it needs the agent in the
-   binary first.
+   concurrently; the dialog's message box and the escalation prompt inside it remain, and the agent
+   they talk to is now in the binary.
 8. `crates/skills` — loader, catalog, installer. **In progress**: the loader (two roots, two
    layouts, shadowing, skip reporting, the prompt summary), the bundled catalog, the `.state.json`
    that says which skills may be refreshed, and the install path for a self-publishing package have

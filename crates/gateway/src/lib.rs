@@ -39,8 +39,10 @@ pub mod dialog;
 pub mod http;
 pub mod proxy;
 pub mod rewrite;
+pub mod transport;
 
 pub use proxy::{
     exchange, forward, is_upgrade, Answer, ForwardError, Forwarder, StdForwarder, Stream,
     StreamKind, Target,
 };
+pub use transport::PlainHttp;
