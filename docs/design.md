@@ -95,6 +95,12 @@ by name what it does not answer:
   that believed it had answered would tell the user they approved something that never happened.
   Its own cookie, minted apart from the chat one and scoped to its own path, so the capability to
   spend an agent turn cannot answer a widening request (§4, `crates/web`).
+- `GET /api/skills/updates` — whether a newer release of any installed skill is published, one
+  answer per skill the state file says deepnest may refresh. Behind the token, and deliberately
+  **not** part of what `/` renders: the check is one request per skill to somebody else's server,
+  so rendering it synchronously would let an offline machine hang the panel it is meant to open.
+  The page renders the local report and its script fetches this a moment later, into a section the
+  markup already carries — so a page whose script failed still shows everything else.
 - `GET /app/<slug>/…` and `HEAD` — the app itself, forwarded to the loopback port it is running
   on. Not behind the token: this is the page a browser navigates to, and a link that demands an
   `Authorization` header is a link that never opens. What bounds it is that the only thing it can
@@ -296,15 +302,14 @@ The catalog that ships inside the binary is itself an ordinary skill file carryi
 
 **The bundled catalog is a floor, not a source of truth.** `catalog::ensure` writes it only when the file is absent, which covers a fresh install and an upgrade whose file was deleted, and never overwrites a catalog the user curated.
 
-**The release check has landed, with its request still a seam** (`decided in implementation`,
-2026-10-31). `crates/skills::release` answers "is there a newer release than the one on disk?" — one
-request, one comparison — and `Releases` is the seam the request goes through. It returns the
-answer's *body*, not a parsed release, for the same reason `Publisher` returns a program's stdout:
-every way a body can be wrong is decided in code a test drives with a string. The socket is what is
-missing, and what is missing is only the wiring: `crates/gateway::transport` speaks `https` now,
-but `crates/skills` does not depend on it, so nothing here fetches yet. `release_url` states the
-endpoint as part of the contract, so the transport that lands later has no shape left to invent.
-Five decisions:
+**The release check has landed, and its request goes through a seam of its own** (`decided in
+implementation`, 2026-10-31). `crates/skills::release` answers "is there a newer release than the
+one on disk?" — one request, one comparison — and `Releases` is the seam the request goes through.
+It returns the answer's *body*, not a parsed release, for the same reason `Publisher` returns a
+program's stdout: every way a body can be wrong is decided in code a test drives with a string. The
+socket under it has landed since, and where it went is a paragraph of its own below. `release_url`
+states the endpoint as part of the contract, so the transport that landed later had no shape left
+to invent. Five decisions:
 
 - **`GET` was not borrowed from the model client, and does not need to be.** The seam is this
   crate's own, returns `io::Result<String>` and takes an `owner/name` — a skills question in a
@@ -349,6 +354,29 @@ comparable on its first refresh.
 The `Publisher` is a trait for the same reason `Runner`, `Spawner`, `Probe` and `Prober` are: every refusal worth testing happens *after* a program has run, and a test that ran a real one would measure whatever that program does on the machine running the suite. The real one waits as long as the package takes — a limit worth naming, and one whose fix goes behind this seam rather than into the logic.
 
 **Not wired into the binary, unlike the loader.** Installing is a side effect on the user's machine, and the agent that would run it now exists — but an install writes outside the app directory and can replace a file the user edited, which is exactly the kind of call the dialog is meant to ask about. It lands with that prompt, not before it.
+
+**What has landed since: the socket under the release check, and the route the panel reads**
+(`decided in implementation`, 2026-11-01). `Releases` is implemented by
+`crates/deepnest/src/updates.rs` over `crates/gateway`'s `get`, and it sits there rather than in
+`crates/skills` because that is the one crate depending on both sides: the seam's own crate stays
+transport-free, which is what its module doc asked for and what keeps it testable with no network.
+Three decisions came with the wire.
+
+- **The endpoint is a parameter, not a literal.** `release_url` stays the default, because the URL
+  is part of the contract and carries a shape test of its own; but a check that could only ever
+  reach `api.github.com` is a check no test can drive, and the honest alternatives are a fake seam
+  that proves nothing about the transport, or a test that measures GitHub. `Github::at` is the same
+  decision `TlsHttp::with_connector` made: open the one thing a test has to control.
+- **A status that is not `200` is an error, never an empty body.** An empty body would arrive at
+  `release::check` as `NotARelease` — true but vague — while a `404` is a real answer with a real
+  meaning: the repository publishes no releases. Reported as an error it lands in `Why`'s
+  `Unreachable`, where the detail is the status and a person can read it.
+- **The check never runs while a page is being rendered.** `report` is called from a route the
+  panel's script fetches on its own, never from the synchronous skills report, which reads the disk
+  and renders into the markup: one TLS request per skill inside that path would let an offline
+  machine hang the panel it is meant to open.
+
+What remains is acting on the answer, not learning it.
 
 ### `crates/apps` — app lifecycle
 
@@ -597,9 +625,12 @@ One module per cycle, each landing with its tests:
    binary serves connections concurrently, which is what lets a turn wait while the page answers.
 8. `crates/skills` — loader, catalog, installer. **In progress**: the loader (two roots, two
    layouts, shadowing, skip reporting, the prompt summary), the bundled catalog, the `.state.json`
-   that says which skills may be refreshed, the install path for a self-publishing package, and the
-   release check with its own one-request seam have landed; what remains is the socket under that
-   seam — `crates/gateway::transport` speaks `https` now, but nothing wires it into this crate yet.
+   that says which skills may be refreshed, the install path for a self-publishing package, the
+   release check with its own one-request seam, and the socket under that seam have landed — the
+   socket is `crates/deepnest/src/updates.rs`, its route is `GET /api/skills/updates`, and the
+   panel's script reads it there. What remains is acting on the answer: a refresh the user can ask
+   for, with `record_update` writing the version it adopted, and `installer::install` wired into
+   the binary, which nothing calls yet.
 9. `crates/packaging` — payload, first-run unpack, signing. **In progress**: the toolchain
    directory contract has landed (where a payload unpacks, the marker that makes a directory whole,
    and the sweep that removes what an interrupted unpack left behind), so has the C toolchain
