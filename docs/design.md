@@ -97,6 +97,13 @@ Turn loop, streaming assembly, tool dispatch, conversation persistence, memory w
 
 The system prompt is **written from scratch**. It is where most of the agent's behaviour quality lives, and EMRG's cannot be copied — but the three failures EMRG already paid for are cheap to avoid: a compaction rule that counts characters rather than entries, a tool loop that terminates when its turn is cancelled, and a 400 that is not mistaken for an over-long context.
 
+Four decisions were made while implementing it and are recorded here rather than in a commit message (`decided in implementation`, 2026-10-31):
+
+- **The model is reached through a `Model` trait, not through `deepnest_llm::Client`.** The loop is then testable with no network and no HTTP adapter, and the adapter (which belongs to `crates/gateway`) is swappable. `Client` implements the trait, so the binary wires the real one in one line.
+- **The trim budget is by characters and defaults to 120,000 per request**, with two repairs that a provider otherwise rejects outright: the kept tail must begin at a `user` message, and a `tool` result whose `assistant` call was trimmed away is dropped with it. A request that reports itself too long halves the budget and retries at most twice; a **refusal is never** retried that way.
+- **Cancellation is a shared flag checked before every request and before every tool call in a batch**, so a cancelled turn runs no further command. The calls that did not run are recorded in `history.jsonl` as a note, so a reader can tell a cancelled batch from a model that asked for less.
+- **The layout under `~/.deepnest/apps/<slug>/.agent/`** is `history.jsonl`, `memory/<id>.md`, `memory/MEMORY.md`, and `subagents/<NNNN>/history.jsonl` — one conversation file per subagent call, because a child appending to its parent's file is two writers on one conversation.
+
 ### `crates/skills` — Anthropic Agent Skills
 
 Loader reads two roots (`~/.deepnest/skills/`, `<app>/.agent/skills/`) and both layouts (`<name>.md`, `<name>/SKILL.md`); a same-named agent skill shadows the user skill. Progressive disclosure: only `name` + `description` + `path` enter the prompt. A file with no `description` is not loaded (`impl, ref: emrg/skills/loader.py`).
@@ -131,11 +138,15 @@ Three boundaries carry most of the future cost, so they are fixed here:
 
 ```rust
 trait SandboxBackend {              // darwin | linux | win32 — chosen at startup
-    fn fence(&self, roots: &WritableRoots, cmd: &Command) -> Launched;
+    fn confine(&self, policy: &Policy, command: &[String]) -> Result<Confinement, SandboxError>;
 }
 
 trait Tool {                        // one implementation per tool; uniform refusal shape
-    async fn call(&self, args: Value, ctx: &ToolCtx) -> ToolResult;
+    fn call(&self, args: &Value, ctx: &ToolContext) -> ToolResult;   // synchronous; the caller owns the runtime
+}
+
+trait Model {                       // the loop's view of the model; Client implements it
+    fn turn(&self, messages: &[Message], tools: &[ToolDefinition]) -> Result<AssistantTurn, LlmError>;
 }
 
 struct MemoryStore { /* entries + index; bodies never enter the prompt */ }
