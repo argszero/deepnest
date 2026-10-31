@@ -325,7 +325,7 @@ fn checked_relative(path: &Path) -> Result<PathBuf, Refusal> {
 /// The check is lexical and made per entry, which is enough because a link can only be created
 /// through this function: a link that would escape never exists in the tree, so no later entry can
 /// reach outside by writing through it.
-fn checked_link(entry: &Path, target: &Path) -> Result<(), Refusal> {
+pub(crate) fn checked_link(entry: &Path, target: &Path) -> Result<(), Refusal> {
     if target.is_absolute() {
         return Err(Refusal::LinkEscapes);
     }
