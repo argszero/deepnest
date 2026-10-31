@@ -101,6 +101,13 @@ by name what it does not answer:
   so rendering it synchronously would let an offline machine hang the panel it is meant to open.
   The page renders the local report and its script fetches this a moment later, into a section the
   markup already carries — so a page whose script failed still shows everything else.
+- `POST` and `GET /api/skills/refresh` — the step the update check's answer leads to. `POST` with
+  `{"name": "…"}` runs the skill's own package and rewrites the file it publishes, then records the
+  version the release check adopted with it; `GET` reports what the last refresh came to. It answers
+  `202` rather than `200` because the publisher returns when that program decides to — longer than a
+  page holds a request — so the page polls the same route; and `409` while one is already running,
+  because the state file is one file and two writers would lose one of the records. Behind the token,
+  and a `POST` rather than a `GET`, because it runs a program on the user's machine (§`crates/skills`).
 - `GET /app/<slug>/…` and `HEAD` — the app itself, forwarded to the loopback port it is running
   on. Not behind the token: this is the page a browser navigates to, and a link that demands an
   `Authorization` header is a link that never opens. What bounds it is that the only thing it can
@@ -291,7 +298,7 @@ Loader reads two roots (`~/.deepnest/skills/`, `<app>/.agent/skills/`) and both 
 - **`crates/web` learns nothing about `crates/skills`.** The router hands the page one line and two `(label, detail)` lists — exactly the shape it already hands it the app line — and the page escapes every value at the point it writes it. The skills list is substituted into the page **last**, because a description containing `@@APPS@@` is a description and not a request to repeat the app count.
 - **Loaded and refused are two lists, and the line between them is the summary.** "None yet" and "none usable" are different pages: a user whose only skill has a broken header is told the entry is not a skill, with the reason, rather than that they have no skills.
 
-The catalog that ships inside the binary is itself an ordinary skill file carrying a `skills:` list (`name`, `description`, `repo`, `install`, `dest`, `check`); `dest` points at `~/.deepnest/skills/`. `browser-harness` and `baoyu-design` are the first two entries (`host 20:26`). Installation state lives in `.state.json`: only `managed: true` entries may be refreshed by the updater; anything else is the user's and is never touched (`impl, ref: emrg/skills/installer.py`).
+The catalog that ships inside the binary is itself an ordinary skill file carrying a `skills:` list (`name`, `description`, `repo`, `install`, `dest`, `check`); `dest` is spelled against deepnest's own home, so its `~` is `~/.deepnest` and `~/skills/` is the directory the loader reads — a literal `~/.deepnest/skills/` would fail under a relocated `DEEPNEST_HOME` and land where nothing loads it. `browser-harness` and `baoyu-design` are the first two entries (`host 20:26`). Installation state lives in `.state.json`: only `managed: true` entries may be refreshed by the updater; anything else is the user's and is never touched (`impl, ref: emrg/skills/installer.py`).
 
 **What has landed since: the catalog and the state file** (`decided in implementation`, 2026-10-31). `catalog` holds the bundled list and reads it back; `state` records which installed skills deepnest may refresh. Four decisions came with them:
 
@@ -353,7 +360,7 @@ comparable on its first refresh.
 
 The `Publisher` is a trait for the same reason `Runner`, `Spawner`, `Probe` and `Prober` are: every refusal worth testing happens *after* a program has run, and a test that ran a real one would measure whatever that program does on the machine running the suite. The real one waits as long as the package takes — a limit worth naming, and one whose fix goes behind this seam rather than into the logic.
 
-**Not wired into the binary, unlike the loader.** Installing is a side effect on the user's machine, and the agent that would run it now exists — but an install writes outside the app directory and can replace a file the user edited, which is exactly the kind of call the dialog is meant to ask about. It lands with that prompt, not before it.
+**Not wired in as an agent tool, unlike the loader.** Installing is a side effect on the user's machine: it writes outside the app directory and can replace a file the user edited, which is exactly the kind of call the dialog is meant to ask about — so an install an *agent* would run lands with that prompt, not before it. What landed first is the version a *person* asks for: `POST /api/skills/refresh` runs the package from the panel's own button, where the person pressing it is the consent that prompt exists to obtain, and it is a route of its own rather than a call a turn can make.
 
 **What has landed since: the socket under the release check, and the route the panel reads**
 (`decided in implementation`, 2026-11-01). `Releases` is implemented by
@@ -376,7 +383,25 @@ Three decisions came with the wire.
   and renders into the markup: one TLS request per skill inside that path would let an offline
   machine hang the panel it is meant to open.
 
-What remains is acting on the answer, not learning it.
+**What has landed since: the refresh the answer leads to** (`decided in implementation`, 2026-11-01).
+`crates/deepnest/src/refresh.rs` calls `installer::install` and then, once the file is on disk,
+`release::check` — recording what `adoptable()` returned through `record_update` and writing the state
+file. It is the first caller `install` has ever had. Four decisions came with it:
+
+- **A refresh enqueues and returns.** The real publisher is the package run with no timeout, so a
+  `POST` that waited on it would hold one connection for as long as somebody else's program takes.
+  The route answers `202` and a worker thread of its own does the work — the shape `crate::rebuild`
+  already uses — and the page polls the same route for the outcome.
+- **One refresh at a time, refused rather than queued.** The state file is one file: two workers each
+  read it, each record their own skill, and the second write silently loses the first one's record.
+  A second request while one runs is `409` naming the skill in flight.
+- **The file first, the version second.** `install` records no version and keeps whatever was there,
+  so a version can only come from the check — and it is asked *after* the rewrite, because the file
+  is what the user asked for and a forge that cannot answer must not be able to cancel it. A check
+  that cannot answer leaves the refresh standing with the version it had, and `None` when it had none.
+- **It is the user's refresh, not the agent's.** The button is the consent the dialog exists to
+  obtain, which is what lets this land before the escalation prompt does; `install` is still
+  unreachable from a turn.
 
 ### `crates/apps` — app lifecycle
 
@@ -627,9 +652,11 @@ One module per cycle, each landing with its tests:
    that says which skills may be refreshed, the install path for a self-publishing package, the
    release check with its own one-request seam, and the socket under that seam have landed — the
    socket is `crates/deepnest/src/updates.rs`, its route is `GET /api/skills/updates`, and the
-   panel's script reads it there. What remains is acting on the answer: a refresh the user can ask
-   for, with `record_update` writing the version it adopted, and `installer::install` wired into
-   the binary, which nothing calls yet.
+   panel's script reads it there. **Acting on the answer has landed too**: `POST
+   /api/skills/refresh` runs `installer::install` for one managed skill and then `record_update` with
+   the version the check adopted, so every row the panel offers has a button (`crates/deepnest/src/refresh.rs`).
+   What remains in this crate is the install an *agent* would run, which belongs with the escalation
+   prompt.
 9. `crates/packaging` — payload, first-run unpack, signing. **In progress**: the toolchain
    directory contract has landed (where a payload unpacks, the marker that makes a directory whole,
    and the sweep that removes what an interrupted unpack left behind), so has the C toolchain

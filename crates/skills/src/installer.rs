@@ -243,8 +243,10 @@ impl fmt::Display for Refused {
 
 /// Install one catalog entry, and record it as managed.
 ///
-/// `home` is the user's home directory, which is what a `~` in `dest` resolves against — passed in
-/// rather than looked up so a test never writes into the real one. `at` is the caller's stamp; this
+/// `home` is deepnest's own home — `~/.deepnest`, unless `DEEPNEST_HOME` moved it — which is what a
+/// `~` in `dest` resolves against: the catalog spells the skills directory `~/skills/`, and that is
+/// the same directory the loader reads. It is passed in rather than looked up so a test never writes
+/// into the real one. `at` is the caller's stamp; this
 /// crate does not read the clock. `state` is updated in place and **not** written: persisting it is
 /// the caller's [step](State::write), and that order is deliberate — see the module doc.
 pub fn install(
@@ -502,9 +504,10 @@ mod tests {
             self.base.join("home")
         }
 
-        /// The skills directory a catalog entry points at, spelled the way the bundled one is.
+        /// The skills directory a catalog entry points at, spelled the way the bundled one is:
+        /// `~/skills/` against deepnest's home, which is the root the loader reads.
         fn dest(&self) -> PathBuf {
-            self.home().join(".deepnest").join("skills")
+            self.home().join("skills")
         }
     }
 
@@ -574,7 +577,7 @@ mod tests {
             description: "Direct browser control.".to_string(),
             repo: Some("browser-use/browser-harness".to_string()),
             install: Some(SELF_PUBLISHING.to_string()),
-            dest: Some("~/.deepnest/skills/".to_string()),
+            dest: Some("~/skills/".to_string()),
             check: Some("github_release".to_string()),
         }
     }
@@ -999,10 +1002,7 @@ mod tests {
     #[test]
     fn a_tilde_dest_resolves_against_the_home_it_is_given() {
         let home = Path::new("/home/somebody");
-        assert_eq!(
-            resolve_dest("~/.deepnest/skills/", home),
-            Some(home.join(".deepnest").join("skills"))
-        );
+        assert_eq!(resolve_dest("~/skills/", home), Some(home.join("skills")));
         assert_eq!(resolve_dest("~", home), Some(home.to_path_buf()));
         // Not under `~`, so it stands as written and is not joined onto `home`.
         let outside = an_absolute_path("var/tmp/skills");
@@ -1036,12 +1036,8 @@ mod tests {
         // A file where the skills directory should be: creating the directory fails, so the
         // install must not claim to have happened.
         let scratch = Scratch::new("unwritable");
-        std::fs::create_dir_all(scratch.home().join(".deepnest")).unwrap();
-        std::fs::write(
-            scratch.home().join(".deepnest").join("skills"),
-            "not a directory",
-        )
-        .unwrap();
+        std::fs::create_dir_all(scratch.home()).unwrap();
+        std::fs::write(scratch.home().join("skills"), "not a directory").unwrap();
 
         let mut state = State::new();
         let outcome = install(

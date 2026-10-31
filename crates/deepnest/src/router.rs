@@ -60,6 +60,7 @@ use crate::grant;
 use crate::http::{Method, Request, Response};
 use crate::model::Endpoint;
 use crate::rebuild;
+use crate::refresh;
 use crate::token::Token;
 
 /// What the router needs in order to make an app real: the supervisor that owns its process, the
@@ -90,6 +91,13 @@ pub struct Lifecycle {
     /// loopback server: `Github::new` reaches `api.github.com`, and a route test that called it
     /// would be measuring GitHub's answer today instead of this crate's wiring.
     pub releases: Arc<dyn deepnest_skills::Releases>,
+    /// How a skill is published. A trait object for the reason `builder` is one: the real publisher
+    /// runs the package the catalog names, which is a program this machine may not have.
+    pub publisher: Arc<dyn deepnest_skills::Publisher>,
+    /// The refresh queue: what a person asked for from the panel, and the version it adopted. Held
+    /// here for the reason `rebuild` is — a queue rebuilt per request would forget the refresh that
+    /// is already running and start a second writer on the same state file.
+    pub refresher: Arc<refresh::Refresher>,
 }
 
 impl Lifecycle {
@@ -97,8 +105,17 @@ impl Lifecycle {
     pub fn new(supervisor: Arc<Supervisor>, home: impl Into<PathBuf>) -> Self {
         let home = home.into();
         let builder: Arc<dyn Runner> = Arc::new(StdRunner::new());
+        let releases: Arc<dyn deepnest_skills::Releases> = Arc::new(crate::updates::Github::new());
+        let publisher: Arc<dyn deepnest_skills::Publisher> =
+            Arc::new(deepnest_skills::StdPublisher);
         Self {
-            releases: Arc::new(crate::updates::Github::new()),
+            refresher: Arc::new(refresh::Refresher::new(
+                home.clone(),
+                Arc::clone(&publisher),
+                Arc::clone(&releases),
+            )),
+            releases,
+            publisher,
             rebuild: Arc::new(rebuild::Rebuilder::new(
                 Arc::clone(&supervisor),
                 Arc::clone(&builder),
@@ -123,8 +140,31 @@ impl Lifecycle {
     ///
     /// The same reason [`Lifecycle::with_builder`] exists: what a test has to control is the answer,
     /// and the real one is a request to somebody else's server today.
+    ///
+    /// The refresh queue is rebuilt with it, for the reason [`Lifecycle::with_builder`] gives about
+    /// the build queue: a check swapped into the lifecycle but not into the thing that records what
+    /// a check adopted would have the route answer with one forge and the refresh record another.
     pub fn with_releases(mut self, releases: Arc<dyn deepnest_skills::Releases>) -> Self {
+        self.refresher = Arc::new(refresh::Refresher::new(
+            self.home.clone(),
+            Arc::clone(&self.publisher),
+            Arc::clone(&releases),
+        ));
         self.releases = releases;
+        self
+    }
+
+    /// The same lifecycle with a different publisher.
+    ///
+    /// The one seam a test has to replace to refresh a skill at all: the real publisher runs a
+    /// program on this machine, and what that program does is not this crate's to measure.
+    pub fn with_publisher(mut self, publisher: Arc<dyn deepnest_skills::Publisher>) -> Self {
+        self.refresher = Arc::new(refresh::Refresher::new(
+            self.home.clone(),
+            Arc::clone(&publisher),
+            Arc::clone(&self.releases),
+        ));
+        self.publisher = publisher;
         self
     }
 
@@ -271,6 +311,17 @@ impl Router {
         self
     }
 
+    /// Publish skills with `publisher` instead of running the package.
+    ///
+    /// The same shape as the builders around it, and the same reason: what a test has to control is
+    /// the program's answer, and the real one is somebody else's binary on this machine.
+    pub fn with_publisher(mut self, publisher: Arc<dyn deepnest_skills::Publisher>) -> Self {
+        if let Some(lifecycle) = self.lifecycle.take() {
+            self.lifecycle = Some(lifecycle.with_publisher(publisher));
+        }
+        self
+    }
+
     /// Forward app requests with `forwarder` instead of over a real socket.
     pub fn with_forwarder(mut self, forwarder: Arc<dyn Forwarder>) -> Self {
         if let Some(lifecycle) = self.lifecycle.take() {
@@ -306,7 +357,7 @@ impl Router {
 
         let path = request.path.as_str();
 
-        // Three routes read a body, and every other route refuses one by name. Reading it and
+        // Four routes read a body, and every other route refuses one by name. Reading it and
         // then routing anyway would answer "done" to a request whose content was never looked at,
         // which is the one answer a server must not give about something it did not read.
         if !request.body.is_empty() && !takes_a_body(path) {
@@ -314,7 +365,7 @@ impl Router {
                 400,
                 format!(
                     "{path} takes no request body — send none, or send one to {CONFIG_PATH}, \
-                     POST /api/apps/<slug>/{} or POST /api/apps/<slug>/{}\n",
+                     {SKILL_REFRESH}, POST /api/apps/<slug>/{} or POST /api/apps/<slug>/{}\n",
                     chat::ACTION,
                     escalation::ACTION
                 ),
@@ -366,6 +417,12 @@ impl Router {
                     return Answer::Full(unauthorized());
                 }
                 Answer::Full(self.skill_updates(request))
+            }
+            SKILL_REFRESH => {
+                if !self.authorized(request) {
+                    return Answer::Full(unauthorized());
+                }
+                Answer::Full(self.skill_refresh(request))
             }
             other if other.starts_with("/api/apps/") => {
                 // Two ways in, and only one of them is a general credential: the control token
@@ -630,8 +687,9 @@ impl Router {
     /// interface — wait on a network it does not need, and the page can have the local answer now
     /// and this one a moment later.
     ///
-    /// `GET` only: it asks a question and changes nothing, and a `POST` here would suggest a refresh
-    /// it does not do.
+    /// `GET` only: it asks a question and changes nothing. The refresh is a route of its own —
+    /// [`SKILL_REFRESH`] — because a `POST` here would put a program that runs on the user's machine
+    /// behind the route the page calls on load.
     fn skill_updates(&self, request: &Request) -> Response {
         if !matches!(request.method, Method::Get | Method::Head) {
             return Response::json(
@@ -647,6 +705,77 @@ impl Router {
         };
         let rows = crate::updates::report(&lifecycle.home, lifecycle.releases.as_ref());
         Response::json(200, crate::updates::body(&rows).to_string())
+    }
+
+    /// `POST /api/skills/refresh` — rewrite one managed skill from its own package and record the
+    /// version the release check adopted with it; `GET` reports what the last refresh came to.
+    ///
+    /// `POST` and not `GET`, because this runs a program on the user's machine and replaces a file
+    /// there: a browser prefetches links, and a side effect behind `GET` is one it makes by pointing
+    /// at it. `202` and not `200`, because the answer is "it started" — the publisher returns when
+    /// the package decides to, which is longer than a page holds a request — so the page polls this
+    /// same route for the outcome. The refusal for a second request is `409` rather than a queue
+    /// behind the first, and the reason is in [`crate::refresh`]: the state file is one file.
+    fn skill_refresh(&self, request: &Request) -> Response {
+        let Some(lifecycle) = self.lifecycle.as_ref() else {
+            return Response::json(
+                503,
+                error_body(
+                    "this process was started without a deepnest home, so there are no skills to \
+                     refresh",
+                ),
+            );
+        };
+        match request.method {
+            Method::Get | Method::Head => {
+                let last = lifecycle.refresher.status();
+                Response::json(
+                    200,
+                    json!({ "refresh": last.as_ref().map(refresh::Status::body) }).to_string(),
+                )
+            }
+            Method::Post => {
+                let Some(text) = request.body_text() else {
+                    return Response::json(400, error_body("the refresh body must be UTF-8 JSON"));
+                };
+                let submitted: RefreshRequest = match serde_json::from_str(text) {
+                    Ok(submitted) => submitted,
+                    Err(error) => {
+                        return Response::json(
+                            400,
+                            error_body(&format!(
+                                "the refresh body is not the JSON this route reads (name): {error}"
+                            )),
+                        )
+                    }
+                };
+                let name = submitted.name.trim();
+                if name.is_empty() {
+                    return Response::json(
+                        400,
+                        error_body("the refresh body names no skill — send {\"name\":\"…\"}"),
+                    );
+                }
+                match lifecycle.refresher.enqueue(name) {
+                    refresh::Started::Started => Response::json(
+                        202,
+                        json!({ "name": name, "state": "refreshing" }).to_string(),
+                    ),
+                    refresh::Started::Busy { name: other } => Response::json(
+                        409,
+                        error_body(&format!(
+                            "a refresh of `{other}` is running; one at a time, because the state \
+                             file is one file and two writers would lose one of the records"
+                        )),
+                    ),
+                }
+            }
+            _ => Response::json(
+                405,
+                error_body("a refresh is asked for with POST and read with GET"),
+            )
+            .header("Allow", "GET, POST"),
+        }
     }
 
     /// `GET` and `POST /api/config`, and a refusal naming both for anything else.
@@ -1473,6 +1602,7 @@ fn unauthorized() -> Response {
 /// it is answering about something that was never looked at.
 fn takes_a_body(path: &str) -> bool {
     path == CONFIG_PATH
+        || path == SKILL_REFRESH
         || path
             .strip_prefix("/api/apps/")
             .and_then(|rest| rest.split_once('/'))
@@ -1487,6 +1617,12 @@ const CONFIG_PATH: &str = "/api/config";
 /// `crates/web` that reads the script back.
 pub const SKILL_UPDATES: &str = "/api/skills/updates";
 
+/// Where a refresh is asked for, and where its outcome is read.
+///
+/// A constant for the reason [`SKILL_UPDATES`] is one: this router and the panel's script name it,
+/// and a test in `crates/web` reads the script back.
+pub const SKILL_REFRESH: &str = "/api/skills/refresh";
+
 /// The body `POST /api/apps/<slug>/escalation` reads: the person's answer, and why when it is no.
 ///
 /// `deny_unknown_fields` for the reason every body here has it: `approved` instead of `approve`
@@ -1499,6 +1635,17 @@ struct Verdict {
     /// The host's own words, when they refused. Empty when they approved.
     #[serde(default)]
     reason: String,
+}
+
+/// The body `POST /api/skills/refresh` reads: which skill to rewrite.
+///
+/// `deny_unknown_fields` for the reason every body here has it: `skill` instead of `name` would
+/// otherwise be read as a body naming nothing, and the page would be told it had asked for a
+/// refresh of nothing at all.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RefreshRequest {
+    name: String,
 }
 
 /// The body `POST /api/config` reads.
@@ -3537,8 +3684,8 @@ mod tests {
 
     #[test]
     fn the_update_check_is_read_and_not_written_through_the_same_path() {
-        // A `POST` here would suggest a refresh this route does not do, and the refusal says so by
-        // naming the method rather than answering 404 as if the route were not there.
+        // The refresh has a route of its own, so this one stays read-only — and the refusal names
+        // the method rather than answering 404 as if the route were not there.
         let scratch = Scratch::new("skill-updates-post");
         let router = router().with_lifecycle(
             Arc::new(deepnest_apps::Supervisor::with_parts(
@@ -3551,6 +3698,178 @@ mod tests {
         let refused = router.respond(&post(SKILL_UPDATES)).complete();
         assert_eq!(refused.status, 405, "{}", body(&refused));
         assert!(body(&refused).contains("GET"), "{}", body(&refused));
+    }
+
+    /// A publisher that prints a usable skill, so a refresh through the route runs no program.
+    struct Prints;
+
+    impl deepnest_skills::Publisher for Prints {
+        fn publish(&self, program: &str) -> std::io::Result<deepnest_skills::Report> {
+            Ok(deepnest_skills::Report {
+                status: Some(0),
+                // A description the seeded file does not have, so a test can tell a rewritten file
+                // from one that was left alone.
+                stdout: format!(
+                    "---\nname: {program}\ndescription: published again\n---\n\nBody.\n"
+                ),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    /// A home with the bundled catalog and one managed skill, so the route refreshes the entry the
+    /// binary actually ships rather than a fixture that could drift from it.
+    fn refreshable(name: &str) -> Scratch {
+        let scratch = Scratch::new(name);
+        let root = deepnest_skills::user_root(&scratch.base);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            deepnest_skills::catalog::path(&root),
+            deepnest_skills::BUNDLED,
+        )
+        .unwrap();
+        scratch.skill("browser-harness", "drives a browser");
+        let mut state = deepnest_skills::State::new();
+        state.record_install("browser-harness", Some("0.1.0".to_string()), "2026-10-31");
+        state.write(&deepnest_skills::state::path(&root)).unwrap();
+        scratch
+    }
+
+    /// The router these tests drive: a real lifecycle so the queue lives as long as the router, a
+    /// scripted forge, and a publisher that is not a program.
+    fn refresh_router(scratch: &Scratch, body: &str) -> Router {
+        router()
+            .with_lifecycle(
+                Arc::new(deepnest_apps::Supervisor::with_parts(
+                    Box::new(FakeSpawner),
+                    Box::new(AlwaysReady),
+                )),
+                scratch.base.clone(),
+                scratch.apps(),
+            )
+            .with_releases(Arc::new(ScriptedReleases {
+                body: body.to_string(),
+            }))
+            .with_publisher(Arc::new(Prints))
+    }
+
+    /// A `GET` as the panel's script sends it — the token, which the page has and an app's page does
+    /// not.
+    fn get_as_panel(path: &str) -> Request {
+        parse(&format!(
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:4270\r\nauthorization: bearer {}\r\n\r\n",
+            "a".repeat(64)
+        ))
+        .unwrap()
+    }
+
+    fn post_json(path: &str, payload: &str) -> Request {
+        let mut request = parse(&format!(
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:4270\r\nauthorization: bearer {}\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            "a".repeat(64),
+            payload.len()
+        ))
+        .unwrap();
+        // `parse` reads the head and stops at the blank line: the body is what the connection reader
+        // buffers afterwards, so a test attaches it here rather than pasting it after the header.
+        request.body = payload.as_bytes().to_vec();
+        request
+    }
+
+    #[test]
+    fn a_refresh_asked_for_from_the_panel_records_the_version_it_adopted() {
+        let scratch = refreshable("skill-refresh");
+        let router = refresh_router(&scratch, r#"{"tag_name":"v0.4.0"}"#);
+
+        // Nothing asked for yet, and that is not the same as "the last one succeeded".
+        let before = router.respond(&get_as_panel(SKILL_REFRESH)).complete();
+        assert_eq!(before.status, 200, "{}", body(&before));
+        let said: Value = serde_json::from_str(&body(&before)).unwrap();
+        assert_eq!(said["refresh"], Value::Null, "{said}");
+
+        let asked = router
+            .respond(&post_json(SKILL_REFRESH, r#"{"name":"browser-harness"}"#))
+            .complete();
+        assert_eq!(asked.status, 202, "{}", body(&asked));
+        assert!(
+            body(&asked).contains("refreshing"),
+            "the route did not say it had started: {}",
+            body(&asked)
+        );
+
+        // The publisher is somebody else's program, so the answer is "it started" and the page
+        // polls this route for the outcome.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let finished = loop {
+            let answer = router.respond(&get_as_panel(SKILL_REFRESH)).complete();
+            let said: Value = serde_json::from_str(&body(&answer)).unwrap();
+            if !said["refresh"].is_null() && said["refresh"]["state"] != "refreshing" {
+                break said;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the refresh never reported: {said}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(finished["refresh"]["name"], "browser-harness", "{finished}");
+        assert_eq!(finished["refresh"]["state"], "refreshed", "{finished}");
+        assert_eq!(finished["refresh"]["version"], "0.4.0", "{finished}");
+        assert_eq!(finished["refresh"]["replaced"], true, "{finished}");
+
+        // The reading that matters: the state file the next update check reads, not a copy the
+        // route kept.
+        let recorded = deepnest_skills::State::read(&deepnest_skills::state::path(
+            &deepnest_skills::user_root(&scratch.base),
+        ));
+        assert_eq!(
+            recorded.get("browser-harness").unwrap().version.as_deref(),
+            Some("0.4.0"),
+            "the adopted version never reached the state file"
+        );
+    }
+
+    #[test]
+    fn the_refresh_route_is_behind_the_token_and_asks_for_a_post() {
+        let scratch = refreshable("skill-refresh-guard");
+        let router = refresh_router(&scratch, r#"{"tag_name":"v0.4.0"}"#);
+
+        // Behind the token like every route that is not a page: the capability to run a program on
+        // the user's machine is not one a page an app serves may hold.
+        let anonymous = router
+            .respond(&get(SKILL_REFRESH, "127.0.0.1:4270"))
+            .complete();
+        assert_eq!(anonymous.status, 401, "{}", body(&anonymous));
+
+        // A state change behind GET would be one a browser makes by prefetching a link.
+        let deleted = parse(&format!(
+            "DELETE {SKILL_REFRESH} HTTP/1.1\r\nHost: 127.0.0.1:4270\r\nauthorization: bearer \
+             {}\r\n\r\n",
+            "a".repeat(64)
+        ))
+        .unwrap();
+        let refused = router.respond(&deleted).complete();
+        assert_eq!(refused.status, 405, "{}", body(&refused));
+        assert!(body(&refused).contains("POST"), "{}", body(&refused));
+    }
+
+    #[test]
+    fn a_refresh_body_that_names_no_skill_is_refused_rather_than_guessed() {
+        let scratch = refreshable("skill-refresh-body");
+        let router = refresh_router(&scratch, r#"{"tag_name":"v0.4.0"}"#);
+
+        let empty = router
+            .respond(&post_json(SKILL_REFRESH, r#"{"name":"  "}"#))
+            .complete();
+        assert_eq!(empty.status, 400, "{}", body(&empty));
+
+        // `skill` instead of `name` is a typo, and a route that read "no name" from a body plainly
+        // carrying one would report a refresh of nothing as if it had been asked for.
+        let typo = router
+            .respond(&post_json(SKILL_REFRESH, r#"{"skill":"browser-harness"}"#))
+            .complete();
+        assert_eq!(typo.status, 400, "{}", body(&typo));
     }
 
     #[test]

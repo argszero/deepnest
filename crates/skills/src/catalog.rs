@@ -56,11 +56,11 @@ skills:
     description: "Direct browser control over CDP: driving the user's own browser for automation, scraping, testing and site work."
     repo: browser-use/browser-harness
     install: self-publishing
-    dest: ~/.deepnest/skills/
+    dest: ~/skills/
     check: github_release
   - name: baoyu-design
     description: "Produce visual design artifacts as self-contained HTML: mockups, prototypes, wireframes, landing pages, dashboards, decks, print documents and visual research reports."
-    dest: ~/.deepnest/skills/
+    dest: ~/skills/
 ---
 
 # Optional skills
@@ -70,7 +70,10 @@ capability deepnest does not have, look here before deciding it cannot be done.
 
 An entry with `repo`, `install` and `check` can be fetched: `install: self-publishing` means the
 package installs itself and publishes its own skill file, `dest` is where that file belongs, and
-`check: github_release` is how a newer version is noticed.
+`check: github_release` is how a newer version is noticed. `dest` is spelled against deepnest's own
+home — a leading `~` is `~/.deepnest`, unless `DEEPNEST_HOME` moved it — so `~/skills/` is
+`~/.deepnest/skills/`, the directory the loader reads. A skill written anywhere else is one nothing
+loads.
 
 An entry without them is **recommended only** — it names something worth having and where it belongs,
 and the user supplies the files. Deepnest will not claim to install it.
@@ -375,7 +378,7 @@ mod tests {
         let harness = catalog.get("browser-harness").unwrap();
         assert_eq!(harness.repo.as_deref(), Some("browser-use/browser-harness"));
         assert_eq!(harness.install.as_deref(), Some("self-publishing"));
-        assert_eq!(harness.dest.as_deref(), Some("~/.deepnest/skills/"));
+        assert_eq!(harness.dest.as_deref(), Some("~/skills/"));
         assert_eq!(harness.check.as_deref(), Some("github_release"));
         assert!(harness.is_installable());
     }
@@ -395,7 +398,7 @@ mod tests {
 
     #[test]
     fn an_entry_without_a_description_is_reported_not_dropped() {
-        let text = "---\nname: c\nskills:\n  - name: notes\n    repo: a/b\n    install: self-publishing\n    dest: ~/.deepnest/skills/\n---\n";
+        let text = "---\nname: c\nskills:\n  - name: notes\n    repo: a/b\n    install: self-publishing\n    dest: ~/skills/\n---\n";
         let catalog = Catalog::parse(text);
         assert!(catalog.is_empty());
         assert_eq!(
