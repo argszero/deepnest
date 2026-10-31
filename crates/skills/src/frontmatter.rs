@@ -32,6 +32,7 @@ use std::fmt;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Frontmatter {
     fields: Vec<(String, String)>,
+    blocks: Vec<(String, Vec<String>)>,
 }
 
 impl Frontmatter {
@@ -46,6 +47,21 @@ impl Frontmatter {
     /// Every field, in the order the file listed them.
     pub fn fields(&self) -> &[(String, String)] {
         &self.fields
+    }
+
+    /// The indented lines that hung from a field, as the file wrote them.
+    ///
+    /// A block is kept rather than dropped because a skill may carry a list — the catalog's
+    /// `skills:` entries are one — and a format that could only say one thing per line would make
+    /// the catalog a second format with its own reader. The lines are returned verbatim, indented,
+    /// because their relative indentation is the only thing that says which entry a line belongs
+    /// to. Everywhere else in this crate a nested line is noise; here it is the content.
+    pub fn block(&self, name: &str) -> &[String] {
+        self.blocks
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, lines)| lines.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Whether the header carried no field at all.
@@ -92,6 +108,8 @@ pub fn split(text: &str) -> Result<(Frontmatter, &str), NoFrontmatter> {
     let mut offset = 0;
     let mut opened = false;
     let mut fields = Vec::new();
+    let mut blocks: Vec<(String, Vec<String>)> = Vec::new();
+    let mut last_field: Option<usize> = None;
 
     for line in text.split_inclusive('\n') {
         offset += line.len();
@@ -105,30 +123,42 @@ pub fn split(text: &str) -> Result<(Frontmatter, &str), NoFrontmatter> {
             continue;
         }
         if bare.trim_end() == "---" {
-            let frontmatter = Frontmatter { fields };
+            let frontmatter = Frontmatter { fields, blocks };
             if frontmatter.is_empty() {
                 return Err(NoFrontmatter::Empty);
             }
             return Ok((frontmatter, text[offset..].trim()));
         }
 
-        // Indented → a nested block, not a top-level field. This is the rule that keeps a skill's
-        // own `description` from being overwritten by one further down its file.
+        // Indented → a nested line, not a top-level field. This is the rule that keeps a skill's
+        // own `description` from being overwritten by one further down its file. The line is still
+        // kept, on the block of the field it hangs from, because a block is how a list is spelled.
         if bare.starts_with([' ', '\t']) {
+            if let Some(index) = last_field {
+                let (name, _) = &fields[index];
+                match blocks.iter_mut().find(|(field, _)| field == name) {
+                    Some((_, lines)) => lines.push(bare.to_string()),
+                    None => blocks.push((name.clone(), vec![bare.to_string()])),
+                }
+            }
             continue;
         }
         let trimmed = bare.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
+            last_field = None;
             continue;
         }
         let Some((key, value)) = trimmed.split_once(':') else {
+            last_field = None;
             continue;
         };
         let key = key.trim();
         if key.is_empty() {
+            last_field = None;
             continue;
         }
         fields.push((key.to_string(), unquote(value.trim())));
+        last_field = Some(fields.len() - 1);
     }
 
     // Opened and never closed: the whole file is header, which is a mistake in the file rather
@@ -237,6 +267,45 @@ mod tests {
     fn a_byte_order_mark_does_not_hide_the_header() {
         let text = "\u{feff}---\nname: notes\n---\nbody";
         assert_eq!(split(text).unwrap().0.get("name"), Some("notes"));
+    }
+
+    #[test]
+    fn a_field_with_no_indented_lines_under_it_has_an_empty_block() {
+        let (frontmatter, _) = split("---\nname: notes\ndescription: d\n---\n").unwrap();
+        assert!(frontmatter.block("name").is_empty());
+        assert!(frontmatter.block("nothing_of_that_name").is_empty());
+    }
+
+    #[test]
+    fn the_indented_lines_under_a_field_are_kept_as_its_block() {
+        // The catalog's `skills:` list is the reader of this, but the rule belongs to the parser:
+        // a nested line is not a field, and it is not nothing either — it is the block of the field
+        // above it, and it is kept verbatim because relative indentation is what says which entry a
+        // line belongs to.
+        let text =
+            "---\nname: catalog\nskills:\n  - name: a\n    repo: x/y\n  - name: b\nother: v\n---\n";
+        let (frontmatter, _) = split(text).unwrap();
+        assert_eq!(
+            frontmatter.block("skills"),
+            ["  - name: a", "    repo: x/y", "  - name: b"]
+        );
+        // A later top-level field ends the block rather than joining it.
+        assert!(frontmatter.block("other").is_empty());
+        // And the nested lines still did not become fields.
+        assert_eq!(frontmatter.get("repo"), None);
+        assert_eq!(frontmatter.fields().len(), 3);
+    }
+
+    #[test]
+    fn a_blank_line_ends_the_block_so_a_later_indented_line_belongs_to_nothing() {
+        // Blocks attach to the field directly above them. After a blank line there is no field
+        // above, so the line is neither a field nor anybody's block — which is what keeps a stray
+        // indented line from being read as part of an unrelated list.
+        let text = "---\nname: notes\n\n  stale: line\ndescription: d\n---\n";
+        let (frontmatter, _) = split(text).unwrap();
+        assert!(frontmatter.block("name").is_empty());
+        assert_eq!(frontmatter.get("description"), Some("d"));
+        assert_eq!(frontmatter.fields().len(), 2);
     }
 
     #[test]
