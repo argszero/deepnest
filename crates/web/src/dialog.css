@@ -60,7 +60,7 @@
   position: absolute;
   right: 0;
   bottom: 2.9rem;
-  width: 15rem;
+  width: 17rem;
   padding: 0.85rem 0.95rem;
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 10px;
@@ -99,3 +99,81 @@
 #deepnest-dialog-link:hover {
   color: #c2d4ff;
 }
+
+/* The message box. Every property is spelled out because `all: initial` above stripped the
+ * platform's own styling for a textarea and a button: with nothing here they would render as
+ * unstyled inline text with no border and no size. */
+
+#deepnest-dialog-form {
+  display: block;
+  margin: 0.7rem 0 0;
+}
+
+#deepnest-dialog-input {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 3.2rem;
+  padding: 0.45rem 0.5rem;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 7px;
+  background: #16161a;
+  color: #f4f4f6;
+  font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  text-align: left;
+  resize: vertical;
+}
+
+#deepnest-dialog-input::placeholder {
+  color: rgba(244, 244, 246, 0.42);
+}
+
+#deepnest-dialog-input:focus-visible,
+#deepnest-dialog-send:focus-visible {
+  outline: 2px solid #7aa7ff;
+  outline-offset: 1px;
+}
+
+#deepnest-dialog-send {
+  display: inline-block;
+  margin-top: 0.45rem;
+  padding: 0.35rem 0.7rem;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 6px;
+  background: #2b2b32;
+  color: #f4f4f6;
+  font: 600 13px/1.2 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  cursor: pointer;
+}
+
+#deepnest-dialog-send:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.55);
+}
+
+#deepnest-dialog-send:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+#deepnest-dialog-answer {
+  display: block;
+  box-sizing: border-box;
+  margin: 0.6rem 0 0;
+  max-height: 9rem;
+  overflow: auto;
+  font: 12px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: rgba(244, 244, 246, 0.86);
+  /* The agent's answer is Markdown and arrives as plain text; keeping the newlines is the
+   * difference between a paragraph and a wall. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+#deepnest-dialog-answer[hidden] {
+  display: none;
+}
+
+#deepnest-dialog-answer.bad {
+  color: #ff9d90;
+}
+

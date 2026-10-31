@@ -55,6 +55,7 @@ use deepnest_packaging::{Probe, StdProbe};
 use deepnest_web::Panel;
 
 use crate::chat;
+use crate::grant;
 use crate::http::{Method, Request, Response};
 use crate::model::Endpoint;
 use crate::token::Token;
@@ -143,6 +144,9 @@ pub struct Router {
     /// `config.toml`, for the panel's first-run form. `None` means this process has nowhere to
     /// write one, and `POST /api/config` says so instead of succeeding into the void.
     config_path: Option<PathBuf>,
+    /// What a page without the control token may hold. Always present, because it needs no file:
+    /// minting into it is what makes the app page's dialog able to send a message at all.
+    grants: grant::Grants,
 }
 
 impl Router {
@@ -155,6 +159,7 @@ impl Router {
             apps_dir: None,
             lifecycle: None,
             config_path: None,
+            grants: grant::Grants::new(),
         }
     }
 
@@ -301,7 +306,10 @@ impl Router {
                 Answer::Full(Response::json(status, body))
             }
             other if other.starts_with("/api/apps/") => {
-                if !self.authorized(request) {
+                // Two ways in, and only one of them is a general credential: the control token
+                // opens every route, and an app page's grant opens exactly one. Anything that is
+                // not that one route stays behind the token.
+                if !self.authorized(request) && !self.chat_grant_admits(request) {
                     return Answer::Full(unauthorized());
                 }
                 Answer::Full(self.app_action(request))
@@ -360,6 +368,54 @@ impl Router {
             return false;
         };
         scheme.eq_ignore_ascii_case("bearer") && token.matches(credential)
+    }
+
+    /// Does the request carry a grant, and is it this app's chat route it asks for?
+    ///
+    /// The path is compared against [`grant::path`] — the same spelling that names the cookie —
+    /// rather than re-derived here, so there is one place in the codebase that decides which route
+    /// the capability opens. A grant is never a credential for anything else: not the app's other
+    /// verbs, not another app, not the config.
+    fn chat_grant_admits(&self, request: &Request) -> bool {
+        let Some(rest) = request.path.strip_prefix("/api/apps/") else {
+            return false;
+        };
+        let Some((slug_text, _action)) = rest.split_once('/') else {
+            return false;
+        };
+        let Ok(slug) = Slug::parse(slug_text) else {
+            return false;
+        };
+        if request.path != grant::path(slug.as_str()) {
+            return false;
+        }
+        let Some(value) = grant::presented(request) else {
+            return false;
+        };
+        self.grants.admits(slug.as_str(), value)
+    }
+
+    /// Put a grant on an app's page, so its dialog can send a message.
+    ///
+    /// Only an HTML answer: the dialog is injected into pages, so a page that is not one has no box
+    /// to send from, and a cookie minted for it would be a capability nobody uses. A page that
+    /// already presents a grant it can still use keeps it — minting again on every load would
+    /// churn the store and hand a second tab's value to the first.
+    fn with_a_dialog_grant(&self, request: &Request, slug: &Slug, response: Response) -> Response {
+        if !response.content_type.starts_with("text/html") {
+            return response;
+        }
+        if let Some(presented) = grant::presented(request) {
+            if self.grants.admits(slug.as_str(), presented) {
+                return response;
+            }
+        }
+        match self.grants.mint(slug.as_str()) {
+            Some(value) => response.header("Set-Cookie", grant::cookie(slug.as_str(), &value)),
+            // This machine's random source failed. The page still renders and the ball still
+            // opens; the box declines to send and says why. Inventing a value would be worse.
+            None => response,
+        }
     }
 
     /// The panel: `crates/web`'s page, carrying what only this process knows.
@@ -644,6 +700,12 @@ impl Router {
     /// The one route that may answer with a connection rather than a body: an app that upgrades or
     /// streams is entitled to keep talking, and every refusal above the forward is still a body,
     /// because "the app is not running" is an answer this layer can finish.
+    ///
+    /// It is also **the one route that hands out a capability**: an HTML answer carries a cookie
+    /// naming that app's chat route ([`crate::grant`]), which is what lets the dialog in the page
+    /// send a message without the page ever holding the control token. Serving the page is the
+    /// moment the server can tell "this browser loaded the app from here" from "something else on
+    /// this machine asked", and that is why the grant is minted here rather than as its own route.
     fn app_page(&self, request: &Request) -> Answer {
         let rest = request.path.strip_prefix("/app/").unwrap_or_default();
         let slug_text = rest.split('/').next().unwrap_or_default();
@@ -713,7 +775,12 @@ impl Router {
         };
 
         match lifecycle.forwarder.forward(&target, request) {
-            // Already an answer: a body, or the connection the app is holding.
+            // Already an answer: a body, or the connection the app is holding. The body is where the
+            // dialog's capability goes — and a stream is not, because there is no page in it to put
+            // a box on.
+            Ok(Answer::Full(response)) => {
+                Answer::Full(self.with_a_dialog_grant(request, &slug, response))
+            }
             Ok(answer) => answer,
             // The app was running a moment ago and its port answers nothing now: from the browser's
             // side that is a gateway whose upstream is gone, and the useful next step is the log.
@@ -2728,5 +2795,197 @@ mod tests {
                 request.path
             );
         }
+    }
+
+    // --- The dialog's capability -------------------------------------------------------------
+
+    /// A forwarder that answers with JSON rather than a page, for the test that says no grant is
+    /// minted where there is no page to put a box on.
+    struct JsonAnswering;
+
+    impl Forwarder for JsonAnswering {
+        fn forward(&self, _target: &Target, _request: &Request) -> Result<Answer, ForwardError> {
+            Ok(Answer::Full(Response::json(200, "{}")))
+        }
+    }
+
+    /// The grant cookie a response installed, if it installed one.
+    fn set_cookie(response: &Response) -> Option<String> {
+        response
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("set-cookie"))
+            .map(|(_, value)| value.clone())
+    }
+
+    /// The value from a `Set-Cookie`, for handing back as a `Cookie`.
+    fn grant_value(cookie: &str) -> String {
+        cookie
+            .split(';')
+            .next()
+            .and_then(|pair| pair.split_once('='))
+            .map(|(_, value)| value.to_string())
+            .unwrap_or_default()
+    }
+
+    /// A `POST` that carries a cookie and a real message body instead of the token.
+    fn post_with_grant(path: &str, cookie: &str, message: &str) -> Request {
+        let body = format!("{{\"message\":\"{message}\"}}");
+        let wire = format!(
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:4270\r\nCookie: deepnest-chat={cookie}\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        // `read`, not `parse`: `parse` builds the head and leaves the body empty, and it is the
+        // body the route under test exists to read.
+        let mut reader = wire.as_bytes();
+        crate::http::read(&mut reader).unwrap()
+    }
+
+    /// A request that carries only the cookie.
+    ///
+    /// No body on purpose: `respond` refuses one on every route but two, and that refusal arrives
+    /// before authorisation — so a body here would test the wrong thing and answer `400`.
+    fn with_grant(method: &str, path: &str, cookie: &str) -> Request {
+        parse(&format!(
+            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:4270\r\n\
+             Cookie: deepnest-chat={cookie}\r\nContent-Length: 0\r\n\r\n"
+        ))
+        .unwrap()
+    }
+
+    /// Start `slug` and serve its page, returning the router and the grant the page received.
+    fn app_page_with_grant(scratch: &Scratch, slug: &str) -> (Router, String) {
+        let router = supervised_forwarding(scratch, RecordingForwarder::answering(200)).0;
+        let started = router
+            .respond(&post(&format!("/api/apps/{slug}/start")))
+            .complete();
+        assert_eq!(started.status, 200, "{}", body(&started));
+        let page = router
+            .respond(&get(&format!("/app/{slug}/"), "127.0.0.1:4270"))
+            .complete();
+        assert_eq!(page.status, 200);
+        let cookie = set_cookie(&page).expect("an app page must carry the dialog's capability");
+        (router, grant_value(&cookie))
+    }
+
+    #[test]
+    fn an_app_page_hands_out_only_the_route_the_dialog_needs() {
+        let scratch = Scratch::new("grant-page");
+        scratch.built_app("notes", "Notes");
+        let router = supervised_forwarding(&scratch, RecordingForwarder::answering(200)).0;
+        let started = router.respond(&post("/api/apps/notes/start")).complete();
+        assert_eq!(started.status, 200, "{}", body(&started));
+
+        let page = router
+            .respond(&get("/app/notes/", "127.0.0.1:4270"))
+            .complete();
+        let raw = set_cookie(&page).expect("an app page must carry the dialog's capability");
+        // The cookie names one path, carries no lifetime the browser enforces, cannot be read by
+        // the app's script, and is not sent on a cross-site request.
+        assert!(raw.contains("Path=/api/apps/notes/chat"), "{raw}");
+        assert!(raw.contains("HttpOnly"), "{raw}");
+        assert!(raw.contains("SameSite=Strict"), "{raw}");
+        assert!(!raw.contains("Max-Age"), "{raw}");
+        assert!(!raw.contains("Path=/api/apps/notes/ "), "{raw}");
+    }
+
+    #[test]
+    fn the_capability_sends_that_apps_message_and_opens_nothing_else() {
+        let scratch = Scratch::new("grant-scope");
+        scratch.built_app("notes", "Notes");
+        let (router, cookie) = app_page_with_grant(&scratch, "notes");
+
+        // It is accepted on the one route it names. There is no config file in this fixture, so
+        // `503` is the message-path answer that proves the request got past authorisation.
+        let asked = router
+            .respond(&post_with_grant("/api/apps/notes/chat", &cookie, "hello"))
+            .complete();
+        assert_eq!(asked.status, 503, "{}", body(&asked));
+
+        // And on nothing else: not the app's other verbs, not the listing, not the config.
+        for (method, path) in [
+            ("POST", "/api/apps/notes/build"),
+            ("POST", "/api/apps/notes/start"),
+            ("GET", "/api/apps"),
+            ("GET", "/api/config"),
+        ] {
+            let refused = router
+                .respond(&with_grant(method, path, &cookie))
+                .complete();
+            assert_eq!(refused.status, 401, "{method} {path}: {}", body(&refused));
+        }
+    }
+
+    #[test]
+    fn one_apps_capability_does_not_send_another_apps_message() {
+        let scratch = Scratch::new("grant-other");
+        scratch.built_app("notes", "Notes");
+        scratch.built_app("budget", "Budget");
+        let (router, cookie) = app_page_with_grant(&scratch, "notes");
+        let started = router.respond(&post("/api/apps/budget/start")).complete();
+        assert_eq!(started.status, 200, "{}", body(&started));
+
+        let refused = router
+            .respond(&post_with_grant("/api/apps/budget/chat", &cookie, "hello"))
+            .complete();
+        assert_eq!(refused.status, 401, "{}", body(&refused));
+    }
+
+    #[test]
+    fn a_message_with_no_capability_is_refused() {
+        let scratch = Scratch::new("grant-absent");
+        scratch.built_app("notes", "Notes");
+        let (router, _) = app_page_with_grant(&scratch, "notes");
+        let refused = router
+            .respond(&post_with_grant("/api/apps/notes/chat", "", "hello"))
+            .complete();
+        assert_eq!(refused.status, 401, "{}", body(&refused));
+    }
+
+    #[test]
+    fn the_token_still_opens_the_chat_route_without_any_cookie() {
+        // The grant is an addition, not a replacement: a program holding the token keeps working
+        // exactly as it did.
+        let scratch = Scratch::new("grant-token");
+        scratch.built_app("notes", "Notes");
+        let (router, _) = app_page_with_grant(&scratch, "notes");
+        let mut request = post("/api/apps/notes/chat");
+        request.body = b"{\"message\":\"hello\"}".to_vec();
+        let asked = router.respond(&request).complete();
+        assert_eq!(asked.status, 503, "{}", body(&asked));
+    }
+
+    #[test]
+    fn a_page_that_still_holds_a_good_capability_is_not_given_another() {
+        // Reloading an app page must not churn the store, and must not take the capability a
+        // second tab is already using.
+        let scratch = Scratch::new("grant-reload");
+        scratch.built_app("notes", "Notes");
+        let (router, cookie) = app_page_with_grant(&scratch, "notes");
+        let again = parse(&format!(
+            "GET /app/notes/ HTTP/1.1\r\nHost: 127.0.0.1:4270\r\n\
+             Cookie: deepnest-chat={cookie}\r\n\r\n"
+        ))
+        .unwrap();
+        let reloaded = router.respond(&again).complete();
+        assert_eq!(reloaded.status, 200);
+        assert_eq!(set_cookie(&reloaded), None, "the grant was minted twice");
+    }
+
+    #[test]
+    fn an_answer_that_is_not_a_page_gets_no_capability() {
+        // There is no box on a JSON answer, so a cookie minted for it would be a capability
+        // nobody uses — and every one of them costs an entry in the store.
+        let scratch = Scratch::new("grant-json");
+        scratch.built_app("notes", "Notes");
+        let router = supervised_forwarding(&scratch, Arc::new(JsonAnswering)).0;
+        let started = router.respond(&post("/api/apps/notes/start")).complete();
+        assert_eq!(started.status, 200, "{}", body(&started));
+        let answer = router
+            .respond(&get("/app/notes/", "127.0.0.1:4270"))
+            .complete();
+        assert_eq!(answer.status, 200);
+        assert_eq!(set_cookie(&answer), None, "JSON is not a page");
     }
 }

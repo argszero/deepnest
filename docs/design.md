@@ -335,7 +335,39 @@ The router described in §2. Its hardest requirement is not routing but **not ly
 - **A directive that has to be invented carries what `default-src` already allowed.** `default-src 'unsafe-inline'` with no `script-src` permits inline script; answering it with `script-src 'self'` would narrow the app's policy while claiming to widen it. And `'none'` is replaced rather than joined: it is only legal alone, and a policy listing it with others is one browsers resolve by ignoring it.
 - **Only a page that actually took the dialog has its policy moved.** A `text/html` answer whose body already carries one — an app that ships its own, or a second hop — keeps the policy it sent. Loosening a policy for a dialog the page does not carry is loosening it for nothing.
 
-The dialog's own assets are `crates/web`'s, served at `/dialog.js` and `/dialog.css`, and **it carries no control token**: the app's own script shares this origin, so a token written into an app's page is a token the app could read and spend. That is also why the dialog fetches nothing — everything it shows is either in the markup the gateway wrote or is the panel the browser loads itself.
+The dialog's own assets are `crates/web`'s, served at `/dialog.js` and `/dialog.css`, and **it carries no control token**: the app's own script shares this origin, so a token written into an app's page is a token the app could read and spend. Everything else it shows is either in the markup the gateway wrote or is the panel the
+browser loads itself.
+
+**The message box sends on a capability scoped to one route** (`decided in implementation`,
+2026-10-31). `POST /api/apps/<slug>/chat` wants an `Authorization` header, and the dialog has no
+token to offer — handing it one would hand it to the app's own script as well. So serving an app's
+page mints a cookie instead (`crates/deepnest::grant`), and the router honours it on that one route
+and nowhere else. Six decisions:
+
+- **`HttpOnly`, because the value must not be readable even by the page it serves.** The app's
+  script runs same-origin with the dialog, so a value it can read is a value it can copy into a
+  request of its own, or out of the page entirely.
+- **`SameSite=Strict`, because another origin must not be able to spend it.** A page on some other
+  site cannot make a request that arrives carrying it, so a link or a form posted from elsewhere
+  reaches this route holding nothing.
+- **`Path` names the app's chat route, not the app's prefix.** This is a different cookie from the
+  ones `crates/gateway`'s rewrite confines to `/app/<slug>/`, and the difference is the point: a
+  browser will not attach a prefix-confined cookie to `/api/apps/<slug>/chat`, so the narrower path
+  needs its own format rather than a reuse of that one.
+- **In memory, eight hours, and no `Max-Age`.** A session cookie, so closing the browser is enough
+  to be rid of it; the lifetime is enforced on the way back in, values are pruned on every mint, and
+  the far end is named rather than silent — a `401` tells the box the permission expired and to
+  reload, and reloading mints another.
+- **Only a `text/html` answer gets one.** The dialog is injected into pages, so an answer that is
+  not one has no box to send from, and a value minted for it would be a capability nobody holds.
+- **A page that still holds a usable value is not given another.** Minting on every load would churn
+  the store and hand a second tab's value to the first, so a request already presenting a live grant
+  keeps it.
+
+What this does not fix, said plainly rather than left to be discovered: the app's own script shares
+this origin, so it can spend that app's agent turns — that cannot be prevented while the page
+belongs to the app. What it cannot do is read the value, use it for another app, reach any route
+other than that one, change config, or start or stop anything. No grant opens those.
 
 What is **not** in this slice, each named because each is a different piece of work:
 
@@ -359,11 +391,25 @@ written for a different page cannot hide it). The split with `crates/gateway` is
 gateway decides *where* the dialog goes and what policy it needs, which is rewriting, while the ball
 is a page a person clicks in, which is this crate's.
 
-**Still to come**: the message box and the escalation approvals inside that dialog — modal here, one
-hop at a time, the approval itself the audit record (`host 20:20`). The agent is in the binary now,
-so `POST /api/apps/<slug>/chat` answers; what is missing is the half a person sees — a box that
-posts a message and a modal that answers a request for a wider tier — and both are this crate's,
-which is why the route landed first.
+**The message box is in** (`decided in implementation`, 2026-10-31), on the capability described
+above: the ball opens a panel with an input, a send button and the answer. Three things it gets
+right:
+
+- **The answer is text, never markup.** It is model output, and a refusal's message is no more
+  trustworthy than an answer is; the box sets `textContent`, and the slug it posts to is read as a
+  directory name for the same reason.
+- **Every failure names its next step.** An expired permission says to reload, because reloading is
+  what mints another; an unreachable server says deepnest may not be running; a refusal reports what
+  the route said. A box that simply went quiet would leave the user guessing which of the three
+  happened.
+- **Still no token.** The credential is the cookie the page was served with. The script never reads
+  `document.cookie` and never touches the panel's `<meta>`, so a page whose own agent rewrote it
+  cannot get a token out of the box either.
+
+**Still to come**: the escalation approvals inside that dialog — modal here, one hop at a time, the
+approval itself the audit record (`host 20:20`). The agent is in the binary, so the route answers;
+what is missing is the modal that answers a request for a wider tier, and it waits for the tier it
+would grant.
 
 ### `crates/packaging` — the single file
 
@@ -430,8 +476,8 @@ One module per cycle, each landing with its tests:
 7. `crates/gateway` + `crates/web` — the single door, the panel, the dialog. **In progress**: the
    gateway's forward, the HTTP layer under it, the WebSocket upgrade, unbuffered streaming, the panel
    and the dialog injection with its CSP rewrite are in, and the binary serves connections
-   concurrently; the dialog's message box and the escalation prompt inside it remain, and the agent
-   they talk to is now in the binary.
+   concurrently; the escalation prompt inside the dialog remains, and the agent it talks to
+   is now in the binary.
 8. `crates/skills` — loader, catalog, installer. **In progress**: the loader (two roots, two
    layouts, shadowing, skip reporting, the prompt summary), the bundled catalog, the `.state.json`
    that says which skills may be refreshed, and the install path for a self-publishing package have
