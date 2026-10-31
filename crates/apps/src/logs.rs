@@ -31,6 +31,16 @@ pub fn log_path(home: &Path, slug: &Slug) -> PathBuf {
     home.join(LOGS_DIR).join(format!("{slug}.log"))
 }
 
+/// Where a build's output goes.
+///
+/// Separate from the app's own log because the two answer different questions — "why did the build
+/// fail" and "what is the app saying now" — and one file holding both would make the tail of either
+/// unreadable. The suffix is spelled here, beside the runtime path, so whoever finds one finds the
+/// other.
+pub fn build_log_path(home: &Path, slug: &Slug) -> PathBuf {
+    home.join(LOGS_DIR).join(format!("{slug}.build.log"))
+}
+
 /// The last `lines` lines of `path`, or `None` when the file does not exist.
 ///
 /// When older lines were left out, the result says so on its own last line: a tail that silently

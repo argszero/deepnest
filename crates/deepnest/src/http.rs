@@ -271,6 +271,7 @@ impl Response {
 pub fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        201 => "Created",
         204 => "No Content",
         400 => "Bad Request",
         401 => "Unauthorized",
@@ -281,6 +282,7 @@ pub fn reason(status: u16) -> &'static str {
         411 => "Length Required",
         413 => "Content Too Large",
         500 => "Internal Server Error",
+        503 => "Service Unavailable",
         _ => "Unknown",
     }
 }

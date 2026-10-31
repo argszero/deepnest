@@ -30,21 +30,43 @@ use std::fmt::{self, Write as _};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use deepnest_apps::{Slug, StartError, State, Supervisor};
+use deepnest_apps::{
+    BuildError, Runner, Slug, StartError, State, StdRunner, Supervisor, TemplateError,
+};
 use serde_json::{json, Value};
 
 use crate::http::{Method, Request, Response};
 use crate::token::Token;
 
-/// What the router needs in order to start and stop an app: the supervisor that owns the
-/// processes, and the deepnest home whose `logs/` gets their output.
+/// What the router needs in order to make an app real: the supervisor that owns its process, the
+/// runner that builds it, and the deepnest home whose `logs/` gets both outputs.
 ///
-/// The two travel together because neither is useful alone — a supervisor with nowhere to write a
-/// log would start an app whose failures nobody could read, and the home alone owns nothing.
+/// They travel together because none is useful alone — a supervisor with nowhere to write a log
+/// would start an app whose failures nobody could read, a runner with no home would build into the
+/// void, and the home alone owns nothing.
 #[derive(Clone)]
 pub struct Lifecycle {
     pub supervisor: Arc<Supervisor>,
+    /// How a build runs its steps. A trait object, so a test can build without a toolchain.
+    pub builder: Arc<dyn Runner>,
     pub home: PathBuf,
+}
+
+impl Lifecycle {
+    /// The lifecycle the binary uses: the real supervisor and the real build runner.
+    pub fn new(supervisor: Arc<Supervisor>, home: impl Into<PathBuf>) -> Self {
+        Self {
+            supervisor,
+            builder: Arc::new(StdRunner::new()),
+            home: home.into(),
+        }
+    }
+
+    /// The same lifecycle with a different build runner.
+    pub fn with_builder(mut self, builder: Arc<dyn Runner>) -> Self {
+        self.builder = builder;
+        self
+    }
 }
 
 impl fmt::Debug for Lifecycle {
@@ -101,11 +123,20 @@ impl Router {
         home: impl Into<PathBuf>,
         dir: impl Into<PathBuf>,
     ) -> Self {
-        self.lifecycle = Some(Lifecycle {
-            supervisor,
-            home: home.into(),
-        });
+        self.lifecycle = Some(Lifecycle::new(supervisor, home));
         self.apps_dir = Some(dir.into());
+        self
+    }
+
+    /// Build apps with `builder` instead of the real toolchain runner.
+    ///
+    /// Separate from [`Router::with_lifecycle`] because it is only ever the tests that want it: the
+    /// binary builds with [`StdRunner`], and a test that needed bun and a C compiler to check which
+    /// status a failed build returns would be measuring the toolchain.
+    pub fn with_builder(mut self, builder: Arc<dyn Runner>) -> Self {
+        if let Some(lifecycle) = self.lifecycle.take() {
+            self.lifecycle = Some(lifecycle.with_builder(builder));
+        }
         self
     }
 
@@ -323,7 +354,8 @@ impl Router {
                 404,
                 error_body(&format!(
                     "`/api/apps/{rest}` is not an endpoint — the actions are \
-                     POST /api/apps/{rest}/start, /stop and /restart"
+                     POST /api/apps/{rest}/<{}>",
+                    Action::VERBS
                 )),
             );
         };
@@ -333,7 +365,8 @@ impl Router {
                 return Response::json(
                     404,
                     error_body(&format!(
-                        "`{action_text}` is not an app action — use start, stop or restart"
+                        "`{action_text}` is not an app action — use {}",
+                        Action::VERBS
                     )),
                 )
             }
@@ -362,7 +395,8 @@ impl Router {
             return Response::json(
                 503,
                 error_body(
-                    "this process cannot start or stop apps: it was started without a supervisor",
+                    "this process cannot create, build, start or stop apps: it was started \
+                     without a lifecycle",
                 ),
             );
         };
@@ -380,6 +414,41 @@ impl Router {
         // not re-checked here: an app whose manifest stopped parsing must still be stoppable, and
         // `GET /api/apps` is where its parse failure is reported.
         let dir = apps_dir.join(slug.as_str());
+
+        // `create` is the one action whose directory must *not* be there yet, so it is answered
+        // before the check the other four share.
+        if action == Action::Create {
+            let name = query_parameter(&request.query, "name").unwrap_or_default();
+            return match deepnest_apps::create(&slug, &dir, &name) {
+                Ok(created) => Response::json(
+                    201,
+                    json!({
+                        "slug": slug.as_str(),
+                        "dir": created.dir.display().to_string(),
+                        "files": created
+                            .files
+                            .iter()
+                            .map(|path| path.display().to_string())
+                            .collect::<Vec<_>>(),
+                    })
+                    .to_string(),
+                ),
+                // Not a fault in deepnest: the name is taken, and taking it would destroy what is
+                // already there.
+                Err(TemplateError::Occupied { .. }) => Response::json(
+                    409,
+                    error_body(&format!(
+                        "`{slug}` already exists in {} — an app directory is never overwritten",
+                        apps_dir.display()
+                    )),
+                ),
+                Err(error) => Response::json(
+                    500,
+                    error_body(&format!("`{slug}` could not be created: {error}")),
+                ),
+            };
+        }
+
         if !dir.is_dir() {
             return Response::json(
                 404,
@@ -387,9 +456,13 @@ impl Router {
             );
         }
 
-        let log = deepnest_apps::log_path(&lifecycle.home, &slug);
         match action {
-            Action::Start => started(&slug, lifecycle.supervisor.start(&slug, &dir, log)),
+            // Answered above, before the directory check it must not be subject to.
+            Action::Create => unreachable!("create is answered before this match"),
+            Action::Start => {
+                let log = deepnest_apps::log_path(&lifecycle.home, &slug);
+                started(&slug, lifecycle.supervisor.start(&slug, &dir, log))
+            }
             Action::Stop => match lifecycle.supervisor.stop(&slug) {
                 Ok(state) => state_body(&slug, &state),
                 Err(error) => Response::json(
@@ -397,7 +470,35 @@ impl Router {
                     error_body(&format!("`{slug}` could not be stopped: {error}")),
                 ),
             },
-            Action::Restart => started(&slug, lifecycle.supervisor.restart(&slug, &dir, log)),
+            Action::Restart => {
+                let log = deepnest_apps::log_path(&lifecycle.home, &slug);
+                started(&slug, lifecycle.supervisor.restart(&slug, &dir, log))
+            }
+            Action::Build => {
+                let log = deepnest_apps::build_log_path(&lifecycle.home, &slug);
+                match deepnest_apps::build(&dir, log, lifecycle.builder.as_ref()) {
+                    Ok(built) => Response::json(
+                        200,
+                        json!({
+                            "slug": slug.as_str(),
+                            "binary": built.binary.display().to_string(),
+                            "log": built.log.display().to_string(),
+                        })
+                        .to_string(),
+                    ),
+                    // A directory that is not an app is the same reading as an app that is not
+                    // there: the manifest is what makes it one.
+                    Err(error @ BuildError::NotApp { .. }) => {
+                        Response::json(404, error_body(&error.to_string()))
+                    }
+                    // A build that failed is a build that failed, however it failed: the report
+                    // names the step and the file the step's output is in.
+                    Err(error) => Response::json(
+                        500,
+                        json!({ "slug": slug.as_str(), "error": error.to_string() }).to_string(),
+                    ),
+                }
+            }
         }
     }
 
@@ -448,6 +549,10 @@ const PANEL: &str = r#"<!doctype html>
 /// The three state changes an app has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Action {
+    /// Write the files that make a directory an app — the only action whose directory must be new.
+    Create,
+    /// Run the toolchain over those files.
+    Build,
     Start,
     Stop,
     Restart,
@@ -456,11 +561,79 @@ enum Action {
 impl Action {
     fn parse(text: &str) -> Option<Self> {
         match text {
+            "create" => Some(Self::Create),
+            "build" => Some(Self::Build),
             "start" => Some(Self::Start),
             "stop" => Some(Self::Stop),
             "restart" => Some(Self::Restart),
             _ => None,
         }
+    }
+
+    /// The verbs, for a refusal that tells the caller what would have worked.
+    const VERBS: &str = "create, build, start, stop or restart";
+}
+
+/// The value of one query parameter, percent-decoded.
+///
+/// This layer reads no request body, so what a route has to be told arrives in the URL. `+` is a
+/// space because that is what a browser sends for one in a query, and a malformed escape is left as
+/// written rather than dropped: the name it produces then fails the manifest's non-blank check,
+/// which is a reportable failure instead of a silently mangled name.
+fn query_parameter(query: &str, name: &str) -> Option<String> {
+    for pair in query.split('&') {
+        let (key, value) = match pair.split_once('=') {
+            Some(pair) => pair,
+            None => (pair, ""),
+        };
+        if key == name {
+            return Some(percent_decode(value));
+        }
+    }
+    None
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => {
+                out.push(b' ');
+                index += 1;
+            }
+            b'%' => {
+                let high = bytes.get(index + 1).copied().and_then(hex_value);
+                let low = bytes.get(index + 2).copied().and_then(hex_value);
+                match (high, low) {
+                    (Some(high), Some(low)) => {
+                        out.push(high * 16 + low);
+                        index += 3;
+                    }
+                    _ => {
+                        out.push(b'%');
+                        index += 1;
+                    }
+                }
+            }
+            other => {
+                out.push(other);
+                index += 1;
+            }
+        }
+    }
+    // A caller's name is text, not bytes: anything that is not valid UTF-8 becomes the replacement
+    // character rather than refusing the whole request.
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -843,11 +1016,69 @@ mod tests {
 
     /// The router, pointed at a scratch home, able to start and stop what is in it.
     fn supervised(scratch: &Scratch) -> Router {
+        supervised_with(scratch, Arc::new(FakeBuilder::succeeds()))
+    }
+
+    /// The router with the build runner a test chooses.
+    fn supervised_with(scratch: &Scratch, builder: Arc<dyn deepnest_apps::Runner>) -> Router {
         let supervisor = Arc::new(deepnest_apps::Supervisor::with_parts(
             Box::new(FakeSpawner),
             Box::new(AlwaysReady),
         ));
-        router().with_lifecycle(supervisor, scratch.base.clone(), scratch.apps())
+        router()
+            .with_lifecycle(supervisor, scratch.base.clone(), scratch.apps())
+            .with_builder(builder)
+    }
+
+    /// A build runner that records the steps it was asked to run.
+    ///
+    /// The steps are the app crate's business (`deepnest-apps` tests them against their own fake);
+    /// what this module tests is which request gets which answer, so the runner only has to succeed
+    /// or fail on demand.
+    struct FakeBuilder {
+        steps: std::sync::Mutex<Vec<String>>,
+        succeed: bool,
+    }
+
+    impl FakeBuilder {
+        fn succeeds() -> Self {
+            Self {
+                steps: std::sync::Mutex::new(Vec::new()),
+                succeed: true,
+            }
+        }
+
+        fn fails() -> Self {
+            Self {
+                steps: std::sync::Mutex::new(Vec::new()),
+                succeed: false,
+            }
+        }
+
+        fn steps(&self) -> Vec<String> {
+            self.steps.lock().unwrap().clone()
+        }
+    }
+
+    impl deepnest_apps::Runner for FakeBuilder {
+        fn run(
+            &self,
+            step: &deepnest_apps::Step,
+            _log: &std::path::Path,
+        ) -> std::io::Result<deepnest_apps::Outcome> {
+            self.steps.lock().unwrap().push(step.label.to_string());
+            Ok(if self.succeed {
+                deepnest_apps::Outcome {
+                    code: Some(0),
+                    detail: "exited with 0".to_string(),
+                }
+            } else {
+                deepnest_apps::Outcome {
+                    code: Some(101),
+                    detail: "exited with 101".to_string(),
+                }
+            })
+        }
     }
 
     fn post(path: &str) -> Request {
@@ -964,22 +1195,28 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_action_is_not_found_and_the_refusal_lists_the_three_that_exist() {
+    fn an_unknown_action_is_not_found_and_the_refusal_lists_the_five_that_exist() {
         let scratch = Scratch::new("life-action");
         scratch.built_app("notes", "Notes");
         let router = supervised(&scratch);
 
-        let unknown = router.respond(&post("/api/apps/notes/build"));
+        let unknown = router.respond(&post("/api/apps/notes/delete"));
         assert_eq!(unknown.status, 404);
         assert!(
-            body(&unknown).contains("start, stop or restart"),
+            body(&unknown).contains("create, build, start, stop or restart"),
             "{:?}",
             unknown
         );
 
+        // A slug with no action at all is the same refusal one level up: it names the shape that
+        // would have worked instead of leaving the caller to guess.
         let bare = router.respond(&post("/api/apps/notes"));
         assert_eq!(bare.status, 404);
-        assert!(body(&bare).contains("/start"), "{:?}", bare);
+        assert!(
+            body(&bare).contains("create, build, start, stop or restart"),
+            "{:?}",
+            bare
+        );
     }
 
     #[test]
@@ -1001,9 +1238,156 @@ mod tests {
         let response = router.respond(&post("/api/apps/notes/start"));
         assert_eq!(response.status, 503);
         assert!(
-            body(&response).contains("without a supervisor"),
+            body(&response).contains("without a lifecycle"),
             "{:?}",
             response
+        );
+    }
+
+    // --- creating and building --------------------------------------------------------------
+
+    fn post_query(path: &str, query: &str) -> Request {
+        parse(&format!(
+            "POST {path}?{query} HTTP/1.1\r\nHost: 127.0.0.1:4270\r\nauthorization: bearer {}\r\n",
+            "a".repeat(64)
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_create_writes_an_app_the_listing_then_shows() {
+        let scratch = Scratch::new("create");
+        let router = supervised(&scratch);
+
+        let created = router.respond(&post_query("/api/apps/notes/create", "name=Notes"));
+        assert_eq!(created.status, 201, "{:?}", created);
+        let created_body = body(&created);
+        assert!(
+            created_body.contains("\"slug\":\"notes\""),
+            "{created_body}"
+        );
+        assert!(created_body.contains("Cargo.toml"), "{created_body}");
+
+        // The listing agrees with what the create said it wrote.
+        let listing = body(&router.respond(&authorized_get("/api/apps")));
+        assert!(listing.contains("\"slug\":\"notes\""), "{listing}");
+        assert!(listing.contains("\"name\":\"Notes\""), "{listing}");
+    }
+
+    #[test]
+    fn a_create_decodes_the_name_it_was_given() {
+        // The name arrives in the URL because this layer reads no request body; a space and a
+        // non-ASCII letter have to survive the trip.
+        let scratch = Scratch::new("create-encoded");
+        let router = supervised(&scratch);
+        let response = router.respond(&post_query(
+            "/api/apps/notes/create",
+            "name=My%20Notes%20%E2%80%94%20v2",
+        ));
+        assert_eq!(response.status, 201, "{:?}", response);
+
+        let listing = body(&router.respond(&authorized_get("/api/apps")));
+        assert!(listing.contains("My Notes — v2"), "{listing}");
+    }
+
+    #[test]
+    fn creating_an_app_that_exists_is_a_conflict_and_changes_nothing() {
+        let scratch = Scratch::new("create-taken");
+        scratch.app("notes", "Notes");
+        let before =
+            std::fs::read_to_string(scratch.apps().join("notes").join("deepnest.toml")).unwrap();
+
+        let response = supervised(&scratch).respond(&post_query("/api/apps/notes/create", ""));
+        assert_eq!(response.status, 409, "{:?}", response);
+        assert!(
+            body(&response).contains("never overwritten"),
+            "{:?}",
+            response
+        );
+
+        let after =
+            std::fs::read_to_string(scratch.apps().join("notes").join("deepnest.toml")).unwrap();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn a_build_runs_the_steps_and_reports_the_binary() {
+        let scratch = Scratch::new("build-ok");
+        scratch.built_app("notes", "Notes");
+        let builder = Arc::new(FakeBuilder::succeeds());
+        let response =
+            supervised_with(&scratch, builder.clone()).respond(&post("/api/apps/notes/build"));
+
+        assert_eq!(response.status, 200, "{:?}", response);
+        let answer = body(&response);
+        assert!(answer.contains("target/release/app"), "{answer}");
+        assert!(answer.contains(".build.log"), "{answer}");
+        assert_eq!(builder.steps().len(), 3, "{:?}", builder.steps());
+    }
+
+    #[test]
+    fn a_build_that_fails_names_the_step_and_the_log() {
+        let scratch = Scratch::new("build-fail");
+        scratch.built_app("notes", "Notes");
+        let response = supervised_with(&scratch, Arc::new(FakeBuilder::fails()))
+            .respond(&post("/api/apps/notes/build"));
+
+        assert_eq!(response.status, 500, "{:?}", response);
+        let answer = body(&response);
+        assert!(answer.contains("bun install"), "{answer}");
+        assert!(answer.contains("notes.build.log"), "{answer}");
+    }
+
+    #[test]
+    fn building_an_app_that_is_not_there_is_not_found() {
+        let scratch = Scratch::new("build-missing");
+        let response = supervised(&scratch).respond(&post("/api/apps/ghost/build"));
+        assert_eq!(response.status, 404, "{:?}", response);
+    }
+
+    #[test]
+    fn a_directory_that_is_not_an_app_cannot_be_built() {
+        // A directory with no manifest is the wrong directory, not a build that failed.
+        let scratch = Scratch::new("build-not-app");
+        std::fs::create_dir_all(scratch.apps().join("junk")).unwrap();
+        let response = supervised(&scratch).respond(&post("/api/apps/junk/build"));
+        assert_eq!(response.status, 404, "{:?}", response);
+        assert!(body(&response).contains("not an app"), "{:?}", response);
+    }
+
+    #[test]
+    fn create_and_build_need_the_token_like_every_other_api_route() {
+        let scratch = Scratch::new("create-token");
+        let router = supervised(&scratch);
+        for path in ["/api/apps/notes/create", "/api/apps/notes/build"] {
+            let request =
+                parse(&format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1:4270\r\n")).unwrap();
+            assert_eq!(router.respond(&request).status, 401, "{path}");
+        }
+    }
+
+    #[test]
+    fn a_query_parameter_is_read_once_and_decoded() {
+        assert_eq!(
+            query_parameter("name=Notes&other=1", "name"),
+            Some("Notes".to_string())
+        );
+        assert_eq!(query_parameter("other=1", "name"), None);
+        assert_eq!(query_parameter("", "name"), None);
+        // `+` is a space in a query, and `%20` is the same space spelled differently.
+        assert_eq!(
+            query_parameter("name=My+Notes", "name"),
+            Some("My Notes".to_string())
+        );
+        assert_eq!(
+            query_parameter("name=My%20Notes", "name"),
+            Some("My Notes".to_string())
+        );
+        // A malformed escape is left as written: the name it produces then fails the manifest's
+        // non-blank check, which is reportable, instead of quietly becoming something else.
+        assert_eq!(
+            query_parameter("name=100%", "name"),
+            Some("100%".to_string())
         );
     }
 
