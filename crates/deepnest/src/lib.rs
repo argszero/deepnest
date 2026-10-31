@@ -29,6 +29,7 @@
 
 pub mod chat;
 pub mod config;
+pub mod grant;
 pub mod home;
 pub mod model;
 pub mod router;

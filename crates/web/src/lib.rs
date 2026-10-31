@@ -446,6 +446,76 @@ mod tests {
     }
 
     #[test]
+    fn the_dialog_sends_a_message_and_holds_no_credential_of_its_own() {
+        // The box exists, and the one route it calls is the chat route whose path the server scopes
+        // the cookie to. What it must never contain is the token: the app's script shares this
+        // origin, so a token here is a token the app can read and spend everywhere.
+        assert!(DIALOG_SCRIPT.contains("/api/apps/"), "the box never posts");
+        assert!(
+            DIALOG_SCRIPT.contains("/chat"),
+            "the box posts to some other route"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("credentials"),
+            "the cookie rides on that attribute"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("same-origin"),
+            "any other credentials mode stops the cookie being sent"
+        );
+        assert!(DIALOG_SCRIPT.contains(r#""Content-Type": "application/json""#));
+        assert!(
+            !DIALOG_SCRIPT.contains("deepnest-token"),
+            "the dialog must not read the panel's token meta"
+        );
+        assert!(
+            !DIALOG_SCRIPT.contains("authorization"),
+            "the dialog must not carry the control token"
+        );
+    }
+
+    #[test]
+    fn the_dialog_says_what_went_wrong_instead_of_failing_silently() {
+        // Three failures a user can hit, each with a different next step, and the box has to name
+        // the step: the grant expired, the server is gone, and the answer was a refusal.
+        assert!(DIALOG_SCRIPT.contains("reload the page"));
+        assert!(
+            DIALOG_SCRIPT.contains("result.status === 401"),
+            "the expired capability has to be recognised by its own status: without that test the \
+             box falls through to the server's raw refusal and never names the reload that mints \
+             another grant"
+        );
+        assert!(DIALOG_SCRIPT.contains("did not reach deepnest"));
+        assert!(DIALOG_SCRIPT.contains("result.body.error"));
+    }
+
+    #[test]
+    fn the_dialog_builds_its_box_without_inner_html() {
+        // The agent's answer is model output, and a slug is a directory name: both are text.
+        // The assignment forms, not the bare word: this file's own header names `innerHTML` while
+        // explaining why it is not used, and an assertion on the word would fail on that sentence
+        // rather than on a mistake.
+        assert!(
+            !DIALOG_SCRIPT.contains(".innerHTML"),
+            "text from a model or a filesystem must not become markup"
+        );
+        assert!(
+            !DIALOG_SCRIPT.contains("innerHTML ="),
+            "text from a model or a filesystem must not become markup"
+        );
+        assert!(DIALOG_SCRIPT.contains("textContent"));
+        // And the stylesheet has to style the box it builds: `all: initial` leaves a textarea
+        // with no border and no size, so a box with no rule would be invisible.
+        for selector in [
+            "#deepnest-dialog-input",
+            "#deepnest-dialog-send",
+            "#deepnest-dialog-answer",
+        ] {
+            assert!(DIALOG_STYLE.contains(selector), "{selector} is unstyled");
+        }
+    }
+
+    #[test]
     fn the_script_calls_the_routes_the_server_has() {
         // Cheap guard against a script and a router drifting apart: every path the script fetches
         // is one this repository serves.
