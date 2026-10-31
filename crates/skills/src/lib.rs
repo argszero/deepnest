@@ -1,29 +1,42 @@
 //! Anthropic Agent Skills, as deepnest reads them.
 //!
 //! A skill is a Markdown file with a header, holding instructions the agent can choose to follow.
-//! This crate is the half that reads them: [`loader`] finds the files and [`frontmatter`] reads
-//! their headers. The catalog that ships inside the binary, and the installer that fetches what the
-//! catalog names, are the other half and are not written yet.
+//! This crate is the half that reads them and the half that knows which ones exist: [`loader`] finds
+//! the files and [`frontmatter`] reads their headers, [`catalog`] holds the list of optional skills
+//! that ship inside the binary, and [`state`] records which installed skills deepnest may refresh.
+//! Fetching what the catalog names — running a package that publishes its own skill file, and
+//! comparing releases — is the one piece not written, and [`catalog`] says why it can wait.
 //!
 //! The rule the whole crate is shaped by is **progressive disclosure**: only a skill's name, its
 //! one-line description and the path to its file reach the prompt. The instructions are read by the
 //! agent, with its own `read` tool, when it decides the skill is relevant — which is the difference
 //! between a dozen skills costing a paragraph and a dozen skills crowding out the conversation.
 //!
-//! Two decisions worth knowing before reading the code:
+//! Four decisions worth knowing before reading the code:
 //!
 //! - **Anything that is not a usable skill is reported, not dropped.** A directory with no
-//!   `SKILL.md`, a header without a `description`, a symlink: each is a line the user can act on
-//!   rather than an absence they would have to guess at.
+//!   `SKILL.md`, a header without a `description`, a symlink, a catalog entry that cannot be
+//!   fetched whole: each is a line the user can act on rather than an absence they would have to
+//!   guess at.
 //! - **A skill is instructions, not a permission.** Nothing here is signed or trusted, because
 //!   nothing here can widen the sandbox: whatever a skill says, the agent does through the same
 //!   fence as always.
+//! - **The catalog is an ordinary skill file**, not a second format with its own reader — the
+//!   loader picks it up like any other, and its machine-readable part is a `skills:` block in the
+//!   header the same parser already reads.
+//! - **Only `managed: true` may be refreshed.** A skill the user put in place is theirs; that is
+//!   enforced by handing an updater the managed list and nothing else, and a state file missing the
+//!   flag reads as unmanaged.
 
+pub mod catalog;
 pub mod frontmatter;
 pub mod loader;
+pub mod state;
 
+pub use catalog::{Catalog, Entry, Rejected, BUNDLED, CATALOG_FILE};
 pub use frontmatter::{Frontmatter, NoFrontmatter};
 pub use loader::{
     app_root, load, summary, user_root, Loaded, Skill, Skipped, Source, APP_DIR, SKILL_FILE,
     USER_DIR,
 };
+pub use state::{Installed, State, STATE_FILE};

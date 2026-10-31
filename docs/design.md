@@ -199,6 +199,17 @@ Loader reads two roots (`~/.deepnest/skills/`, `<app>/.agent/skills/`) and both 
 
 The catalog that ships inside the binary is itself an ordinary skill file carrying a `skills:` list (`name`, `description`, `repo`, `install`, `dest`, `check`); `dest` points at `~/.deepnest/skills/`. `browser-harness` and `baoyu-design` are the first two entries (`host 20:26`). Installation state lives in `.state.json`: only `managed: true` entries may be refreshed by the updater; anything else is the user's and is never touched (`impl, ref: emrg/skills/installer.py`).
 
+**What has landed since: the catalog and the state file** (`decided in implementation`, 2026-10-31). `catalog` holds the bundled list and reads it back; `state` records which installed skills deepnest may refresh. Four decisions came with them:
+
+- **The catalog is an ordinary skill file, and that is the point.** The loader picks it up like any other skill, so the agent sees one line saying a catalog exists; the machine-readable part is a `skills:` block in the same header `frontmatter` already parses. The alternative — a second format with its own schema, its own reader and its own line in the prompt — is a whole mechanism to say what one file says, and the reference implementation's registry is that mechanism (`impl, ref: emrg/skills/registry.py`).
+- **An entry needs a `name` and a `description`; the other four fields say how deepnest would fetch it.** Not every recommended skill can be fetched: `baoyu-design` is a folder of instructions with no published source, so its entry has no `repo` and the catalog calls it **recommended only** rather than inventing a source for it. An entry that names a `repo` and not an `install` is a mistake in the file and is reported — "I know where this lives and not how it gets here" is a gap, not a decision.
+- **Nothing in the catalog is dropped in silence.** The reference implementation requires all six fields and skips an entry missing one (`impl, ref: emrg/skills/registry.py`); here a missing `description`, a `repo` without an `install` and an entry with no `name` are each a `Rejected` with its reason, because an entry that vanishes looks exactly like a catalog that never had it.
+- **`managed` is the only gate, and it fails closed.** `State::managed` is the only list an updater is handed and there is no all-skills iterator to reach for by mistake; refreshing an unmanaged skill is refused rather than quietly promoting it; a state file whose entry has no `managed` field reads as unmanaged, because a file of unknown provenance is not permission; unknown keys survive a round trip so an older binary cannot delete what a newer one wrote. Both files are written through a temporary neighbour and a rename.
+
+**The bundled catalog is a floor, not a source of truth.** `catalog::ensure` writes it only when the file is absent, which covers a fresh install and an upgrade whose file was deleted, and never overwrites a catalog the user curated.
+
+**Still to come: the fetch itself.** Running a package that publishes its own skill file and comparing releases both need things the binary does not have yet — a subprocess for the first, an HTTP client for the second — and both belong behind the agent, which is the thing that would act on an install. The decision-then-side-effect boundary is drawn where the decisions are testable offline: what is installable, what may be refreshed, and what a failed install leaves behind are all answered above, and the two side effects are the installer's remaining half.
+
 ### `crates/apps` — app lifecycle
 
 Template, build, start, stop, restart, logs, port allocation. The template injects **WAL + `busy_timeout` + single-writer discipline**; it is not left to each generated app to decide, because the measurement showed a second writer failing immediately at `timeout=0` and succeeding after 1817 ms with `busy_timeout=5000`.
@@ -348,9 +359,10 @@ One module per cycle, each landing with its tests:
    and the dialog injection with its CSP rewrite are in, and the binary serves connections
    concurrently; the escalation prompt inside the dialog remains, and it needs the agent in the
    binary first.
-8. `crates/skills` — loader, catalog, installer. **In progress**: the loader has landed (two
-   roots, two layouts, shadowing, skip reporting, and the prompt summary); the catalog that ships in
-   the binary and the installer that fetches what it names remain.
+8. `crates/skills` — loader, catalog, installer. **In progress**: the loader (two roots, two
+   layouts, shadowing, skip reporting, the prompt summary), the bundled catalog and the `.state.json`
+   that says which skills may be refreshed have landed; the installer that fetches what the catalog
+   names — a subprocess for a self-publishing package, an HTTP client for release tags — remains.
 9. `crates/packaging` — payload, first-run unpack, signing.
 
 ## 7. Non-negotiables
