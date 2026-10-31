@@ -7,9 +7,14 @@
 //! and it exits reporting the address of the instance that already owns the port instead of
 //! pretending to start.
 //!
-//! What this build does not do, and says so rather than half-doing: it does not open the browser.
-//! The panel it would open is real now, so opening it is worth doing rather than pointless — but it
-//! is a decision about the user's desktop, and the URL is printed for whoever lands that.
+//! **A start ends by opening the panel in the desktop's browser** ([`deepnest::open`]): the
+//! README's first sentence is "one double-click, one page in your browser", and this is the half of
+//! it a terminal cannot do by itself. It comes after the banner, so every line this run has to say
+//! about itself is on screen before the desktop is asked; a second start opens the address it found
+//! already running, because a second double-click is a person asking for that page; and it goes
+//! through a seam whose switch is `--no-open`, so the end-to-end tests do not open a window on the
+//! machine running them. A browser that will not take the URL is one line on stderr, not a failed
+//! start — the panel is this program's whole interface and the address is printed either way.
 //!
 //! The one piece of state this process owns beyond the port is the **supervisor**: the apps it
 //! started. It is built here and lives as long as the process, and it is deliberately *not* run
@@ -26,6 +31,7 @@ use std::sync::Arc;
 use std::thread;
 
 use deepnest::config::{self, ConfigError};
+use deepnest::open::{Desktop, Opening};
 use deepnest::router::Lifecycle;
 use deepnest::server::{self, BindError, ServerOptions, StartError};
 use deepnest::token::{self, TokenError};
@@ -35,7 +41,8 @@ const USAGE: &str = "\
 deepnest — local-first app generator
 
 Usage:
-  deepnest                start deepnest and serve http://127.0.0.1:4270/
+  deepnest                start deepnest, serve http://127.0.0.1:4270/, and open it
+  deepnest --no-open      start deepnest and print the address without opening anything
   deepnest --help         this text
   deepnest --version      print the version
 
@@ -79,8 +86,8 @@ impl Failure {
 }
 
 fn run() -> Result<(), Failure> {
-    match arguments()? {
-        Action::Run => serve(),
+    match arguments(std::env::args().skip(1))? {
+        Action::Run(opening) => serve(opening),
         Action::Help => {
             print!("{USAGE}");
             Ok(())
@@ -92,18 +99,33 @@ fn run() -> Result<(), Failure> {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum Action {
-    Run,
+    Run(Opening),
     Help,
     Version,
 }
 
-fn arguments() -> Result<Action, Failure> {
-    let mut action = Action::Run;
-    for argument in std::env::args().skip(1) {
+/// What this command line asks for.
+///
+/// The arguments are taken as an iterator rather than read from the process, so that what a flag
+/// means is a test of this function instead of a test that has to start a program.
+fn arguments<I>(arguments: I) -> Result<Action, Failure>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut action = Action::Run(Opening::Browser);
+    for argument in arguments {
         match argument.as_str() {
             "--help" | "-h" => action = Action::Help,
             "--version" | "-V" => action = Action::Version,
+            // Kept as its own flag rather than folded into the action because it is not one: a
+            // person can ask for help and also not want a window, and what they get is the help.
+            "--no-open" => {
+                if let Action::Run(_) = action {
+                    action = Action::Run(Opening::Never);
+                }
+            }
             other => {
                 return Err(Failure::new(
                     2,
@@ -115,7 +137,7 @@ fn arguments() -> Result<Action, Failure> {
     Ok(action)
 }
 
-fn serve() -> Result<(), Failure> {
+fn serve(opening: Opening) -> Result<(), Failure> {
     let home = home().ok_or_else(|| {
         Failure::new(
             1,
@@ -162,9 +184,14 @@ fn serve() -> Result<(), Failure> {
 
     let running = match server::start(options) {
         Ok(server) => server,
-        // The second instance is not an error. It says where the first one is and leaves.
+        // The second instance is not an error. It says where the first one is and leaves — and it
+        // opens that address, because a second double-click is a person asking for the page that is
+        // already being served, and answering it with a line of text on a terminal nobody is looking
+        // at is how the second click comes to look like nothing happened.
         Err(StartError::Bind(BindError::InUse { addr, .. })) => {
-            println!("deepnest is already running: http://{addr}/");
+            let url = format!("http://{addr}/");
+            println!("deepnest is already running: {url}");
+            report(opening.show(&Desktop, &url), &url);
             return Ok(());
         }
         Err(error) => return Err(Failure::new(1, error.to_string())),
@@ -211,11 +238,27 @@ fn serve() -> Result<(), Failure> {
 
     let _ = std::io::stdout().flush();
 
+    // Everything this run had to say about itself is printed and flushed, so the address is on
+    // screen before the desktop is asked for a window. The listener is already accepting by now:
+    // `server::start` returned above, so the page a browser lands on is served rather than raced.
+    report(opening.show(&Desktop, &running.url()), &running.url());
+
     // The listener runs on its own thread; this one waits for the process to be ended. There is
     // no shutdown flag to set from outside: an interrupt ends the process, and the operating
     // system releases the port — which is the same admission the next start relies on.
     loop {
         thread::park();
+    }
+}
+
+/// A browser that would not open is worth one line and not a failed start.
+///
+/// The panel is this program's whole interface, so taking the start away would take the interface
+/// away too — and the address is printed in either case, which is the only thing a session with no
+/// desktop can act on.
+fn report(outcome: Result<(), deepnest::open::OpenError>, url: &str) {
+    if let Err(error) = outcome {
+        eprintln!("deepnest: the panel is at {url} — {error}");
     }
 }
 
@@ -246,4 +289,66 @@ fn token_failure(error: TokenError) -> Failure {
         1,
         format!("{error}\ndeepnest cannot start without a control token"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What this command line asks for — the argument list an iterator would have produced.
+    fn parse(given: &[&str]) -> Result<Action, Failure> {
+        arguments(given.iter().map(|argument| argument.to_string()))
+    }
+
+    #[test]
+    fn a_bare_start_opens_the_panel() {
+        // The README's promise, at the only place it can be kept: no flag means a browser window.
+        assert_eq!(parse(&[]).ok(), Some(Action::Run(Opening::Browser)));
+    }
+
+    #[test]
+    fn the_no_open_flag_starts_without_opening_anything() {
+        // What the end-to-end tests pass so that running the suite does not open a window on the
+        // machine running it.
+        assert_eq!(
+            parse(&["--no-open"]).ok(),
+            Some(Action::Run(Opening::Never))
+        );
+    }
+
+    #[test]
+    fn the_opening_flag_does_not_take_the_next_argument_with_it() {
+        // It carries no value, so an argument after it is still read as one.
+        assert_eq!(
+            parse(&["--no-open", "--version"]).ok(),
+            Some(Action::Version)
+        );
+    }
+
+    #[test]
+    fn asking_for_help_wins_over_not_wanting_a_window() {
+        // Both orders, because "help and no window" is one request however it is spelled.
+        for given in [["--no-open", "--help"], ["--help", "--no-open"]] {
+            assert_eq!(
+                parse(&given).ok(),
+                Some(Action::Help),
+                "{given:?} is a request for help"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_argument_is_refused_by_name() {
+        let failure = parse(&["--nope"]).expect_err("an unknown argument is refused");
+        assert_eq!(failure.code, 2, "a command line error is a usage error");
+        assert!(failure.message.contains("--nope"), "{}", failure.message);
+    }
+
+    #[test]
+    fn the_usage_text_names_the_flag_that_stops_the_browser() {
+        // The flag is the switch the e2e harness depends on, so it has to be discoverable without
+        // reading the source.
+        assert!(USAGE.contains("--no-open"), "{USAGE}");
+        assert!(USAGE.contains("open"), "{USAGE}");
+    }
 }
