@@ -8,8 +8,8 @@
 //! it later (`impl, ref: emrg/skills/installer.py`).
 //!
 //! The `check: github_release` half is **not** here. It answers a different question — is there a
-//! newer one? — with a different mechanism, an HTTP client that this crate does not have and does
-//! not want for this. The question this module answers is asked first, by the user, once.
+//! newer one? — at a different time, and it lives in [`crate::release`]. The question this module
+//! answers is asked first, by the user, once.
 //!
 //! # What this refuses, and why refusing is most of the work
 //!
@@ -37,9 +37,12 @@
 //! does nothing; and a `dest` that is neither absolute nor under `~` has no defined meaning here,
 //! so it is refused instead of resolved against whatever directory the process was started in.
 //!
-//! **No version is recorded.** The reference writes `version: "unknown"` when its release check
-//! fails; the state model already has a better answer for "the source did not say" — the field is
-//! absent — and there is no release check in this slice to ask.
+//! **No version is recorded here.** The reference writes `version: "unknown"` when its release check
+//! fails; the state model has a better answer for "the source did not say" — the field is absent.
+//! A version arrives the only way one can be known: [`crate::release::check`] reads what the package
+//! published, and the caller that refreshes records it. Running `<program> skill` says nothing about
+//! which version it is publishing, so guessing one here would be inventing the number the whole
+//! comparison later depends on.
 //!
 //! **The real publisher waits as long as the program takes.** A package that hangs hangs the caller
 //! that waits on it. That is the honest limit of this slice: nothing in the binary calls this yet,
