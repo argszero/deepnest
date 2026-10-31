@@ -166,7 +166,7 @@ impl Policy {
     /// Whether `path` names one of the protected files.
     ///
     /// Identity first (`same_file`: device and inode on unix, volume serial and file index on
-    /// Windows, so a hard link or a symlink is caught),
+    /// Windows — so a hard link or a symlink is caught on both),
     /// spelling second — because a protected file that does not exist yet has no identity, and
     /// a mode that could write it once it appears is not a protected file at all.
     pub fn is_protected(&self, path: impl AsRef<Path>) -> bool {
