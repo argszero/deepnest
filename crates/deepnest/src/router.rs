@@ -257,16 +257,17 @@ impl Router {
 
         let path = request.path.as_str();
 
-        // One route reads a body, and every other route refuses one by name. Reading it and then
-        // routing anyway would answer "done" to a request whose content was never looked at, which
-        // is the one answer a server must not give about something it did not read.
+        // Three routes read a body, and every other route refuses one by name. Reading it and
+        // then routing anyway would answer "done" to a request whose content was never looked at,
+        // which is the one answer a server must not give about something it did not read.
         if !request.body.is_empty() && !takes_a_body(path) {
             return Answer::Full(Response::text(
                 400,
                 format!(
-                    "{path} takes no request body — send none, or send one to {CONFIG_PATH} or \
-                     POST /api/apps/<slug>/{}\n",
-                    chat::ACTION
+                    "{path} takes no request body — send none, or send one to {CONFIG_PATH}, \
+                     POST /api/apps/<slug>/{} or POST /api/apps/<slug>/{}\n",
+                    chat::ACTION,
+                    escalation::ACTION
                 ),
             ));
         }
@@ -1336,13 +1337,13 @@ fn unauthorized() -> Response {
     .header("WWW-Authenticate", "Bearer realm=\"deepnest\"")
 }
 
-/// The one route that reads a request body.
 /// The routes that read a request body, and no others.
 ///
-/// Two, for one reason: `/api/config` carries an API key and `chat` carries what the user typed,
-/// and neither belongs in a URL — it is written into the browser's history and into whatever logs
-/// the URL. Everything else refuses a body by name rather than routing past it, because reading a
-/// request's content and then ignoring it is answering about something that was never looked at.
+/// Three, for one reason: `/api/config` carries an API key, `chat` carries what the user typed, and
+/// `escalation` carries the answer to a question a turn is waiting on. None belongs in a URL — it
+/// is written into the browser's history and into whatever logs the URL. Everything else refuses a
+/// body by name rather than routing past it, because reading a request's content and then ignoring
+/// it is answering about something that was never looked at.
 fn takes_a_body(path: &str) -> bool {
     path == CONFIG_PATH
         || path
@@ -2397,7 +2398,7 @@ mod tests {
     }
 
     #[test]
-    fn the_chat_route_reads_a_body_and_every_other_route_still_refuses_one() {
+    fn the_routes_that_read_a_body_are_named_and_every_other_route_refuses_one() {
         let scratch = Scratch::new("chat-body");
         scratch.app("notes", "Notes");
         let router = supervised(&scratch).with_config_path(scratch.base.join("config.toml"));
@@ -2420,6 +2421,15 @@ mod tests {
             "{:?}",
             start
         );
+        // And it names every route that does read one — three of them. A hint listing two of
+        // three is a hint that sends the caller to a route which will refuse it.
+        for named in [CONFIG_PATH, chat::ACTION, escalation::ACTION] {
+            assert!(
+                error_text(&start).contains(named),
+                "the refusal does not name {named}: {:?}",
+                start
+            );
+        }
     }
 
     #[test]

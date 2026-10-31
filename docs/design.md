@@ -80,6 +80,21 @@ by name what it does not answer:
   seconds on a warm cache, and holds the connection that asked for it. It answers `412` **before
   the first step** when the machine has no C toolchain — the check the README promises, made where
   the build is asked for rather than by a compiler a minute into it.
+- `POST /api/apps/<slug>/chat` — one turn through that app's agent. `POST` and nothing else, and
+  the body is `{"message": "…"}`: what the user typed belongs in a body rather than in a URL that
+  is written into the browser's history and into every log of it. It is behind a capability but not
+  the control token — the dialog that sends it is served into the app's own page, so a token
+  written there is a token the app's script could spend; the page is served with a cookie scoped to
+  this path instead (§4, `crates/web`). Three refusals, each a different next step: a body that is
+  not a message is `400`, having no config file to read is `503`, and a config with no model yet is
+  `412` — the first-run form is one request away.
+- `GET` and `POST /api/apps/<slug>/escalation` — the question a turn is waiting on, and the answer
+  to it. `GET` answers `{"pending": …}`: `null` when nobody is asking, otherwise the app, the mode
+  asked for, the mode the session is in, and the justification the model gave. `POST` takes
+  `{"approve": false, "reason": "…"}` and answers `409` when no turn is waiting, because a page
+  that believed it had answered would tell the user they approved something that never happened.
+  Its own cookie, minted apart from the chat one and scoped to its own path, so the capability to
+  spend an agent turn cannot answer a widening request (§4, `crates/web`).
 - `GET /app/<slug>/…` and `HEAD` — the app itself, forwarded to the loopback port it is running
   on. Not behind the token: this is the page a browser navigates to, and a link that demands an
   `Authorization` header is a link that never opens. What bounds it is that the only thing it can
@@ -89,9 +104,9 @@ by name what it does not answer:
   answer `405` with `Allow: GET, HEAD`, because this layer carries no request body and forwarding
   one without it would tell the app a request arrived that said nothing.
 - Anything else → `404` JSON; a method it does not serve → `405` with
-  `Allow: GET, HEAD, POST, DELETE`. A body sent to any route but `/api/config` → `400` naming the
-  one route that reads one: answering "done" to content this server never looked at is worse than
-  refusing it. `411` for a chunked body, because a body with no declared length has no bound, and
+  `Allow: GET, HEAD, POST, DELETE`. A body sent to a route that reads none → `400` naming the
+  three that do: answering "done" to content this server never looked at is worse than refusing
+  it. `411` for a chunked body, because a body with no declared length has no bound, and
   `413` when a declared length is past `MAX_BODY` — that bound is about how much memory this
   process can be made to spend.
 
