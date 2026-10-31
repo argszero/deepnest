@@ -116,6 +116,46 @@ fn declared(body: &str) -> Vec<u8> {
     .into_bytes()
 }
 
+/// The platform's sentence and ours meet at exactly one full stop.
+///
+/// The join cannot be checked by looking for `..` anywhere in the message: on Linux the platform's
+/// detail ends in an OpenSSL source path — `…:../ssl/statem/statem_clnt.c:1889:` — whose `..` is a
+/// relative path and not a doubled sentence. A first version of this check searched for `..` and
+/// failed on Ubuntu alone while macOS and Windows passed: the test was wrong, the message was not.
+/// So the check is made where the two sentences meet, at the first character of ours.
+fn assert_joined_by_one_full_stop(message: &str, our_sentence: &str) {
+    let at = message
+        .find(our_sentence)
+        .unwrap_or_else(|| panic!("`{our_sentence}` is not in: {message}"));
+    let mut before = message[..at].chars().rev();
+    assert_eq!(
+        before.next(),
+        Some('.'),
+        "the platform's sentence and ours must meet at a full stop: {message}"
+    );
+    assert_ne!(
+        before.next(),
+        Some('.'),
+        "…and at one full stop, not two: {message}"
+    );
+}
+
+/// The same check for the branch whose detail ends the message: it needs the full stop that the
+/// other two branches get from a following sentence of their own.
+fn assert_ends_with_one_full_stop(message: &str) {
+    let mut chars = message.chars().rev();
+    assert_eq!(
+        chars.next(),
+        Some('.'),
+        "the message must end its sentence: {message}"
+    );
+    assert_ne!(
+        chars.next(),
+        Some('.'),
+        "…with one full stop, not two: {message}"
+    );
+}
+
 #[test]
 fn a_trusted_certificate_carries_a_whole_sse_answer() {
     // The bytes an OpenAI-compatible endpoint streams, read whole: this build asks for a whole
@@ -182,6 +222,10 @@ fn a_certificate_the_seam_does_not_trust_is_refused_and_says_so() {
         "{}",
         error.body
     );
+    // The join, which the wording assertions above let through: the platform's sentence ends in a
+    // full stop and so does the one that follows it.
+    assert_joined_by_one_full_stop(&error.body, " If the endpoint is yours");
+    assert_ends_with_one_full_stop(&error.body);
 }
 
 #[test]
@@ -216,6 +260,34 @@ fn a_certificate_for_another_name_is_refused_for_that_reason() {
         "{}",
         error.body
     );
+    assert_joined_by_one_full_stop(&error.body, " Point the endpoint at the name");
+    assert_ends_with_one_full_stop(&error.body);
+}
+
+#[test]
+fn a_handshake_that_fails_for_another_reason_still_ends_its_sentence() {
+    // A listener that answers in HTTP to a client expecting TLS: the record layer rejects it before
+    // any certificate is looked at, which is the third of the three messages — and the only one whose
+    // detail is the end of the sentence rather than the middle, so it is where a missing full stop
+    // would show instead of a doubled one.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        if let Ok((mut sock, _)) = listener.accept() {
+            let _ = sock.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
+            let _ = sock.flush();
+        }
+    });
+
+    let error = TlsHttp::with_connector(trusting(LOOPBACK_CERT))
+        .post(&request(&format!("https://127.0.0.1:{port}/v1")))
+        .unwrap_err();
+    assert!(
+        error.body.contains("failed before any request was sent"),
+        "{}",
+        error.body
+    );
+    assert_ends_with_one_full_stop(&error.body);
 }
 
 #[test]

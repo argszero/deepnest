@@ -332,9 +332,16 @@ const CERTIFICATE_REFUSED: [&str; 8] = [
 /// Three outcomes, three messages: a certificate for another name, a certificate this machine will
 /// not vouch for, and anything else the handshake hit. The detail the platform gave is carried in
 /// every one of them — a message that hides it leaves the user nothing to search for.
+///
+/// **The platform's sentence already ends in a full stop**, and ours comes after it, so
+/// [`without_trailing_full_stop`] takes theirs off before the two are joined. Without that the
+/// message read `The certificate was not trusted.. If the endpoint is yours, …` — measured on macOS
+/// through the binary's own model path, not spotted in review, which is why the tests now assert
+/// the join and not only the wording.
 fn handshake_failure(url: &str, host: &str, error: HandshakeError<TcpStream>) -> LlmError {
-    let detail = error.to_string();
-    let lowered = detail.to_lowercase();
+    let said = error.to_string();
+    let lowered = said.to_lowercase();
+    let detail = without_trailing_full_stop(&said);
     let message = if NAMED_MISMATCH.iter().any(|needle| lowered.contains(needle)) {
         format!(
             "`{url}`: the certificate `{host}` presented is for a different name — {detail}. Point \
@@ -350,11 +357,25 @@ fn handshake_failure(url: &str, host: &str, error: HandshakeError<TcpStream>) ->
              it is not, do not send the key there."
         )
     } else {
+        // No trailing sentence of its own here: the platform's detail is the end of the message, so
+        // it needs the full stop the branch above gets from its own following sentence.
         format!(
-            "`{url}`: the TLS handshake with `{host}` failed before any request was sent — {detail}"
+            "`{url}`: the TLS handshake with `{host}` failed before any request was sent — {detail}."
         )
     };
     LlmError::transport(message)
+}
+
+/// The platform's sentence, ready to be followed by one of ours.
+///
+/// A platform message is a finished sentence — `The certificate was not trusted.`, `A host name
+/// mismatch has occurred.` — and every one of our branches writes punctuation after it. Strip the
+/// platform's own trailing stops and whitespace, so the join produces `… trusted. If the endpoint`
+/// rather than `… trusted.. If the endpoint`. `trim_end_matches` takes a run of them, because a
+/// platform that ends a sentence with an ellipsis (`…`) is one more full stop away from the same
+/// doubling.
+fn without_trailing_full_stop(detail: &str) -> &str {
+    detail.trim_end().trim_end_matches('.')
 }
 
 /// Write one request and read everything the connection answers with.
@@ -690,5 +711,36 @@ mod tests {
     fn a_port_that_is_not_a_number_is_refused() {
         let error = post_to("http://127.0.0.1:not-a-port/v1").unwrap_err();
         assert!(error.body.contains("not a number"), "{}", error.body);
+    }
+
+    #[test]
+    fn the_platforms_full_stop_is_taken_off_before_ours_is_added() {
+        // The two sentences the platforms actually produce, measured: joining them raw gave
+        // `… was not trusted.. If the endpoint …`.
+        assert_eq!(
+            without_trailing_full_stop("The certificate was not trusted."),
+            "The certificate was not trusted"
+        );
+        assert_eq!(
+            without_trailing_full_stop("A host name mismatch has occurred."),
+            "A host name mismatch has occurred"
+        );
+    }
+
+    #[test]
+    fn a_sentence_with_no_full_stop_is_left_alone() {
+        // OpenSSL's own wording arrives without one on some paths; adding a second there would be
+        // the same defect in the other direction.
+        assert_eq!(
+            without_trailing_full_stop("certificate verify failed"),
+            "certificate verify failed"
+        );
+    }
+
+    #[test]
+    fn a_run_of_stops_and_trailing_space_comes_off() {
+        assert_eq!(without_trailing_full_stop("something.."), "something");
+        assert_eq!(without_trailing_full_stop("something. \n"), "something");
+        assert_eq!(without_trailing_full_stop(""), "");
     }
 }
