@@ -33,6 +33,7 @@ pub mod escalation;
 pub mod grant;
 pub mod home;
 pub mod model;
+pub mod open;
 pub mod router;
 pub mod server;
 pub mod token;

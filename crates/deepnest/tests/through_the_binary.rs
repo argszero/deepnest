@@ -84,6 +84,9 @@ impl Install {
         let errors = output.try_clone().expect("clone the server log handle");
 
         let child = Command::new(env!("CARGO_BIN_EXE_deepnest"))
+            // Without this the binary would hand the panel to the desktop and open a browser window
+            // on the machine running the suite — three of them at once in CI, none of them wanted.
+            .arg("--no-open")
             .env("DEEPNEST_HOME", &self.home)
             .stdin(Stdio::null())
             // To a file, never to a pipe: an undrained pipe fills and blocks the child, and that
@@ -243,7 +246,8 @@ fn handshake(target: &str) -> String {
     format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{PORT}\r\n\r\n")
 }
 
-/// The one scenario, in order: page, answer, stream, upgrade, and the door staying open throughout.
+/// The one scenario, in order: page, answer, stream, upgrade, the door staying open throughout, and
+/// a second start finding this one already there.
 #[test]
 fn an_app_is_served_through_the_door_the_way_a_browser_sees_it() {
     let mut install = Install::new();
@@ -398,6 +402,35 @@ fn an_app_is_served_through_the_door_the_way_a_browser_sees_it() {
     assert!(
         answer.contains("Allow: GET, HEAD"),
         "the refusal did not say what is allowed: {answer}"
+    );
+
+    // 7. A second start leaves this one alone: it says where the first one is and exits. This is
+    //    also the branch that hands that address to the browser — a second double-click is a person
+    //    asking for the page that is already being served — which is why it must not disturb it.
+    //    `--no-open` keeps the assertion to what can be seen here: the address it prints.
+    let second = Command::new(env!("CARGO_BIN_EXE_deepnest"))
+        .arg("--no-open")
+        .env("DEEPNEST_HOME", &install.home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run a second deepnest against the home the first one is using");
+    assert!(
+        second.status.success(),
+        "a second start is not an error: {:?}",
+        second.status
+    );
+    let said = String::from_utf8_lossy(&second.stdout);
+    assert!(
+        said.contains("already running"),
+        "the second start did not say where the first one is: {said}"
+    );
+    assert!(
+        said.contains(&format!("http://127.0.0.1:{PORT}/")),
+        "the second start did not give the address to open: {said}"
+    );
+    assert!(
+        install.get("/api/health").starts_with("HTTP/1.1 200"),
+        "the second start disturbed the first one"
     );
 }
 

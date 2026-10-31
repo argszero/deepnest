@@ -110,7 +110,7 @@ by name what it does not answer:
   `413` when a declared length is past `MAX_BODY` — that bound is about how much memory this
   process can be made to spend.
 
-Three deviations from §2, each deliberate, each to be closed by the crate that owns it:
+Two deviations from §2, each deliberate, each to be closed by the crate that owns it:
 
 - **`SO_EXCLUSIVEADDRUSE` is not set on Windows.** The default — neither option — already
   refuses a second bind with `WSAEADDRINUSE`, which is the admission this needs. Setting it
@@ -121,9 +121,32 @@ Three deviations from §2, each deliberate, each to be closed by the crate that 
   answer carries the app's own content type and headers, so the response type has to be able to
   hold them; a type that can is the gateway's business, not the binary's. The binary re-exports it
   (`pub use deepnest_gateway::http`), so a name that reads `crate::http` still resolves.
-- **Nothing opens the browser yet.** The panel is real now, so opening it on start is worth doing
-  rather than pointless — but it is a decision about the user's desktop that this slice does not
-  take. The URL is printed; `open`ing it is one line for whoever lands that.
+
+**The panel opens in the desktop's browser** (`decided in implementation`, 2026-10-31). This is the
+deviation the list above used to carry, now closed, and it is the second half of the README's first
+sentence — one double-click, one page in your browser. Five decisions came with it:
+
+- **No dependency for it.** Handing a URL to the desktop is one program per platform — `open` on
+  macOS, `start` on Windows, `xdg-open` elsewhere — and a crate wrapping three lines would be a
+  build input and a supply chain to audit in exchange for them. Windows reaches `start` through
+  `cmd /C` and passes the empty title argument, without which `start` reads the URL as the window
+  title and opens nothing at all.
+- **It happens after the banner, and after the bind.** Everything the run has to say about itself —
+  the address, the config and token paths, the logs, the toolchain — is printed and flushed first,
+  so a desktop that takes its time cannot look like a start that printed nothing. The listener is
+  already accepting when the desktop is asked, so the page a browser lands on is served rather than
+  raced.
+- **A second start opens the address it found.** A double-click with deepnest already running is a
+  person asking for the page that is already being served, and printing that address to a terminal
+  nobody is watching is how the second click comes to look like nothing happened.
+- **A browser that will not open is one line, not a failed start.** The panel is this program's whole
+  interface, so refusing to run because the desktop would not take a URL would take the interface
+  away with it; the address is printed either way, which is all a session with no desktop can use.
+  The command that failed is named the way a person would type it — `cmd /C start`, not `cmd`.
+- **The switch is `--no-open`, and the opener is a seam.** The end-to-end tests start the real
+  binary; without the flag they would open a browser window on every machine running the suite,
+  three platforms at once in CI. The seam is what the unit tests answer instead of spawning
+  anything, and what the tests assert on is the command each platform would run.
 
 `config.toml` is one `[llm]` table: `base_url`, `api_key`, `model`. §3 spells the second `key`;
 both spellings are accepted, because the design and EMRG's own config name the same thing
