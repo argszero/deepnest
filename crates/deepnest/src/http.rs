@@ -1,5 +1,11 @@
 //! Exactly the HTTP/1.1 this binary needs: read one request, write one response, close.
 //!
+//! It speaks four methods and **reads no request body at all**. That is not laziness about
+//! parsing: the routes that exist are `GET` for things that can be read and `POST` for things that
+//! change state and need no argument beyond their own path — starting an app, stopping it. A
+//! request that declares a body is refused rather than half-read, because a server that ignored a
+//! body would answer "done" to a request whose content it never saw.
+//!
 //! Deliberately not a server library. `crates/gateway` needs a real one — routing, header
 //! rewriting, WebSocket upgrade, unbuffered SSE — and choosing that stack is that crate's
 //! decision to make, not this one's. What this module has to get right is much smaller, and it
@@ -20,11 +26,13 @@ pub const MAX_HEAD: usize = 8 * 1024;
 /// How many header fields are accepted before the request is refused.
 pub const MAX_HEADERS: usize = 64;
 
-/// The two methods this binary serves.
+/// The methods this binary serves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
     Get,
     Head,
+    Post,
+    Delete,
 }
 
 impl Method {
@@ -33,6 +41,8 @@ impl Method {
         match self {
             Self::Get => "GET",
             Self::Head => "HEAD",
+            Self::Post => "POST",
+            Self::Delete => "DELETE",
         }
     }
 }
@@ -68,6 +78,9 @@ pub enum ParseError {
     UnsupportedMethod,
     /// The head exceeded [`MAX_HEAD`] or [`MAX_HEADERS`].
     Oversized,
+    /// The request declares a body. Nothing here reads one, and pretending otherwise would answer
+    /// "done" to a request whose content was never seen.
+    Body,
 }
 
 /// Why [`read`] did not produce a request.
@@ -115,6 +128,8 @@ pub fn parse(head: &str) -> Result<Request, ParseError> {
     let method = match fields.next() {
         Some("GET") => Method::Get,
         Some("HEAD") => Method::Head,
+        Some("POST") => Method::Post,
+        Some("DELETE") => Method::Delete,
         // A well-formed method this server does not serve is a 405, not a 400: the difference is
         // between "your client is broken" and "this endpoint does not do that".
         Some(name) if !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphabetic()) => {
@@ -146,6 +161,17 @@ pub fn parse(head: &str) -> Result<Request, ParseError> {
             return Err(ParseError::Oversized);
         }
         headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
+    }
+
+    // A declared body is refused before anything acts on the request. `Content-Length: 0` is the
+    // spelling a browser sends for an empty POST, so it is accepted; anything else is not read.
+    if let Some((_, value)) = headers.iter().find(|(name, _)| name == "content-length") {
+        if value.trim() != "0" {
+            return Err(ParseError::Body);
+        }
+    }
+    if headers.iter().any(|(name, _)| name == "transfer-encoding") {
+        return Err(ParseError::Body);
     }
 
     Ok(Request {
@@ -251,6 +277,8 @@ pub fn reason(status: u16) -> &'static str {
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        409 => "Conflict",
+        411 => "Length Required",
         413 => "Content Too Large",
         500 => "Internal Server Error",
         _ => "Unknown",
@@ -275,10 +303,50 @@ mod tests {
     }
 
     #[test]
-    fn a_post_is_refused_as_a_method_not_as_a_malformed_request() {
+    fn a_put_is_refused_as_a_method_not_as_a_malformed_request() {
+        // 405 rather than 400: a well-formed method this server does not serve is a different thing
+        // from a client that cannot spell.
         assert_eq!(
-            parse("POST / HTTP/1.1\r\nHost: localhost\r\n").unwrap_err(),
+            parse("PUT / HTTP/1.1\r\nHost: localhost\r\n").unwrap_err(),
             ParseError::UnsupportedMethod
+        );
+    }
+
+    #[test]
+    fn post_and_delete_are_served_so_that_a_route_can_change_state() {
+        assert_eq!(
+            parse("POST /api/apps/notes/start HTTP/1.1\r\nHost: 127.0.0.1:4270\r\n")
+                .unwrap()
+                .method,
+            Method::Post
+        );
+        assert_eq!(
+            parse("DELETE /api/apps/notes HTTP/1.1\r\nHost: 127.0.0.1:4270\r\n")
+                .unwrap()
+                .method,
+            Method::Delete
+        );
+    }
+
+    #[test]
+    fn an_empty_post_body_is_accepted_and_any_other_body_is_refused() {
+        // A browser sends `Content-Length: 0` for an empty POST; that is a request with nothing in
+        // it, so it parses. A body with content is refused, because nothing here reads one.
+        assert!(parse(
+            "POST /api/apps/notes/start HTTP/1.1\r\nHost: 127.0.0.1:4270\r\nContent-Length: 0\r\n"
+        )
+        .is_ok());
+        assert_eq!(
+            parse(
+                "POST /api/apps/notes/start HTTP/1.1\r\nHost: 127.0.0.1:4270\r\nContent-Length: 12\r\n"
+            )
+            .unwrap_err(),
+            ParseError::Body
+        );
+        assert_eq!(
+            parse("POST / HTTP/1.1\r\nHost: 127.0.0.1:4270\r\nTransfer-Encoding: chunked\r\n")
+                .unwrap_err(),
+            ParseError::Body
         );
     }
 

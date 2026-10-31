@@ -41,7 +41,7 @@ A random token is written to `~/.deepnest/deepnest.token` (mode `0600`) and re-a
 
 `crates/deepnest` is the binary, and it lands **before** `crates/apps` on purpose: five library
 crates that read well and nothing that starts leaves the first integration failure to packaging,
-which is the most expensive place to meet it. It answers four routes on the one port, and says
+which is the most expensive place to meet it. It answers the routes below on the one port, and says
 by name what it does not answer:
 
 - `GET /` — the panel. Until `crates/web` exists it is a placeholder that reports what is
@@ -52,9 +52,17 @@ by name what it does not answer:
   the reason. Behind the token, because it names the user's apps and the paths they live at. It
   reads the directory per request, so an app that appeared a second ago is in the next answer
   without a restart.
+- `POST /api/apps/<slug>/start | stop | restart` — the three state changes, behind the token
+  like the listing. `POST` and nothing else, because a browser prefetches a `GET`, so a state
+  change behind one is a change it makes by drawing a link. The slug is validated against the
+  same rules that make it a directory name, and a directory that is not there is `404` — "no app
+  named that" is a different answer from any failure to start one.
 - `GET /app/<slug>/` → `404` naming `crates/gateway`. A bare `404` on a correctly spelled path
   reads like a bug in the path.
-- Anything else → `404` JSON; a method other than `GET`/`HEAD` → `405` with `Allow: GET, HEAD`.
+- Anything else → `404` JSON; a method it does not serve → `405` with
+  `Allow: GET, HEAD, POST, DELETE`; a request that declares a body → `411`. Nothing in this build
+  reads a body: answering "done" to a request whose content it never saw is worse than refusing
+  it.
 
 Three deviations from §2, each deliberate, each to be closed by the crate that owns it:
 
@@ -163,7 +171,16 @@ The template also pins the gateway contract: relative asset paths, and the app m
 - **Discovery reports what it could not use, by name.** `list` returns the apps and, separately, every entry that is not one with the reason. A single list would make "no apps yet" and "your app's manifest has a typo" the same reading, and the user's only clue to the second would be a panel that seems emptier than it should be. A symlink is reported rather than followed: following one would let a directory the sandbox never agreed to appear as an app, and the writable set is built from app directories.
 - **The log tail is bounded by bytes.** Counting lines from the start means reading the whole file, and a build log is exactly the file allowed to grow without limit. The reader seeks to the last 64 KiB, drops the partial line the window starts in, and says on its own last line when earlier lines were left out — a silently partial tail reads as a short log.
 
-Not yet in it, and next: the template, the build, start/stop/restart, port allocation. An install with no apps has no `apps/` directory at all, and the listing reports that as "none yet" rather than as a fault.
+**What has landed since: the process lifecycle** (`decided in implementation`, 2026-10-31). An app's port, the supervisor that starts it, and stop/restart. Four decisions came with it:
+
+- **The port is allocated per start and never persisted.** The app asks the kernel for a free one, deepnest hands it over in `PORT`, and nothing remembers it afterwards. A stored port is a number that goes stale the moment something else takes it, and the value is invisible to the user either way — so the one place that could disagree is removed rather than reconciled.
+- **"Started" means it answered, not that it was spawned.** A spawn succeeds and the process then dies on a missing database or a bind failure, which is the common case for a generated app; reporting that as started leaves the user looking at a page that never loads. `start` probes the port until something answers or the process exits, and each of those three outcomes is a different error: build it, read the log, or wait.
+- **The supervisor is a seam, not a `Command::spawn`.** Spawning and probing are traits for the reason every other such seam here exists: the interesting behaviour is a state machine with timeouts, and testing it against real processes would make the suite fail in proportion to the CI machine's load rather than to the code.
+- **A stop that stops nothing is a success.** The caller's intent is the postcondition — "it must not be running" — and a stop that failed because the app had already exited would report the wrong thing. A restart is a stop and a start rather than a signal, because the port is fresh and the coming-up process must not collide with the going-down one.
+
+What this slice does **not** do: an app process outlives a killed deepnest. There is no graceful shutdown path in this build to run the apps down on (the process waits on a park and ends by signal), so `Supervisor::stop_all` exists and is untested against a real exit; the shutdown sequence that calls it belongs to `crates/gateway`, with the real server loop.
+
+Not yet in it, and next: the template and the build. An install with no apps has no `apps/` directory at all, and the listing reports that as "none yet" rather than as a fault.
 
 ### `crates/gateway` — the single door
 
@@ -214,8 +231,9 @@ One module per cycle, each landing with its tests:
    is still cheap. From here on every module either lands wired into the binary or says in its PR
    why it does not.
 6. `crates/apps` — template, build, lifecycle, logs. Lands in slices: the directory contract
-   first (slug, manifest, discovery, log tail, `GET /api/apps`), then the template and the process
-   lifecycle. The binary already serves the first slice, so this is not a module that sits unread.
+   first (slug, manifest, discovery, log tail, `GET /api/apps`), then the process lifecycle (port
+   allocation, start/stop/restart, `POST /api/apps/<slug>/...`), then the template and the build.
+   The first two are in, both wired into the binary, so this is not a module that sits unread.
 7. `crates/gateway` + `crates/web` — the single door, the panel, the dialog.
 8. `crates/skills` — loader, catalog, installer.
 9. `crates/packaging` — payload, first-run unpack, signing.

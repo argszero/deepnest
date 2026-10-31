@@ -14,19 +14,48 @@
 //! "the app gateway is not part of this build yet" is worth more to the next person than a bare
 //! `404`, which looks like a bug in a path they spelled correctly.
 //!
+//! `POST /api/apps/<slug>/start|stop|restart` are the first routes here that change something
+//! outside this process. Three decisions shape them, and each is checked before anything runs:
+//! the method is `POST` because a browser prefetches a `GET`; the slug is validated against the
+//! same rules that make it a directory name, because it arrives from the URL; and the directory
+//! must exist, because "no app named that" and "the app failed" are different answers.
+//!
 //! `/api/apps` is the one route backed by a directory rather than by a value held in this struct:
 //! it lists `~/.deepnest/apps` at request time, so an app that appeared a second ago is in the
 //! next answer without a restart. What it cannot use it reports rather than drops — see
 //! `deepnest_apps::list` — because the panel showing fewer apps than the user created has no other
 //! way to say why.
 
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use deepnest_apps::{Slug, StartError, State, Supervisor};
 use serde_json::{json, Value};
 
 use crate::http::{Method, Request, Response};
 use crate::token::Token;
+
+/// What the router needs in order to start and stop an app: the supervisor that owns the
+/// processes, and the deepnest home whose `logs/` gets their output.
+///
+/// The two travel together because neither is useful alone — a supervisor with nowhere to write a
+/// log would start an app whose failures nobody could read, and the home alone owns nothing.
+#[derive(Clone)]
+pub struct Lifecycle {
+    pub supervisor: Arc<Supervisor>,
+    pub home: PathBuf,
+}
+
+impl fmt::Debug for Lifecycle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The supervisor is a map of live processes, and printing it would report state that has
+        // moved on by the time anyone read it.
+        f.debug_struct("Lifecycle")
+            .field("home", &self.home)
+            .finish_non_exhaustive()
+    }
+}
 
 /// The router: what this build can answer.
 #[derive(Debug, Clone)]
@@ -39,6 +68,9 @@ pub struct Router {
     /// `~/.deepnest/apps`, when the caller knows where the home is. `None` reports that the list
     /// is unavailable instead of answering "no apps", which would be a different claim.
     apps_dir: Option<PathBuf>,
+    /// The supervisor and the home to log under. `None` in tests that only read: the lifecycle
+    /// routes then say this process cannot start anything, rather than pretending they tried.
+    lifecycle: Option<Lifecycle>,
 }
 
 impl Router {
@@ -49,11 +81,30 @@ impl Router {
             model,
             token,
             apps_dir: None,
+            lifecycle: None,
         }
     }
 
     /// List apps from `dir`. Without it, `/api/apps` says the directory is unknown.
     pub fn with_apps_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.apps_dir = Some(dir.into());
+        self
+    }
+
+    /// Let this router start and stop the apps in `dir`, logging them under `home`.
+    ///
+    /// Both are needed: `dir` is where the apps are, and `home` is where `logs/` sits — the log
+    /// path is spelled in `deepnest_apps::logs` and not a second time here.
+    pub fn with_lifecycle(
+        mut self,
+        supervisor: Arc<Supervisor>,
+        home: impl Into<PathBuf>,
+        dir: impl Into<PathBuf>,
+    ) -> Self {
+        self.lifecycle = Some(Lifecycle {
+            supervisor,
+            home: home.into(),
+        });
         self.apps_dir = Some(dir.into());
         self
     }
@@ -82,6 +133,12 @@ impl Router {
                 }
                 let (status, body) = self.apps();
                 Response::json(status, body)
+            }
+            other if other.starts_with("/api/apps/") => {
+                if !self.authorized(request) {
+                    return unauthorized();
+                }
+                self.app_action(request)
             }
             other if other.starts_with("/api/") => {
                 if self.authorized(request) {
@@ -253,6 +310,97 @@ impl Router {
         }
     }
 
+    /// `POST /api/apps/<slug>/<action>` — the verbs that change a process.
+    ///
+    /// Every refusal below comes before anything is spawned, and each says which of the four
+    /// things is wrong: the action, the method, the slug, or the app.
+    fn app_action(&self, request: &Request) -> Response {
+        let Some(rest) = request.path.strip_prefix("/api/apps/") else {
+            return Response::json(404, error_body("no such endpoint"));
+        };
+        let Some((slug_text, action_text)) = rest.split_once('/') else {
+            return Response::json(
+                404,
+                error_body(&format!(
+                    "`/api/apps/{rest}` is not an endpoint — the actions are \
+                     POST /api/apps/{rest}/start, /stop and /restart"
+                )),
+            );
+        };
+        let action = match Action::parse(action_text) {
+            Some(action) => action,
+            None => {
+                return Response::json(
+                    404,
+                    error_body(&format!(
+                        "`{action_text}` is not an app action — use start, stop or restart"
+                    )),
+                )
+            }
+        };
+        // `POST` and nothing else. A state change behind `GET` is one a browser may make by
+        // prefetching a link, and a `405` naming the method is what stops a client guessing.
+        if request.method != Method::Post {
+            return Response::json(
+                405,
+                error_body(&format!(
+                    "{action_text} changes state: POST /api/apps/{slug_text}/{action_text}"
+                )),
+            )
+            .header("Allow", "POST");
+        }
+        let slug = match Slug::parse(slug_text) {
+            Ok(slug) => slug,
+            Err(error) => {
+                return Response::json(
+                    400,
+                    error_body(&format!("`{slug_text}` is not an app name: {error}")),
+                )
+            }
+        };
+        let Some(lifecycle) = &self.lifecycle else {
+            return Response::json(
+                503,
+                error_body(
+                    "this process cannot start or stop apps: it was started without a supervisor",
+                ),
+            );
+        };
+        let Some(apps_dir) = &self.apps_dir else {
+            return Response::json(
+                503,
+                error_body(
+                    "this process cannot find apps: it was started without an apps directory",
+                ),
+            );
+        };
+
+        // A directory that is not there is "no such app", which is a different answer from any
+        // failure to start one. What *makes* it an app is its manifest, and that is deliberately
+        // not re-checked here: an app whose manifest stopped parsing must still be stoppable, and
+        // `GET /api/apps` is where its parse failure is reported.
+        let dir = apps_dir.join(slug.as_str());
+        if !dir.is_dir() {
+            return Response::json(
+                404,
+                error_body(&format!("no app named `{slug}` in {}", apps_dir.display())),
+            );
+        }
+
+        let log = deepnest_apps::log_path(&lifecycle.home, &slug);
+        match action {
+            Action::Start => started(&slug, lifecycle.supervisor.start(&slug, &dir, log)),
+            Action::Stop => match lifecycle.supervisor.stop(&slug) {
+                Ok(state) => state_body(&slug, &state),
+                Err(error) => Response::json(
+                    500,
+                    error_body(&format!("`{slug}` could not be stopped: {error}")),
+                ),
+            },
+            Action::Restart => started(&slug, lifecycle.supervisor.restart(&slug, &dir, log)),
+        }
+    }
+
     fn health(&self) -> String {
         json!({
             "status": "ok",
@@ -296,6 +444,67 @@ const PANEL: &str = r#"<!doctype html>
 </body>
 </html>
 "#;
+
+/// The three state changes an app has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Action {
+    Start,
+    Stop,
+    Restart,
+}
+
+impl Action {
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "start" => Some(Self::Start),
+            "stop" => Some(Self::Stop),
+            "restart" => Some(Self::Restart),
+            _ => None,
+        }
+    }
+}
+
+/// The answer to a start or a restart.
+fn started(slug: &Slug, outcome: Result<State, StartError>) -> Response {
+    match outcome {
+        Ok(state) => state_body(slug, &state),
+        // Both of these say the app is not in a state where "start" applies — it is already
+        // running, or nothing has been built — and neither is a fault in deepnest. A `409` keeps
+        // them apart from the three failures below, where something went wrong.
+        Err(error @ (StartError::AlreadyRunning { .. } | StartError::NotBuilt { .. })) => {
+            Response::json(
+                409,
+                json!({ "slug": slug.as_str(), "error": error.to_string() }).to_string(),
+            )
+        }
+        // A program that would not start, died on the way up, or never answered. All three are
+        // reported with the log's path, because the app is the one that knows why.
+        Err(error) => Response::json(
+            500,
+            json!({ "slug": slug.as_str(), "error": error.to_string() }).to_string(),
+        ),
+    }
+}
+
+/// What is true about an app, as JSON.
+fn state_body(slug: &Slug, state: &State) -> Response {
+    let (port, pid, reason) = match state {
+        State::Stopped => (Value::Null, Value::Null, Value::Null),
+        State::Running { port, pid } => (json!(port), json!(pid), Value::Null),
+        State::Failed { reason } => (Value::Null, Value::Null, json!(reason)),
+    };
+    Response::json(
+        200,
+        json!({
+            "slug": slug.as_str(),
+            "state": state.word(),
+            "port": port,
+            "pid": pid,
+            "reason": reason,
+        })
+        .to_string(),
+    )
+}
 
 fn error_body(message: &str) -> String {
     json!({ "error": message }).to_string()
@@ -456,6 +665,14 @@ mod tests {
                 .save(&self.apps().join(slug))
                 .unwrap();
         }
+
+        /// An app that has been built: a manifest, and a binary at the path the supervisor runs.
+        fn built_app(&self, slug: &str, name: &str) {
+            self.app(slug, name);
+            let binary = self.apps().join(slug).join(deepnest_apps::EXPECTED_BINARY);
+            std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+            std::fs::write(&binary, b"a stand-in for the app the template will build").unwrap();
+        }
     }
 
     impl Drop for Scratch {
@@ -582,6 +799,212 @@ mod tests {
 
         let health = router.respond(&get("/api/health", "127.0.0.1:4270"));
         assert!(body(&health).contains("\"model_endpoint_configured\":false"));
+    }
+
+    // --- the lifecycle routes ---------------------------------------------------------------
+
+    /// A process that never ends on its own, so a start in a test is deterministic.
+    struct NeverExits;
+
+    impl deepnest_apps::Handle for NeverExits {
+        fn id(&self) -> u32 {
+            4242
+        }
+
+        fn poll(&mut self) -> std::io::Result<Option<deepnest_apps::Exit>> {
+            Ok(None)
+        }
+
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct FakeSpawner;
+
+    impl deepnest_apps::Spawner for FakeSpawner {
+        fn spawn(
+            &self,
+            _spec: &deepnest_apps::Spec,
+        ) -> std::io::Result<Box<dyn deepnest_apps::Handle>> {
+            Ok(Box::new(NeverExits))
+        }
+    }
+
+    /// Answers on the first probe: what a start waits for is exercised in `deepnest-apps`, and
+    /// what this module tests is which request gets which answer.
+    struct AlwaysReady;
+
+    impl deepnest_apps::Prober for AlwaysReady {
+        fn ready(&self, _port: deepnest_apps::Port) -> bool {
+            true
+        }
+    }
+
+    /// The router, pointed at a scratch home, able to start and stop what is in it.
+    fn supervised(scratch: &Scratch) -> Router {
+        let supervisor = Arc::new(deepnest_apps::Supervisor::with_parts(
+            Box::new(FakeSpawner),
+            Box::new(AlwaysReady),
+        ));
+        router().with_lifecycle(supervisor, scratch.base.clone(), scratch.apps())
+    }
+
+    fn post(path: &str) -> Request {
+        parse(&format!(
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:4270\r\nauthorization: bearer {}\r\nContent-Length: 0\r\n",
+            "a".repeat(64)
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_start_runs_the_app_and_reports_the_port_it_took() {
+        let scratch = Scratch::new("life-start");
+        scratch.built_app("notes", "Notes");
+        let response = supervised(&scratch).respond(&post("/api/apps/notes/start"));
+        assert_eq!(response.status, 200, "{:?}", response);
+        let body = body(&response);
+        assert!(body.contains("\"state\":\"running\""), "{body}");
+        assert!(body.contains("\"pid\":4242"), "{body}");
+        // A port was allocated for this start and is reported; it is not one the router chose.
+        assert!(!body.contains("\"port\":null"), "{body}");
+    }
+
+    #[test]
+    fn a_get_cannot_start_an_app() {
+        // A browser prefetches links. A state change behind GET would be one it makes by looking.
+        let scratch = Scratch::new("life-get");
+        scratch.built_app("notes", "Notes");
+        let response = supervised(&scratch).respond(&authorized_get("/api/apps/notes/start"));
+        assert_eq!(response.status, 405);
+        assert!(response
+            .headers
+            .iter()
+            .any(|(name, value)| *name == "Allow" && *value == "POST"));
+    }
+
+    #[test]
+    fn starting_an_app_that_was_never_built_is_a_conflict_and_not_a_failure() {
+        // Nothing is wrong with deepnest here: the step before this one has not been run.
+        let scratch = Scratch::new("life-unbuilt");
+        scratch.app("notes", "Notes");
+        let response = supervised(&scratch).respond(&post("/api/apps/notes/start"));
+        assert_eq!(response.status, 409, "{:?}", response);
+        assert!(
+            body(&response).contains("build the app first"),
+            "{:?}",
+            response
+        );
+    }
+
+    #[test]
+    fn starting_an_app_twice_says_it_is_already_running() {
+        let scratch = Scratch::new("life-twice");
+        scratch.built_app("notes", "Notes");
+        let router = supervised(&scratch);
+        assert_eq!(router.respond(&post("/api/apps/notes/start")).status, 200);
+        let again = router.respond(&post("/api/apps/notes/start"));
+        assert_eq!(again.status, 409);
+        assert!(body(&again).contains("already running"), "{:?}", again);
+    }
+
+    #[test]
+    fn a_stop_reports_it_stopped_and_a_restart_runs_it_again() {
+        let scratch = Scratch::new("life-stop");
+        scratch.built_app("notes", "Notes");
+        let router = supervised(&scratch);
+
+        assert_eq!(router.respond(&post("/api/apps/notes/start")).status, 200);
+
+        let stopped = router.respond(&post("/api/apps/notes/stop"));
+        assert_eq!(stopped.status, 200);
+        assert!(
+            body(&stopped).contains("\"state\":\"stopped\""),
+            "{:?}",
+            stopped
+        );
+
+        let restarted = router.respond(&post("/api/apps/notes/restart"));
+        assert_eq!(restarted.status, 200);
+        assert!(
+            body(&restarted).contains("\"state\":\"running\""),
+            "{:?}",
+            restarted
+        );
+    }
+
+    #[test]
+    fn stopping_an_app_that_is_not_running_is_not_an_error() {
+        // The caller's intent is the postcondition, and it already holds.
+        let scratch = Scratch::new("life-stop-idle");
+        scratch.built_app("notes", "Notes");
+        let response = supervised(&scratch).respond(&post("/api/apps/notes/stop"));
+        assert_eq!(response.status, 200);
+    }
+
+    #[test]
+    fn an_app_that_is_not_there_is_not_found() {
+        let scratch = Scratch::new("life-missing");
+        let response = supervised(&scratch).respond(&post("/api/apps/ghost/start"));
+        assert_eq!(response.status, 404);
+        assert!(body(&response).contains("no app named"), "{:?}", response);
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_slug_is_refused_before_anything_runs() {
+        // The slug arrives from the URL and becomes a path segment; it is checked against the same
+        // rules that make it a directory name, so `..` never reaches the filesystem.
+        let scratch = Scratch::new("life-bad-slug");
+        let router = supervised(&scratch);
+        for path in ["/api/apps/../start", "/api/apps/Notes/start"] {
+            let response = router.respond(&post(path));
+            assert_eq!(response.status, 400, "{path}: {:?}", response);
+        }
+    }
+
+    #[test]
+    fn an_unknown_action_is_not_found_and_the_refusal_lists_the_three_that_exist() {
+        let scratch = Scratch::new("life-action");
+        scratch.built_app("notes", "Notes");
+        let router = supervised(&scratch);
+
+        let unknown = router.respond(&post("/api/apps/notes/build"));
+        assert_eq!(unknown.status, 404);
+        assert!(
+            body(&unknown).contains("start, stop or restart"),
+            "{:?}",
+            unknown
+        );
+
+        let bare = router.respond(&post("/api/apps/notes"));
+        assert_eq!(bare.status, 404);
+        assert!(body(&bare).contains("/start"), "{:?}", bare);
+    }
+
+    #[test]
+    fn the_lifecycle_routes_need_the_token_like_every_other_api_route() {
+        let scratch = Scratch::new("life-token");
+        scratch.built_app("notes", "Notes");
+        let router = supervised(&scratch);
+        let request =
+            parse("POST /api/apps/notes/start HTTP/1.1\r\nHost: 127.0.0.1:4270\r\n").unwrap();
+        assert_eq!(router.respond(&request).status, 401);
+    }
+
+    #[test]
+    fn a_server_without_a_supervisor_says_so_instead_of_pretending() {
+        let scratch = Scratch::new("life-none");
+        scratch.built_app("notes", "Notes");
+        // Listing only: this router can say which apps exist and cannot run one.
+        let router = router().with_apps_dir(scratch.apps());
+        let response = router.respond(&post("/api/apps/notes/start"));
+        assert_eq!(response.status, 503);
+        assert!(
+            body(&response).contains("without a supervisor"),
+            "{:?}",
+            response
+        );
     }
 
     #[test]
