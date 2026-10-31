@@ -5,12 +5,23 @@
 //! adapter belongs to `crates/gateway`"). One module, one trait, so every rule in `llm` stays
 //! testable with no network.
 //!
-//! **It speaks plaintext HTTP/1.1 and says so.** A TLS client is a dependency tree — a certificate
-//! store, a cipher suite, a trust decision — and this binary ships without one today. The two
-//! honest options are to refuse an `https` endpoint by name or to quietly send a request that
-//! cannot arrive; the second is a hang the user would blame on their key. So an `https` endpoint is
-//! refused with a message that names what is missing, and everything a local model server
-//! (`http://127.0.0.1:11434` and friends) needs works today.
+//! **It carries both schemes, and neither one degrades into the other.** `http://` goes over
+//! [`PlainHttp`]: a `TcpStream` and no dependency, which is what a local model server
+//! (`http://127.0.0.1:11434` and friends) needs. `https://` goes over [`TlsHttp`], which hands the
+//! same bytes to `native-tls` and so verifies the endpoint against **this machine's own trust
+//! store** — Security framework on macOS, SChannel on Windows, OpenSSL on Linux. That is the trust
+//! the user's browser already gives, and the only one a machine behind a corporate proxy has: a
+//! bundled root list would refuse the proxy's own certificate and the user would read that as
+//! deepnest being broken. [`HttpTransport`] is the two together, and it is what the binary wires
+//! in. An `https` endpoint is never sent by [`PlainHttp`] and an `http` one never by [`TlsHttp`],
+//! because a plaintext request aimed at a TLS port is a hang the user blames on their key.
+//!
+//! **A refused certificate says which refusal it was.** An untrusted certificate, a certificate
+//! for another name, and an endpoint that cannot be reached are three situations with three
+//! different fixes, so they are three different messages. What the platform reports is a sentence
+//! rather than a code — `native-tls` exposes no error kind — so the split is read out of that
+//! sentence (see [`handshake_failure`]); where a platform does not name the mismatch, the message
+//! still says the certificate was refused instead of falling back to "connection failed".
 //!
 //! Three rules the code below is shaped by:
 //!
@@ -28,6 +39,7 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use deepnest_llm::{HttpRequest, HttpResponse, LlmError, SseEvent, Transport};
+use native_tls::{HandshakeError, TlsConnector};
 
 /// How long a connection may take to establish, and how long a read may block.
 ///
@@ -37,7 +49,7 @@ use deepnest_llm::{HttpRequest, HttpResponse, LlmError, SseEvent, Transport};
 const CONNECT: Duration = Duration::from_secs(10);
 const IO: Duration = Duration::from_secs(180);
 
-/// The plaintext HTTP adapter.
+/// The plaintext HTTP adapter: `http://` only, and a `TcpStream`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PlainHttp;
 
@@ -47,9 +59,27 @@ impl PlainHttp {
     }
 }
 
+/// Which scheme a URL names. The two are carried by different code below, and each adapter refuses
+/// the other's, so neither can quietly send plaintext at a TLS port or run TLS at a plaintext one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scheme {
+    Http,
+    Https,
+}
+
+impl Scheme {
+    fn default_port(self) -> u16 {
+        match self {
+            Scheme::Http => 80,
+            Scheme::Https => 443,
+        }
+    }
+}
+
 /// A URL taken apart: where to connect, and what to ask for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Target {
+    scheme: Scheme,
     host: String,
     port: u16,
     path: String,
@@ -58,21 +88,19 @@ struct Target {
 fn parse(url: &str) -> Result<Target, LlmError> {
     let (scheme, rest) = url.split_once("://").ok_or_else(|| {
         LlmError::transport(format!(
-            "`{url}` has no scheme — a model endpoint is `http://host[:port][/path]`"
+            "`{url}` has no scheme — a model endpoint is `http://host[:port][/path]` or the same \
+             over `https`"
         ))
     })?;
-    if scheme.eq_ignore_ascii_case("https") {
+    let scheme = if scheme.eq_ignore_ascii_case("http") {
+        Scheme::Http
+    } else if scheme.eq_ignore_ascii_case("https") {
+        Scheme::Https
+    } else {
         return Err(LlmError::transport(format!(
-            "`{url}` is https, and this build has no TLS client: the request cannot be made. \
-             Point the endpoint at a local model server over http, or terminate TLS in front of \
-             it"
+            "`{url}` uses `{scheme}`, and only http and https are supported"
         )));
-    }
-    if !scheme.eq_ignore_ascii_case("http") {
-        return Err(LlmError::transport(format!(
-            "`{url}` uses `{scheme}`, and only http is supported"
-        )));
-    }
+    };
     let (authority, path) = match rest.find('/') {
         Some(at) => (&rest[..at], &rest[at..]),
         None => (rest, "/"),
@@ -88,9 +116,10 @@ fn parse(url: &str) -> Result<Target, LlmError> {
             })?;
             (host.to_string(), port)
         }
-        None => (authority.to_string(), 80),
+        None => (authority.to_string(), scheme.default_port()),
     };
     Ok(Target {
+        scheme,
         host,
         port,
         path: path.to_string(),
@@ -99,42 +128,19 @@ fn parse(url: &str) -> Result<Target, LlmError> {
 
 impl Transport for PlainHttp {
     fn post(&self, request: &HttpRequest) -> Result<HttpResponse, LlmError> {
-        // Before the socket: a header this function refuses must be refused whether or not the
-        // endpoint happens to be reachable, or a test of the refusal measures the network instead.
-        for (name, value) in &request.headers {
-            // A header name or value with a newline in it would inject a second request. Nothing
-            // here produces one, and a transport that trusts its caller is how it starts.
-            if name.contains(['\r', '\n']) || value.contains(['\r', '\n']) {
-                return Err(LlmError::transport(format!(
-                    "refused a header with a line break in it: `{name}`"
-                )));
-            }
-        }
-
+        check_headers(request)?;
         let target = parse(&request.url)?;
-        let mut stream = connect(&target, &request.url)?;
-
-        let mut head = format!(
-            "POST {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: {}\r\n",
-            target.path,
-            host_header(&target),
-            request.body.len()
-        );
-        for (name, value) in &request.headers {
-            head.push_str(&format!("{name}: {value}\r\n"));
+        if target.scheme == Scheme::Https {
+            // The alternative — sending this in the clear at a TLS port — is a hang the user would
+            // blame on their key, or a key sent in the clear. Neither is a fallback.
+            return Err(LlmError::transport(format!(
+                "`{}` is https, and this adapter carries plaintext only: use `HttpTransport`, which \
+                 picks the half that matches the scheme",
+                request.url
+            )));
         }
-        head.push_str("\r\n");
-
-        stream
-            .write_all(head.as_bytes())
-            .and_then(|()| stream.write_all(request.body.as_bytes()))
-            .and_then(|()| stream.flush())
-            .map_err(|e| LlmError::transport(format!("the request could not be sent: {e}")))?;
-
-        let mut raw = Vec::new();
-        stream
-            .read_to_end(&mut raw)
-            .map_err(|e| LlmError::transport(format!("the answer could not be read: {e}")))?;
+        let mut stream = connect(&target, &request.url)?;
+        let raw = exchange(&mut stream, request, &target)?;
         read_response(&raw)
     }
 
@@ -146,15 +152,243 @@ impl Transport for PlainHttp {
         // Stated rather than left as a `todo!()`: the loop above this seam asks for a whole answer
         // (`Client::turn`), and an adapter that pretended to stream would deliver one event at the
         // end, which is a worse lie than a refusal.
-        Err(LlmError::transport(
-            "this build asks for a whole answer, not a stream — the model adapter has no \
-             streaming path",
-        ))
+        Err(no_streaming_path())
     }
 }
 
+/// The TLS adapter: the same request, over a connection this machine's trust store vouched for.
+///
+/// The connector is held rather than rebuilt, and it is a `Result` because building one is the only
+/// step here that can fail before a request exists: a build whose TLS backend will not initialise
+/// says so on the first `https` call instead of refusing to start.
+pub struct TlsHttp {
+    connector: Result<TlsConnector, String>,
+}
+
+impl TlsHttp {
+    /// The platform's own trust decision: whatever a browser on this machine accepts, this accepts.
+    pub fn system() -> Self {
+        Self {
+            connector: TlsConnector::new().map_err(|error| error.to_string()),
+        }
+    }
+
+    /// A connector the caller built. This is the seam the tests use, so that a test trusts a
+    /// certificate it minted rather than whatever store the machine running it happens to have.
+    pub fn with_connector(connector: TlsConnector) -> Self {
+        Self {
+            connector: Ok(connector),
+        }
+    }
+
+    fn connector(&self, url: &str) -> Result<&TlsConnector, LlmError> {
+        self.connector.as_ref().map_err(|why| {
+            LlmError::transport(format!(
+                "`{url}` is https, and this build has no usable TLS backend: {why}"
+            ))
+        })
+    }
+}
+
+impl Transport for TlsHttp {
+    fn post(&self, request: &HttpRequest) -> Result<HttpResponse, LlmError> {
+        check_headers(request)?;
+        let target = parse(&request.url)?;
+        if target.scheme == Scheme::Http {
+            return Err(LlmError::transport(format!(
+                "`{}` is http, and this adapter carries TLS only: use `HttpTransport`, which picks \
+                 the half that matches the scheme",
+                request.url
+            )));
+        }
+        let connector = self.connector(&request.url)?;
+        // The socket timeouts are set before the handshake, so a peer that accepts the connection
+        // and then says nothing is bounded by the same budget as a stalled read.
+        let stream = connect(&target, &request.url)?;
+        // The domain handed to the handshake is the host from the URL, which is what makes a
+        // certificate for another name a refusal rather than a warning.
+        let mut tls = connector
+            .connect(&target.host, stream)
+            .map_err(|error| handshake_failure(&request.url, &target.host, error))?;
+        let raw = exchange(&mut tls, request, &target)?;
+        read_response(&raw)
+    }
+
+    fn post_stream(
+        &self,
+        _request: &HttpRequest,
+        _on_event: &mut dyn FnMut(SseEvent) -> Result<(), LlmError>,
+    ) -> Result<(), LlmError> {
+        Err(no_streaming_path())
+    }
+}
+
+/// Both halves, chosen by the scheme in the URL. This is what the binary wires in.
+pub struct HttpTransport {
+    plain: PlainHttp,
+    tls: TlsHttp,
+}
+
+impl HttpTransport {
+    pub fn new() -> Self {
+        Self {
+            plain: PlainHttp::new(),
+            tls: TlsHttp::system(),
+        }
+    }
+
+    /// The same dispatch over a TLS half the caller built, which is how a test drives the binary's
+    /// own adapter against a certificate it minted.
+    pub fn with_tls(tls: TlsHttp) -> Self {
+        Self {
+            plain: PlainHttp::new(),
+            tls,
+        }
+    }
+}
+
+impl Default for HttpTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Transport for HttpTransport {
+    fn post(&self, request: &HttpRequest) -> Result<HttpResponse, LlmError> {
+        // Decided on the URL's prefix, before parsing: the adapter that cannot carry this scheme
+        // must never be the one that reports the fault.
+        if names_https(&request.url) {
+            self.tls.post(request)
+        } else {
+            self.plain.post(request)
+        }
+    }
+
+    fn post_stream(
+        &self,
+        request: &HttpRequest,
+        on_event: &mut dyn FnMut(SseEvent) -> Result<(), LlmError>,
+    ) -> Result<(), LlmError> {
+        if names_https(&request.url) {
+            self.tls.post_stream(request, on_event)
+        } else {
+            self.plain.post_stream(request, on_event)
+        }
+    }
+}
+
+fn names_https(url: &str) -> bool {
+    url.get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
+}
+
+fn no_streaming_path() -> LlmError {
+    LlmError::transport(
+        "this build asks for a whole answer, not a stream — the model adapter has no streaming path",
+    )
+}
+
+/// Refuse a header that would inject a second request, before any socket is opened — so that a test
+/// of the refusal measures the refusal rather than the network.
+fn check_headers(request: &HttpRequest) -> Result<(), LlmError> {
+    for (name, value) in &request.headers {
+        // Nothing here produces a line break, and a transport that trusts its caller is how it
+        // starts.
+        if name.contains(['\r', '\n']) || value.contains(['\r', '\n']) {
+            return Err(LlmError::transport(format!(
+                "refused a header with a line break in it: `{name}`"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// What a platform says when the certificate it was shown is for a different host. macOS and
+/// Windows word this themselves; OpenSSL reports it as a plain verification failure, which the
+/// next list catches.
+const NAMED_MISMATCH: [&str; 6] = [
+    "mismatch",
+    "does not match",
+    "not valid for",
+    "wrong host",
+    "no alternative name",
+    "host name does not match",
+];
+
+/// What a platform says when it will not vouch for the chain at all.
+const CERTIFICATE_REFUSED: [&str; 8] = [
+    "not trusted",
+    "untrusted",
+    "certificate verify failed",
+    "local issuer",
+    "unknown authority",
+    "self-signed",
+    "self signed",
+    "certificate",
+];
+
+/// Turn a failed handshake into the sentence that names the fix.
+///
+/// Three outcomes, three messages: a certificate for another name, a certificate this machine will
+/// not vouch for, and anything else the handshake hit. The detail the platform gave is carried in
+/// every one of them — a message that hides it leaves the user nothing to search for.
+fn handshake_failure(url: &str, host: &str, error: HandshakeError<TcpStream>) -> LlmError {
+    let detail = error.to_string();
+    let lowered = detail.to_lowercase();
+    let message = if NAMED_MISMATCH.iter().any(|needle| lowered.contains(needle)) {
+        format!(
+            "`{url}`: the certificate `{host}` presented is for a different name — {detail}. Point \
+             the endpoint at the name the certificate carries."
+        )
+    } else if CERTIFICATE_REFUSED
+        .iter()
+        .any(|needle| lowered.contains(needle))
+    {
+        format!(
+            "`{url}`: the certificate `{host}` presented is not one this machine trusts — {detail}. \
+             If the endpoint is yours, add its certificate authority to the system trust store; if \
+             it is not, do not send the key there."
+        )
+    } else {
+        format!(
+            "`{url}`: the TLS handshake with `{host}` failed before any request was sent — {detail}"
+        )
+    };
+    LlmError::transport(message)
+}
+
+/// Write one request and read everything the connection answers with.
+fn exchange<C: Read + Write>(
+    stream: &mut C,
+    request: &HttpRequest,
+    target: &Target,
+) -> Result<Vec<u8>, LlmError> {
+    let mut head = format!(
+        "POST {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: {}\r\n",
+        target.path,
+        host_header(target),
+        request.body.len()
+    );
+    for (name, value) in &request.headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str("\r\n");
+
+    stream
+        .write_all(head.as_bytes())
+        .and_then(|()| stream.write_all(request.body.as_bytes()))
+        .and_then(|()| stream.flush())
+        .map_err(|e| LlmError::transport(format!("the request could not be sent: {e}")))?;
+
+    let mut raw = Vec::new();
+    stream
+        .read_to_end(&mut raw)
+        .map_err(|e| LlmError::transport(format!("the answer could not be read: {e}")))?;
+    Ok(raw)
+}
+
 fn host_header(target: &Target) -> String {
-    if target.port == 80 {
+    if target.port == target.scheme.default_port() {
         target.host.clone()
     } else {
         format!("{}:{}", target.host, target.port)
@@ -347,14 +581,39 @@ mod tests {
     }
 
     #[test]
-    fn an_https_endpoint_is_refused_by_name() {
+    fn the_plaintext_adapter_refuses_an_https_endpoint_by_name() {
+        // Not a fallback and not a hang: plaintext aimed at a TLS port either says nothing or says
+        // the key in the clear, and the message names the adapter that does carry this scheme.
         let error = post_to("https://api.example.com/v1/chat/completions").unwrap_err();
-        assert!(error.body.contains("no TLS client"), "{}", error.body);
+        assert!(
+            error.body.contains("carries plaintext only"),
+            "{}",
+            error.body
+        );
+        assert!(error.body.contains("HttpTransport"), "{}", error.body);
         assert!(
             error.body.contains("https://api.example.com"),
             "{}",
             error.body
         );
+    }
+
+    #[test]
+    fn the_tls_adapter_refuses_an_http_endpoint_by_name() {
+        let error = TlsHttp::with_connector(native_tls::TlsConnector::builder().build().unwrap())
+            .post(&HttpRequest {
+                url: "http://127.0.0.1:1/v1".to_string(),
+                headers: Vec::new(),
+                body: String::new(),
+            })
+            .unwrap_err();
+        assert!(error.body.contains("carries TLS only"), "{}", error.body);
+    }
+
+    #[test]
+    fn an_unknown_scheme_names_both_that_are_supported() {
+        let error = post_to("ftp://127.0.0.1/v1").unwrap_err();
+        assert!(error.body.contains("only http and https"), "{}", error.body);
     }
 
     #[test]

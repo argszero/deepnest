@@ -233,14 +233,23 @@ six leaf tools over a `workspace-write` policy for that app, its conversation an
 `<app>/.agent/`, and a system prompt built from the real skill loader — and hands it to the loop.
 Five decisions came with the wiring:
 
-- **The HTTP adapter is plaintext, and refuses `https` by name.** `crates/gateway::transport`
-  implements `deepnest_llm::Transport` over `std::net::TcpStream`, so no crate gains a socket
-  dependency and `crates/llm` stays testable with no network. There is **no TLS client**: a
-  certificate store, a cipher suite and a trust decision are a compile-time and supply-chain step
-  this build has not taken, and the two honest options are to refuse an `https` endpoint with a
-  message naming what is missing, or to send a request that cannot arrive and hang until the user
-  blames their key. A local model server over `http://127.0.0.1` works today; a cloud endpoint does
-  not, and says so.
+- **The HTTP adapter carries both schemes, and neither degrades into the other.** `crates/gateway::transport`
+  implements `deepnest_llm::Transport` for `http://` over a `std::net::TcpStream` and nothing else,
+  so `crates/llm` still owns no socket and stays testable with no network; `https://` goes to
+  `native-tls`, which hands the trust decision to the platform — Security framework on macOS,
+  SChannel on Windows, OpenSSL on Linux — so an endpoint is checked against the same store the
+  user's browser checks it against. That store, rather than a root list bundled into the binary, is
+  the decisive argument: a machine behind a corporate proxy has its proxy's certificate authority
+  installed there, and a bundled list would refuse it and read as deepnest being broken.
+  `HttpTransport` is the two together and is what the binary wires in, while each half refuses the
+  other's scheme by name, because plaintext aimed at a TLS port is either silence or a key sent in
+  the clear and neither is a fallback. **A refused certificate says which refusal it was**
+  (`decided in implementation`, 2026-11-01): an untrusted certificate, a certificate for another
+  name and an endpoint that cannot be reached are three messages with three different fixes, and
+  since `native-tls` exposes no error kind — only a sentence — the split is read out of that
+  sentence; where a platform does not name the mismatch, the message still says the certificate was
+  refused instead of falling back to "connection failed". What the adapter still does not do is
+  stream: `post_stream` stays a refusal, and a turn is still answered whole.
 - **A turn is answered whole, not streamed.** `Client`'s `Model` impl goes through `chat_stream`,
   which this adapter cannot serve, so `crates/deepnest`'s `model::Endpoint` calls `Client::turn`:
   the same `AssistantTurn`, arriving all at once. What is missing is watching the answer being
@@ -292,9 +301,10 @@ The catalog that ships inside the binary is itself an ordinary skill file carryi
 request, one comparison — and `Releases` is the seam the request goes through. It returns the
 answer's *body*, not a parsed release, for the same reason `Publisher` returns a program's stdout:
 every way a body can be wrong is decided in code a test drives with a string. The socket is what is
-missing, and it is missing for a reason already recorded above: GitHub answers over TLS and this
-workspace has no TLS client. `release_url` states the endpoint as part of the contract, so the
-transport that lands later has no shape left to invent. Five decisions:
+missing, and what is missing is only the wiring: `crates/gateway::transport` speaks `https` now,
+but `crates/skills` does not depend on it, so nothing here fetches yet. `release_url` states the
+endpoint as part of the contract, so the transport that lands later has no shape left to invent.
+Five decisions:
 
 - **`GET` was not borrowed from the model client, and does not need to be.** The seam is this
   crate's own, returns `io::Result<String>` and takes an `owner/name` — a skills question in a
@@ -583,7 +593,7 @@ One module per cycle, each landing with its tests:
    layouts, shadowing, skip reporting, the prompt summary), the bundled catalog, the `.state.json`
    that says which skills may be refreshed, the install path for a self-publishing package, and the
    release check with its own one-request seam have landed; what remains is the socket under that
-   seam, since GitHub answers over TLS and this workspace has no TLS client.
+   seam — `crates/gateway::transport` speaks `https` now, but nothing wires it into this crate yet.
 9. `crates/packaging` — payload, first-run unpack, signing. **In progress**: the toolchain
    directory contract has landed (where a payload unpacks, the marker that makes a directory whole,
    and the sweep that removes what an interrupted unpack left behind), and so has the C toolchain

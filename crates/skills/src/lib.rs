@@ -6,8 +6,9 @@
 //! that ship inside the binary, [`installer`] puts one of them in place, [`state`] records which
 //! installed skills deepnest may refresh, and [`release`] compares an installed version against the
 //! version the package last published. The check's request is a seam and the socket behind it is
-//! still missing — this workspace has no TLS client — so what lands today is the decision and every
-//! way of reading an answer; [`release`] says exactly where that line is.
+//! still missing — `crates/gateway::transport` speaks `https` now, but nothing here is wired to it
+//! — so what lands today is the decision and every way of reading an answer; [`release`] says
+//! exactly where that line is.
 //!
 //! The rule the whole crate is shaped by is **progressive disclosure**: only a skill's name, its
 //! one-line description and the path to its file reach the prompt. The instructions are read by the

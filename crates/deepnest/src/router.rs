@@ -50,7 +50,7 @@ use deepnest_apps::{
 };
 use serde_json::{json, Value};
 
-use deepnest_gateway::{Answer, ForwardError, Forwarder, PlainHttp, StdForwarder, Target};
+use deepnest_gateway::{Answer, ForwardError, Forwarder, HttpTransport, StdForwarder, Target};
 use deepnest_packaging::{Probe, StdProbe};
 use deepnest_web::Panel;
 
@@ -1151,11 +1151,13 @@ impl Router {
             }
         };
 
+        // Both schemes: `http://` for a local model server, `https://` for anything else, verified
+        // against this machine's own trust store by `crates/gateway::transport`.
         let model: Arc<dyn deepnest_agent::Model> = Arc::new(Endpoint::new(
             llm.base_url,
             llm.api_key,
             llm.model,
-            Arc::new(PlainHttp::new()),
+            Arc::new(HttpTransport::new()),
         ));
         // The approver comes from this router's own queue, so a request registered inside the
         // turn is the one `GET`/`POST .../escalation` reads and answers on another connection.

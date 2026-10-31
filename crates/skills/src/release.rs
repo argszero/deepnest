@@ -11,7 +11,8 @@
 //! [`crate::installer::Publisher`] has, and for the same reason: every way a body can be wrong is
 //! decided here, in code a test can drive with a string, and whatever eventually speaks HTTP stays
 //! dumb enough to be replaceable. What is missing is only the socket: GitHub answers over TLS, and
-//! this workspace has no TLS client yet (`crates/llm` refuses `https` by name for the same reason).
+//! while `crates/gateway::transport` speaks it, this crate has no dependency on it and nothing here
+//! is wired to that adapter.
 //! [crate::release::release_url] therefore states the URL as part of the contract, tested, while the
 //! call that would fetch it waits.
 //!
@@ -632,13 +633,13 @@ mod tests {
 
     #[test]
     fn a_request_that_does_not_arrive_is_reported_with_what_the_transport_said() {
-        // The missing transport is exactly this branch today, so it has to read as "not checked"
-        // and never as "up to date".
-        let seam = Scripted::failing("TLS is not implemented in this build");
+        // Nothing is wired to a socket yet, so this is the branch a real run lands in, and it has
+        // to read as "not checked" and never as "up to date".
+        let seam = Scripted::failing("no socket is wired to a skill release check in this build");
         let verdict = check(&entry(), Some(&managed(Some("1.0.0"))), &seam);
         match &verdict {
             Verdict::CannotTell(Why::Unreachable { detail }) => {
-                assert!(detail.contains("TLS is not implemented"), "{detail}");
+                assert!(detail.contains("no socket is wired"), "{detail}");
             }
             other => panic!("{other:?}"),
         }

@@ -11,3 +11,9 @@ publish = false
 # The model adapter lives here (`design.md`): it implements `deepnest-llm`'s `Transport`, so a
 # model call's bytes move in the crate that owns the door, and `crates/llm` keeps no sockets.
 deepnest-llm = { path = "../llm" }
+# TLS for a model endpoint, and the reason the trust decision is not deepnest's: `native-tls` hands
+# verification to the platform — Security framework on macOS, SChannel on Windows, OpenSSL on Linux
+# — so an endpoint is checked against the same store the user's browser checks it against. A bundled
+# root list would refuse a corporate proxy's certificate, and the user would read that as deepnest
+# being broken.
+native-tls = "0.2"

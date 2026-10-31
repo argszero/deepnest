@@ -4,7 +4,7 @@
 
 One binary, one double-click, one page in your browser. You describe the app you want; an agent writes it on your own machine — React front end, Rust back end, SQLite storage — and the page reloads while it is being written.
 
-> **Status: early, and it starts.** Nothing is released yet. The design, the sandbox, the tool set, the agent loop and the binary are in the repository: `cargo run -p deepnest` serves `http://127.0.0.1:4270/` and writes its control token to `~/.deepnest/deepnest.token`. The app generator, the control panel, skills and packaging are still ahead.
+> **Status: early, and it runs.** Nothing is released yet. The design, the sandbox, the tool set, the agent loop, the app generator, the control panel and the skill loader are in the repository: `cargo run -p deepnest` serves `http://127.0.0.1:4270/`, opens that page in your desktop's browser, and writes its control token to `~/.deepnest/deepnest.token`. A model endpoint over `https` works, verified against this machine's own certificate store. What is still ahead is packaging: the payload that carries a toolchain, its first-run unpack, and signing.
 
 ---
 
