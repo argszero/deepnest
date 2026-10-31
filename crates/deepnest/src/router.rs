@@ -55,6 +55,7 @@ use deepnest_packaging::{Probe, StdProbe};
 use deepnest_web::Panel;
 
 use crate::chat;
+use crate::escalation;
 use crate::grant;
 use crate::http::{Method, Request, Response};
 use crate::model::Endpoint;
@@ -147,6 +148,10 @@ pub struct Router {
     /// What a page without the control token may hold. Always present, because it needs no file:
     /// minting into it is what makes the app page's dialog able to send a message at all.
     grants: grant::Grants,
+    /// The widening requests a turn is waiting on, and the pages answer. Always present for the
+    /// same reason `grants` is: the dialog is where an approval is given, and a router that could
+    /// not hold a request would answer every one of them with "nobody to ask".
+    requests: escalation::Requests,
 }
 
 impl Router {
@@ -160,6 +165,7 @@ impl Router {
             lifecycle: None,
             config_path: None,
             grants: grant::Grants::new(),
+            requests: escalation::Requests::new(),
         }
     }
 
@@ -309,7 +315,7 @@ impl Router {
                 // Two ways in, and only one of them is a general credential: the control token
                 // opens every route, and an app page's grant opens exactly one. Anything that is
                 // not that one route stays behind the token.
-                if !self.authorized(request) && !self.chat_grant_admits(request) {
+                if !self.authorized(request) && !self.grant_admits(request) {
                     return Answer::Full(unauthorized());
                 }
                 Answer::Full(self.app_action(request))
@@ -370,29 +376,34 @@ impl Router {
         scheme.eq_ignore_ascii_case("bearer") && token.matches(credential)
     }
 
-    /// Does the request carry a grant, and is it this app's chat route it asks for?
+    /// Does the request carry a grant, and is it this app's route of the same name it asks for?
     ///
     /// The path is compared against [`grant::path`] — the same spelling that names the cookie —
     /// rather than re-derived here, so there is one place in the codebase that decides which route
-    /// the capability opens. A grant is never a credential for anything else: not the app's other
-    /// verbs, not another app, not the config.
-    fn chat_grant_admits(&self, request: &Request) -> bool {
+    /// a capability opens, and [`grant::cookie_name`] decides which actions have one at all. A
+    /// grant is never a credential for anything else: not the app's other verbs, not another app,
+    /// not the config. The value must also have been minted for *this* action, so the cookie that
+    /// sends a message cannot answer a widening request.
+    fn grant_admits(&self, request: &Request) -> bool {
         let Some(rest) = request.path.strip_prefix("/api/apps/") else {
             return false;
         };
-        let Some((slug_text, _action)) = rest.split_once('/') else {
+        let Some((slug_text, action)) = rest.split_once('/') else {
             return false;
         };
         let Ok(slug) = Slug::parse(slug_text) else {
             return false;
         };
-        if request.path != grant::path(slug.as_str()) {
-            return false;
-        }
-        let Some(value) = grant::presented(request) else {
+        let Some(name) = grant::cookie_name(action) else {
             return false;
         };
-        self.grants.admits(slug.as_str(), value)
+        if request.path != grant::path(slug.as_str(), action) {
+            return false;
+        }
+        let Some(value) = grant::presented(request, name) else {
+            return false;
+        };
+        self.grants.admits(slug.as_str(), action, value)
     }
 
     /// Put a grant on an app's page, so its dialog can send a message.
@@ -405,17 +416,30 @@ impl Router {
         if !response.content_type.starts_with("text/html") {
             return response;
         }
-        if let Some(presented) = grant::presented(request) {
-            if self.grants.admits(slug.as_str(), presented) {
-                return response;
+        // One cookie per route the dialog may reach, and a value per cookie: the capability to
+        // send a message must not be the capability to approve a widening. Both are minted here,
+        // because serving the page is the moment this server can tell "this browser loaded the app
+        // from here" from "something else on this machine asked".
+        let mut response = response;
+        for action in [chat::ACTION, escalation::ACTION] {
+            let name = grant::cookie_name(action).expect("both routes have a cookie");
+            let presented = grant::presented(request, name)
+                .is_some_and(|value| self.grants.admits(slug.as_str(), action, value));
+            // A page that already presents a grant it can still use keeps it — minting again on
+            // every load would churn the store and hand a second tab's value to the first.
+            if presented {
+                continue;
+            }
+            // This machine's random source failed: the page still renders and the ball still
+            // opens, and the dialog declines with a reason. Inventing a value would be worse.
+            if let Some(value) = self.grants.mint(slug.as_str(), action) {
+                response = response.header(
+                    "Set-Cookie",
+                    grant::cookie(name, slug.as_str(), action, &value),
+                );
             }
         }
-        match self.grants.mint(slug.as_str()) {
-            Some(value) => response.header("Set-Cookie", grant::cookie(slug.as_str(), &value)),
-            // This machine's random source failed. The page still renders and the ball still
-            // opens; the box declines to send and says why. Inventing a value would be worse.
-            None => response,
-        }
+        response
     }
 
     /// The panel: `crates/web`'s page, carrying what only this process knows.
@@ -821,9 +845,11 @@ impl Router {
                 )
             }
         };
-        // `POST` and nothing else. A state change behind `GET` is one a browser may make by
-        // prefetching a link, and a `405` naming the method is what stops a client guessing.
-        if request.method != Method::Post {
+        // `POST` and nothing else, for every verb whose job is to change something — a state
+        // change behind `GET` is one a browser may make by prefetching a link, and a `405` naming
+        // the method is what stops a client guessing. `escalation` is exempt because half of it is
+        // a read: a page polls it for the question it is meant to answer.
+        if request.method != Method::Post && action != Action::Escalation {
             // `chat` is the one verb here that does not change a process, so it is the one that
             // must not claim to: what a caller needs to know is the method, and the wording only
             // has to be true.
@@ -849,6 +875,13 @@ impl Router {
                 )
             }
         };
+        // Answered before the lifecycle is looked for: a widening request belongs to a turn, not
+        // to the app's process, and a page whose app is stopped may still be the page that has to
+        // say no to one.
+        if action == Action::Escalation {
+            return self.escalation_route(request, &slug);
+        }
+
         let Some(lifecycle) = &self.lifecycle else {
             return Response::json(
                 503,
@@ -915,8 +948,9 @@ impl Router {
         }
 
         match action {
-            // Answered above, before the directory check it must not be subject to.
+            // Answered above, before the checks they must not be subject to.
             Action::Create => unreachable!("create is answered before this match"),
+            Action::Escalation => unreachable!("escalation is answered before this match"),
             Action::Start => {
                 let log = deepnest_apps::log_path(&lifecycle.home, &slug);
                 started(&slug, lifecycle.supervisor.start(&slug, &dir, log))
@@ -973,6 +1007,104 @@ impl Router {
         }
     }
 
+    /// `GET`/`POST /api/apps/<slug>/escalation` — the question a turn is waiting on, and the answer.
+    ///
+    /// One resource and two verbs, because they are two halves of one act: a page polls for a
+    /// question it is there to ask a person, and posts the person's answer back. `GET` answers
+    /// `{"pending": null}` when nothing is waiting — not a `404`, because the route exists and
+    /// "nobody is asking right now" is what the page needs to know to stop polling.
+    ///
+    /// The page reaches this without the control token, through a cookie scoped to this path and
+    /// this app ([`crate::grant`]), minted when the page was served. That is the same narrowing the
+    /// chat route uses, kept to a second value so an app's app script cannot spend one as the other.
+    fn escalation_route(&self, request: &Request, slug: &Slug) -> Response {
+        match request.method {
+            Method::Get | Method::Head => Response::json(200, self.pending_body(slug)),
+            Method::Post => self.answer_escalation(&request.body, slug),
+            other => Response::json(
+                405,
+                error_body(&format!(
+                    "escalation reads with GET and answers with POST, not {}",
+                    other.as_str()
+                )),
+            )
+            .header("Allow", "GET, POST"),
+        }
+    }
+
+    /// What is being asked of `slug` right now, in the shape the dialog reads.
+    fn pending_body(&self, slug: &Slug) -> String {
+        match self.requests.pending(slug.as_str()) {
+            Some(pending) => json!({
+                "pending": {
+                    "app": slug.as_str(),
+                    "from": pending.from().as_str(),
+                    "to": pending.to().as_str(),
+                    "justification": pending.justification(),
+                }
+            })
+            .to_string(),
+            None => json!({ "pending": Value::Null }).to_string(),
+        }
+    }
+
+    /// The person's answer, turned into the wake-up the waiting turn is in.
+    ///
+    /// The reply names what was answered, not only that something was: an approval whose record
+    /// does not say what it approved of is a record of nothing, and the dialog shows it either way.
+    fn answer_escalation(&self, body: &[u8], slug: &Slug) -> Response {
+        let text = match std::str::from_utf8(body) {
+            Ok(text) => text,
+            Err(_) => return Response::json(400, error_body("the body must be UTF-8 JSON")),
+        };
+        if text.trim().is_empty() {
+            return Response::json(
+                400,
+                error_body(
+                    "the body must be `{\"approve\": true}` or `{\"approve\": false}` — it was \
+                     empty",
+                ),
+            );
+        }
+        let verdict: Verdict = match serde_json::from_str(text) {
+            Ok(verdict) => verdict,
+            Err(error) => {
+                return Response::json(
+                    400,
+                    error_body(&format!(
+                        "the body is not a verdict ({error}). Send `{{\"approve\": true}}` or \
+                         `{{\"approve\": false, \"reason\": \"...\"}}`"
+                    )),
+                )
+            }
+        };
+        let resolution = if verdict.approve {
+            escalation::Resolution::Approved
+        } else {
+            escalation::Resolution::Denied(verdict.reason.clone())
+        };
+        match self.requests.answer(slug.as_str(), resolution) {
+            Ok(answered) => Response::json(
+                200,
+                json!({
+                    "answered": {
+                        "app": slug.as_str(),
+                        "from": answered.from().as_str(),
+                        "to": answered.to().as_str(),
+                        "justification": answered.justification(),
+                        "approved": verdict.approve,
+                        "reason": verdict.reason,
+                    }
+                })
+                .to_string(),
+            ),
+            // Nothing waiting is a conflict with the page's own state rather than a bad request or
+            // a missing app: the page answered a question that is no longer being asked, and the
+            // one thing it must not do is believe the answer landed.
+            Err(reason) => Response::json(409, error_body(&reason)),
+        }
+    }
+
     /// `POST /api/apps/<slug>/chat` — one message, answered by that app's own agent.
     ///
     /// Three refusals come before any turn starts, and each names a different next step: a body
@@ -1024,7 +1156,16 @@ impl Router {
             llm.model,
             Arc::new(PlainHttp::new()),
         ));
-        let reply = chat::answer(model, home, dir, slug, &message);
+        // The approver comes from this router's own queue, so a request registered inside the
+        // turn is the one `GET`/`POST .../escalation` reads and answers on another connection.
+        let reply = chat::answer(
+            model,
+            home,
+            dir,
+            slug,
+            &message,
+            Some(self.requests.approver(slug.as_str())),
+        );
         Response::json(reply.status, reply.body.to_string())
     }
 
@@ -1051,6 +1192,12 @@ enum Action {
     Restart,
     /// Send one message to the app's agent, in the body.
     Chat,
+    /// Read, or answer, the widening request a turn is waiting on.
+    ///
+    /// The one app route that is not a `POST`: `GET` reports what is being asked (a page polling
+    /// for a question), `POST` answers it. Not a state change to the app, and it needs no
+    /// lifecycle — which is why it is answered before the routes that do.
+    Escalation,
 }
 
 impl Action {
@@ -1062,12 +1209,13 @@ impl Action {
             "stop" => Some(Self::Stop),
             "restart" => Some(Self::Restart),
             chat::ACTION => Some(Self::Chat),
+            escalation::ACTION => Some(Self::Escalation),
             _ => None,
         }
     }
 
     /// The verbs, for a refusal that tells the caller what would have worked.
-    const VERBS: &str = "create, build, start, stop, restart or chat";
+    const VERBS: &str = "create, build, start, stop, restart, chat or escalation";
 }
 
 /// The value of one query parameter, percent-decoded.
@@ -1200,10 +1348,24 @@ fn takes_a_body(path: &str) -> bool {
         || path
             .strip_prefix("/api/apps/")
             .and_then(|rest| rest.split_once('/'))
-            .is_some_and(|(_, action)| action == chat::ACTION)
+            .is_some_and(|(_, action)| action == chat::ACTION || action == escalation::ACTION)
 }
 
 const CONFIG_PATH: &str = "/api/config";
+
+/// The body `POST /api/apps/<slug>/escalation` reads: the person's answer, and why when it is no.
+///
+/// `deny_unknown_fields` for the reason every body here has it: `approved` instead of `approve`
+/// would otherwise be read as a body carrying no answer at all, and the page would be told it
+/// answered when it had not.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Verdict {
+    approve: bool,
+    /// The host's own words, when they refused. Empty when they approved.
+    #[serde(default)]
+    reason: String,
+}
 
 /// The body `POST /api/config` reads.
 ///
@@ -2169,7 +2331,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_action_is_not_found_and_the_refusal_lists_the_six_that_exist() {
+    fn an_unknown_action_is_not_found_and_the_refusal_lists_the_seven_that_exist() {
         let scratch = Scratch::new("life-action");
         scratch.built_app("notes", "Notes");
         let router = supervised(&scratch);
@@ -2177,7 +2339,7 @@ mod tests {
         let unknown = router.respond(&post("/api/apps/notes/delete")).complete();
         assert_eq!(unknown.status, 404);
         assert!(
-            body(&unknown).contains("create, build, start, stop, restart or chat"),
+            body(&unknown).contains("create, build, start, stop, restart, chat or escalation"),
             "{:?}",
             unknown
         );
@@ -2187,7 +2349,7 @@ mod tests {
         let bare = router.respond(&post("/api/apps/notes")).complete();
         assert_eq!(bare.status, 404);
         assert!(
-            body(&bare).contains("create, build, start, stop, restart or chat"),
+            body(&bare).contains("create, build, start, stop, restart, chat or escalation"),
             "{:?}",
             bare
         );
@@ -2809,6 +2971,16 @@ mod tests {
         }
     }
 
+    /// Every cookie a response installed, in the order it wrote them.
+    fn set_cookies(response: &Response) -> Vec<String> {
+        response
+            .headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("set-cookie"))
+            .map(|(_, value)| value.clone())
+            .collect()
+    }
+
     /// The grant cookie a response installed, if it installed one.
     fn set_cookie(response: &Response) -> Option<String> {
         response
@@ -2826,6 +2998,57 @@ mod tests {
             .and_then(|pair| pair.split_once('='))
             .map(|(_, value)| value.to_string())
             .unwrap_or_default()
+    }
+
+    /// A request that carries one named cookie and no body.
+    fn with_named_grant(method: &str, path: &str, name: &str, cookie: &str) -> Request {
+        parse(&format!(
+            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:4270\r\n\
+             Cookie: {name}={cookie}\r\nContent-Length: 0\r\n\r\n"
+        ))
+        .unwrap()
+    }
+
+    /// A `POST` carrying one named cookie and a JSON body, read the way a real request is.
+    fn post_named_grant(path: &str, name: &str, cookie: &str, body: &str) -> Request {
+        let wire = format!(
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:4270\r\nCookie: {name}={cookie}\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let mut reader = wire.as_bytes();
+        crate::http::read(&mut reader).unwrap()
+    }
+
+    /// The same page, returning both capabilities the dialog holds.
+    fn app_page_with_grants(scratch: &Scratch, slug: &str) -> (Router, String, String) {
+        let router = supervised_forwarding(scratch, RecordingForwarder::answering(200)).0;
+        let started = router
+            .respond(&post(&format!("/api/apps/{slug}/start")))
+            .complete();
+        assert_eq!(started.status, 200, "{}", body(&started));
+        let page = router
+            .respond(&get(&format!("/app/{slug}/"), "127.0.0.1:4270"))
+            .complete();
+        assert_eq!(page.status, 200);
+        let cookies = set_cookies(&page);
+        assert_eq!(
+            cookies.len(),
+            2,
+            "a page carries one cookie per route: {cookies:?}"
+        );
+        let chat = cookies
+            .iter()
+            .find(|raw| raw.starts_with("deepnest-chat="))
+            .expect("the message cookie")
+            .clone();
+        let escalation = cookies
+            .iter()
+            .find(|raw| raw.starts_with("deepnest-escalation="))
+            .expect("the question cookie")
+            .clone();
+        assert_ne!(chat, escalation, "one value must not open both routes");
+        (router, grant_value(&chat), grant_value(&escalation))
     }
 
     /// A `POST` that carries a cookie and a real message body instead of the token.
@@ -2957,20 +3180,287 @@ mod tests {
     }
 
     #[test]
-    fn a_page_that_still_holds_a_good_capability_is_not_given_another() {
+    fn a_page_that_still_holds_good_capabilities_is_not_given_more() {
         // Reloading an app page must not churn the store, and must not take the capability a
         // second tab is already using.
         let scratch = Scratch::new("grant-reload");
         scratch.built_app("notes", "Notes");
-        let (router, cookie) = app_page_with_grant(&scratch, "notes");
+        let (router, chat, escalation) = app_page_with_grants(&scratch, "notes");
         let again = parse(&format!(
             "GET /app/notes/ HTTP/1.1\r\nHost: 127.0.0.1:4270\r\n\
-             Cookie: deepnest-chat={cookie}\r\n\r\n"
+             Cookie: deepnest-chat={chat}; deepnest-escalation={escalation}\r\n\r\n"
         ))
         .unwrap();
         let reloaded = router.respond(&again).complete();
         assert_eq!(reloaded.status, 200);
-        assert_eq!(set_cookie(&reloaded), None, "the grant was minted twice");
+        assert_eq!(
+            set_cookies(&reloaded).len(),
+            0,
+            "a capability was minted twice"
+        );
+    }
+
+    #[test]
+    fn a_page_holding_one_capability_is_given_the_other_and_keeps_the_one_it_has() {
+        // The two are separate values, so a page that has only one is missing exactly one.
+        let scratch = Scratch::new("grant-half");
+        scratch.built_app("notes", "Notes");
+        let (router, chat, _) = app_page_with_grants(&scratch, "notes");
+        let again = parse(&format!(
+            "GET /app/notes/ HTTP/1.1\r\nHost: 127.0.0.1:4270\r\n\
+             Cookie: deepnest-chat={chat}\r\n\r\n"
+        ))
+        .unwrap();
+        let reloaded = router.respond(&again).complete();
+        let minted = set_cookies(&reloaded);
+        assert_eq!(minted.len(), 1, "{minted:?}");
+        assert!(
+            minted[0].starts_with("deepnest-escalation="),
+            "{}",
+            minted[0]
+        );
+        assert!(!minted[0].contains("deepnest-chat="), "{}", minted[0]);
+    }
+
+    #[test]
+    fn a_page_hands_out_one_capability_per_route_the_dialog_opens() {
+        let scratch = Scratch::new("grant-two-routes");
+        scratch.built_app("notes", "Notes");
+        let router = supervised_forwarding(&scratch, RecordingForwarder::answering(200)).0;
+        let started = router.respond(&post("/api/apps/notes/start")).complete();
+        assert_eq!(started.status, 200, "{}", body(&started));
+        let page = router
+            .respond(&get("/app/notes/", "127.0.0.1:4270"))
+            .complete();
+
+        let cookies = set_cookies(&page);
+        assert_eq!(cookies.len(), 2, "{cookies:?}");
+        let chat = cookies
+            .iter()
+            .find(|raw| raw.starts_with("deepnest-chat="))
+            .expect("the message cookie");
+        let escalation = cookies
+            .iter()
+            .find(|raw| raw.starts_with("deepnest-escalation="))
+            .expect("the question cookie");
+        // Each names its own route and nothing wider, and neither names the other's.
+        assert!(chat.contains("Path=/api/apps/notes/chat"), "{chat}");
+        assert!(!chat.contains("/escalation"), "{chat}");
+        assert!(
+            escalation.contains("Path=/api/apps/notes/escalation"),
+            "{escalation}"
+        );
+        assert!(!escalation.contains("/chat"), "{escalation}");
+        assert_ne!(grant_value(chat), grant_value(escalation));
+    }
+
+    #[test]
+    fn the_question_route_is_not_opened_by_the_capability_that_sends_messages() {
+        // The two are separate values for exactly this: a page that can spend an agent turn must
+        // not be able to answer its own widening request with the same cookie.
+        let scratch = Scratch::new("escalation-scope");
+        scratch.built_app("notes", "Notes");
+        let (router, chat, escalation) = app_page_with_grants(&scratch, "notes");
+
+        let path = "/api/apps/notes/escalation";
+        let wrong = router
+            .respond(&with_named_grant("GET", path, grant::COOKIE, &chat))
+            .complete();
+        assert_eq!(wrong.status, 401, "{:?}", wrong);
+        let bare = router.respond(&get(path, "127.0.0.1:4270")).complete();
+        assert_eq!(bare.status, 401, "{:?}", bare);
+        // And the escalation value does not send a message either.
+        let chat_route = router
+            .respond(&post_named_grant(
+                "/api/apps/notes/chat",
+                grant::ESCALATION_COOKIE,
+                &escalation,
+                r#"{"message":"hi"}"#,
+            ))
+            .complete();
+        assert_eq!(chat_route.status, 401, "{:?}", chat_route);
+        // The one that matches is admitted, and says nothing is being asked.
+        let open = router
+            .respond(&with_named_grant(
+                "GET",
+                path,
+                grant::ESCALATION_COOKIE,
+                &escalation,
+            ))
+            .complete();
+        assert_eq!(open.status, 200, "{}", body(&open));
+        assert!(
+            body(&open).contains(r#"{"pending":null}"#),
+            "{}",
+            body(&open)
+        );
+    }
+
+    #[test]
+    fn an_answer_with_no_question_waiting_is_a_conflict_and_not_a_success() {
+        let scratch = Scratch::new("escalation-idle");
+        scratch.built_app("notes", "Notes");
+        let (router, _, escalation) = app_page_with_grants(&scratch, "notes");
+        let answered = router
+            .respond(&post_named_grant(
+                "/api/apps/notes/escalation",
+                grant::ESCALATION_COOKIE,
+                &escalation,
+                r#"{"approve":true}"#,
+            ))
+            .complete();
+        // A page that believed this landed would tell the user they approved something that never
+        // happened. `409` states the disagreement between the page and this process.
+        assert_eq!(answered.status, 409, "{}", body(&answered));
+        assert!(
+            body(&answered).contains("nothing to answer"),
+            "{}",
+            body(&answered)
+        );
+    }
+
+    #[test]
+    fn a_body_that_does_not_name_an_answer_is_refused_rather_than_read_as_a_no() {
+        let scratch = Scratch::new("escalation-body");
+        scratch.built_app("notes", "Notes");
+        let (router, _, escalation) = app_page_with_grants(&scratch, "notes");
+        let post = |body: &str| {
+            router
+                .respond(&post_named_grant(
+                    "/api/apps/notes/escalation",
+                    grant::ESCALATION_COOKIE,
+                    &escalation,
+                    body,
+                ))
+                .complete()
+        };
+        // `approved` is the obvious typo, and reading it as "no answer" would turn a page's
+        // approval into a refusal the user never gave.
+        for wrong in [r#"{"approved":true}"#, "{}", "not json"] {
+            let response = post(wrong);
+            assert_eq!(response.status, 400, "{wrong}: {}", body(&response));
+        }
+        let empty = router
+            .respond(&with_named_grant(
+                "POST",
+                "/api/apps/notes/escalation",
+                grant::ESCALATION_COOKIE,
+                &escalation,
+            ))
+            .complete();
+        assert_eq!(empty.status, 400, "{}", body(&empty));
+        assert!(body(&empty).contains("empty"), "{}", body(&empty));
+    }
+
+    #[test]
+    fn escalation_reads_with_get_and_answers_with_post() {
+        let scratch = Scratch::new("escalation-method");
+        scratch.built_app("notes", "Notes");
+        let (router, _, escalation) = app_page_with_grants(&scratch, "notes");
+        let response = router
+            .respond(&with_named_grant(
+                "DELETE",
+                "/api/apps/notes/escalation",
+                grant::ESCALATION_COOKIE,
+                &escalation,
+            ))
+            .complete();
+        assert_eq!(response.status, 405, "{:?}", response);
+        assert!(
+            response
+                .headers
+                .iter()
+                .any(|(name, value)| *name == "Allow" && *value == "GET, POST"),
+            "{:?}",
+            response.headers
+        );
+    }
+
+    #[test]
+    fn the_page_reads_the_question_and_its_answer_wakes_the_call_that_asked() {
+        // The whole hop, with a thread standing in for the turn and the route standing in for the
+        // page: a question appears, the page polls it, the page answers, and the asking thread —
+        // which is blocked inside a turn in the real thing — wakes with the person's answer.
+        let scratch = Scratch::new("escalation-roundtrip");
+        scratch.built_app("notes", "Notes");
+        let (router, _, escalation) = app_page_with_grants(&scratch, "notes");
+        let path = "/api/apps/notes/escalation";
+
+        let approver = router.requests.approver("notes");
+        let (sent, received) = std::sync::mpsc::channel();
+        let asker = std::thread::spawn(move || {
+            let answer = approver.ask(&deepnest_sandbox::EscalationRequest::new(
+                deepnest_sandbox::Mode::WorkspaceWrite,
+                deepnest_sandbox::Mode::DangerFullAccess,
+                "the build writes outside the app",
+            ));
+            let _ = sent.send(answer);
+        });
+
+        let mut shown = String::new();
+        for _ in 0..2000 {
+            let polled = router
+                .respond(&with_named_grant(
+                    "GET",
+                    path,
+                    grant::ESCALATION_COOKIE,
+                    &escalation,
+                ))
+                .complete();
+            shown = body(&polled);
+            if !shown.contains(r#""pending":null"#) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(shown.contains("danger-full-access"), "{shown}");
+        assert!(shown.contains("workspace-write"), "{shown}");
+        assert!(
+            shown.contains("the build writes outside the app"),
+            "{shown}"
+        );
+
+        let answered = router
+            .respond(&post_named_grant(
+                path,
+                grant::ESCALATION_COOKIE,
+                &escalation,
+                r#"{"approve":true}"#,
+            ))
+            .complete();
+        assert_eq!(answered.status, 200, "{}", body(&answered));
+        assert!(
+            body(&answered).contains(r#""approved":true"#),
+            "{}",
+            body(&answered)
+        );
+        assert!(
+            body(&answered).contains("the build writes outside the app"),
+            "the answer names what it answered: {}",
+            body(&answered)
+        );
+        assert_eq!(
+            received
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("the turn woke"),
+            deepnest_agent::Answer::Approved
+        );
+        asker.join().unwrap();
+
+        // And the question is gone: an answer is not a standing permission.
+        let after = router
+            .respond(&with_named_grant(
+                "GET",
+                path,
+                grant::ESCALATION_COOKIE,
+                &escalation,
+            ))
+            .complete();
+        assert!(
+            body(&after).contains(r#""pending":null"#),
+            "{}",
+            body(&after)
+        );
     }
 
     #[test]

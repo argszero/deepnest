@@ -21,9 +21,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use deepnest_llm::{AssistantTurn, ChatRequest, LlmError, Message, ToolDefinition};
+use deepnest_sandbox::Grant;
 use deepnest_tools::{Tool, ToolContext, ToolResult};
 use serde_json::Value;
 
+use crate::approve::{self, Approver};
 use crate::session::{fit_tail, Record, Session};
 
 /// The model, as this loop needs it.
@@ -155,6 +157,10 @@ pub struct Agent {
     session: Session,
     system: String,
     limits: Limits,
+    /// Who is asked when a call wants more room than the session gives. `None` means nobody, and
+    /// a request then comes back as a refusal saying so — which is the honest answer for an agent
+    /// with no page in front of it, and is what every test without a person attached gets.
+    approver: Option<Arc<dyn Approver>>,
 }
 
 impl Agent {
@@ -174,11 +180,22 @@ impl Agent {
             session,
             system: system.into(),
             limits: Limits::default(),
+            approver: None,
         }
     }
 
     pub fn with_limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Attach the person a widening request is put in front of.
+    ///
+    /// Separate from [`Agent::new`] rather than another argument, because an agent with nobody to
+    /// ask is a legitimate agent — it refuses to widen, and says why — and because a constructor
+    /// that took an `Option` would make every test pass `None` to say what it already means.
+    pub fn with_approver(mut self, approver: Arc<dyn Approver>) -> Self {
+        self.approver = Some(approver);
         self
     }
 
@@ -318,7 +335,106 @@ impl Agent {
                 }
             }
         };
-        tool.call(&arguments, &self.ctx)
+        let (arguments, wanted) = match approve::take_request(&arguments, self.ctx.policy.mode()) {
+            Ok(pair) => pair,
+            Err(reason) => return ToolResult::refused(name.to_string(), reason),
+        };
+        // The context for *this* call. Only a widening produces a second one: otherwise the agent's
+        // own is borrowed, so the path every call takes allocates nothing and "no approval, no new
+        // policy" is visible in the code that runs.
+        let widened;
+        let ctx = match &wanted {
+            None => &self.ctx,
+            Some(request) => {
+                // The jump table first, and before anybody is asked. A host shown "widen
+                // workspace-write to read-only?" is being asked to approve a narrowing; a host
+                // asked enough questions like that stops reading them.
+                if let Err(refusal) = request.validate() {
+                    return ToolResult::refused(
+                        name.to_string(),
+                        format!("{refusal}. Nothing was run."),
+                    );
+                }
+                let Some(approver) = self.approver.as_ref() else {
+                    return ToolResult::refused(
+                        name.to_string(),
+                        format!(
+                            "this call asked to widen {} to {}, and there is nobody to ask: this \
+                             agent has no page in front of it. Nothing was run. Do the work the \
+                             current mode allows, or tell the user what needs the wider mode.",
+                            request.from(),
+                            request.to()
+                        ),
+                    );
+                };
+                match approver.ask(request) {
+                    approve::Answer::Approved => {}
+                    approve::Answer::Denied { reason } => {
+                        let said = match reason.trim() {
+                            "" => String::new(),
+                            words => format!(" They said: {words}"),
+                        };
+                        return ToolResult::refused(
+                            name.to_string(),
+                            format!(
+                                "the host read the request to widen {} to {} and refused it.{said} \
+                                 Nothing was run. Change the approach rather than asking again for \
+                                 the same widening.",
+                                request.from(),
+                                request.to()
+                            ),
+                        );
+                    }
+                    approve::Answer::Unanswered { reason } => {
+                        return ToolResult::refused(
+                            name.to_string(),
+                            format!(
+                                "nobody answered the request to widen {} to {} — {reason} — so the \
+                                 call did not run. Tell the user what you needed and why; do not \
+                                 repeat the call.",
+                                request.from(),
+                                request.to()
+                            ),
+                        );
+                    }
+                }
+                // Approved. The grant is built from the session's own policy, which is *borrowed*
+                // and never written to, and it is moved into this call's context and dropped with
+                // it: the next call starts from the session's mode again, whatever this one got.
+                match Grant::approve(request.clone(), &self.ctx.policy) {
+                    Ok(grant) => {
+                        widened =
+                            ToolContext::new(grant.policy().clone(), self.ctx.workdir.clone())
+                                .with_scan(self.ctx.scan.clone());
+                        &widened
+                    }
+                    Err(refusal) => {
+                        return ToolResult::refused(
+                            name.to_string(),
+                            format!("{refusal}. Nothing was run."),
+                        )
+                    }
+                }
+            }
+        };
+
+        let result = tool.call(&arguments, ctx);
+        match &wanted {
+            // The model is told both halves: that this call ran wider, and that the session did
+            // not move. An agent told only the first would report a session that is not the one it
+            // is running in, and the next call would surprise it.
+            Some(request) => ToolResult {
+                content: format!(
+                    "[ran at {} — the host approved this widening for this call only; the session \
+                     is still {}]\n{}",
+                    request.to(),
+                    self.ctx.policy.mode(),
+                    result.content
+                ),
+                ..result
+            },
+            None => result,
+        }
     }
 
     /// The messages for one request: the system prompt, then as much conversation as fits.
@@ -776,5 +892,254 @@ mod tests {
             4,
             "the second request carries the first turn"
         );
+    }
+
+    /// What a [`Reports`] tool was handed, readable after the turn.
+    #[derive(Clone, Default)]
+    struct Runs(Arc<Mutex<Vec<(String, Value)>>>);
+
+    impl Runs {
+        fn all(&self) -> Vec<(String, Value)> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    /// A tool that reports the mode it was given and the arguments it saw, so a widening is
+    /// measured where the tool runs rather than where the loop decided.
+    struct Reports {
+        runs: Runs,
+    }
+
+    /// The tool and the handle the test reads it through.
+    fn reports() -> (Box<dyn Tool>, Runs) {
+        let runs = Runs::default();
+        (Box::new(Reports { runs: runs.clone() }), runs)
+    }
+
+    impl Tool for Reports {
+        fn name(&self) -> &'static str {
+            "read"
+        }
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::function("read", "reads", serde_json::json!({"type": "object"}))
+        }
+        fn call(&self, args: &Value, ctx: &ToolContext) -> ToolResult {
+            self.runs
+                .0
+                .lock()
+                .unwrap()
+                .push((ctx.policy.mode().as_str().to_string(), args.clone()));
+            ToolResult::ok("read", "read it")
+        }
+    }
+
+    /// A person who answers from a script, so an approval is exercised with no page and no socket.
+    struct Person {
+        answer: crate::approve::Answer,
+        asked: Mutex<Vec<deepnest_sandbox::EscalationRequest>>,
+    }
+
+    impl Person {
+        fn new(answer: crate::approve::Answer) -> Arc<Self> {
+            Arc::new(Self {
+                answer,
+                asked: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn asked(&self) -> Vec<deepnest_sandbox::EscalationRequest> {
+            self.asked.lock().unwrap().clone()
+        }
+    }
+
+    impl Approver for Person {
+        fn ask(&self, request: &deepnest_sandbox::EscalationRequest) -> crate::approve::Answer {
+            self.asked.lock().unwrap().push(request.clone());
+            self.answer.clone()
+        }
+    }
+
+    fn widening(from_request: &str) -> ToolCall {
+        call(
+            "read",
+            &format!(r#"{{"request_mode":"danger-full-access","justification":"{from_request}"}}"#),
+        )
+    }
+
+    #[test]
+    fn an_approved_widening_widens_the_call_that_asked_and_no_other() {
+        let scratch = Scratch::new("widened");
+        let (tool, runs) = reports();
+        let person = Person::new(crate::approve::Answer::Approved);
+        let model = ScriptedModel::new(vec![
+            Ok(asks(vec![widening("the build writes outside the app")])),
+            Ok(asks(vec![call("read", "{}")])),
+            Ok(answer("done")),
+        ]);
+        let agent = scratch
+            .agent_with_tools(model, vec![tool])
+            .with_approver(person.clone());
+
+        agent.run_turn("do both", &Cancellation::new()).unwrap();
+
+        let runs = runs.all();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(
+            runs[0].0, "danger-full-access",
+            "the approved call ran wider"
+        );
+        assert_eq!(
+            runs[1].0, "workspace-write",
+            "the next call is back at the session's mode"
+        );
+        assert_eq!(agent.ctx.policy.mode(), Mode::WorkspaceWrite);
+        // The request keys are the loop's, not the tool's.
+        assert_eq!(runs[0].1, serde_json::json!({}), "{:?}", runs[0].1);
+        assert_eq!(person.asked().len(), 1, "one person, one question");
+        assert_eq!(person.asked()[0].to(), Mode::DangerFullAccess);
+    }
+
+    #[test]
+    fn an_approved_call_says_it_ran_wider_and_that_the_session_did_not_move() {
+        let scratch = Scratch::new("widened-said");
+        let (tool, _runs) = reports();
+        let person = Person::new(crate::approve::Answer::Approved);
+        let model = ScriptedModel::new(vec![
+            Ok(asks(vec![widening("needs to write to the toolchain")])),
+            Ok(answer("done")),
+        ]);
+        let agent = scratch
+            .agent_with_tools(model, vec![tool])
+            .with_approver(person);
+        agent.run_turn("do it", &Cancellation::new()).unwrap();
+
+        let text = agent
+            .session()
+            .messages()
+            .unwrap()
+            .into_iter()
+            .find(|message| message.role == "tool")
+            .and_then(|message| message.content)
+            .expect("the tool result is in the conversation");
+        assert!(text.contains("ran at danger-full-access"), "{text}");
+        assert!(text.contains("this call only"), "{text}");
+        assert!(text.contains("still workspace-write"), "{text}");
+        assert!(
+            text.contains("read it"),
+            "the tool's own words survive: {text}"
+        );
+    }
+
+    #[test]
+    fn a_request_that_does_not_widen_never_reaches_a_person() {
+        let scratch = Scratch::new("no-widen");
+        let (tool, runs) = reports();
+        let person = Person::new(crate::approve::Answer::Approved);
+        let model = ScriptedModel::new(vec![
+            Ok(asks(vec![call(
+                "read",
+                r#"{"request_mode":"workspace-write","justification":"same thing again"}"#,
+            )])),
+            Ok(answer("ok")),
+        ]);
+        let agent = scratch
+            .agent_with_tools(model, vec![tool])
+            .with_approver(person.clone());
+        agent.run_turn("try it", &Cancellation::new()).unwrap();
+
+        assert!(runs.all().is_empty(), "nothing ran");
+        assert!(
+            person.asked().is_empty(),
+            "the jump table answers before the host is bothered"
+        );
+        let text = agent
+            .session()
+            .messages()
+            .unwrap()
+            .into_iter()
+            .find(|message| message.role == "tool")
+            .and_then(|message| message.content)
+            .unwrap();
+        assert!(text.contains("does not widen"), "{text}");
+    }
+
+    #[test]
+    fn a_host_who_says_no_runs_nothing_and_their_words_reach_the_model() {
+        let scratch = Scratch::new("denied");
+        let (tool, runs) = reports();
+        let person = Person::new(crate::approve::Answer::Denied {
+            reason: "not for a note app".to_string(),
+        });
+        let model = ScriptedModel::new(vec![
+            Ok(asks(vec![widening("wants the whole disk")])),
+            Ok(answer("understood")),
+        ]);
+        let agent = scratch
+            .agent_with_tools(model, vec![tool])
+            .with_approver(person);
+        agent.run_turn("do it", &Cancellation::new()).unwrap();
+
+        assert!(runs.all().is_empty(), "a refused widening runs nothing");
+        let text = agent
+            .session()
+            .messages()
+            .unwrap()
+            .into_iter()
+            .find(|message| message.role == "tool")
+            .and_then(|message| message.content)
+            .unwrap();
+        assert!(text.contains("refused it"), "{text}");
+        assert!(text.contains("not for a note app"), "{text}");
+        assert!(text.contains("rather than asking again"), "{text}");
+    }
+
+    #[test]
+    fn an_unanswered_request_is_not_a_refusal_and_says_what_to_do_instead() {
+        let scratch = Scratch::new("unanswered");
+        let (tool, _runs) = reports();
+        let person = Person::new(crate::approve::Answer::Unanswered {
+            reason: "nobody answered within two minutes".to_string(),
+        });
+        let model = ScriptedModel::new(vec![
+            Ok(asks(vec![widening("nobody is looking")])),
+            Ok(answer("I will explain")),
+        ]);
+        let agent = scratch
+            .agent_with_tools(model, vec![tool])
+            .with_approver(person);
+        agent.run_turn("do it", &Cancellation::new()).unwrap();
+        let text = agent
+            .session()
+            .messages()
+            .unwrap()
+            .into_iter()
+            .find(|message| message.role == "tool")
+            .and_then(|message| message.content)
+            .unwrap();
+        assert!(text.contains("nobody answered"), "{text}");
+        assert!(text.contains("Tell the user"), "{text}");
+    }
+
+    #[test]
+    fn an_agent_with_no_page_in_front_of_it_refuses_to_widen_rather_than_widening() {
+        let scratch = Scratch::new("no-approver");
+        let (tool, runs) = reports();
+        let model = ScriptedModel::new(vec![
+            Ok(asks(vec![widening("nobody to ask")])),
+            Ok(answer("ok")),
+        ]);
+        let agent = scratch.agent_with_tools(model, vec![tool]);
+        agent.run_turn("do it", &Cancellation::new()).unwrap();
+
+        assert!(runs.all().is_empty(), "no approval, no widest mode");
+        let text = agent
+            .session()
+            .messages()
+            .unwrap()
+            .into_iter()
+            .find(|message| message.role == "tool")
+            .and_then(|message| message.content)
+            .unwrap();
+        assert!(text.contains("nobody to ask"), "{text}");
     }
 }

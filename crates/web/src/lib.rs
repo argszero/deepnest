@@ -45,15 +45,25 @@
 //! decides *where* the dialog goes and what policy it needs — that is rewriting, and it is the
 //! gateway's job — while the ball itself is a page a person clicks in, which is this crate's.
 //!
-//! The dialog carries no token and fetches nothing. The app's own script shares this origin, so a
-//! token written into an app's page would be a token the app could read and spend; the panel's own
-//! token is safe in the panel because the panel is deepnest's page and the app's is not.
+//! The dialog carries no token. The app's own script shares this origin, so a token written into an
+//! app's page would be a token the app could read and spend; the panel's own token is safe in the
+//! panel because the panel is deepnest's page and the app's is not. What it calls instead is two
+//! routes, each paired with a cookie the server minted when it served this page and scoped to that
+//! one path — `POST …/chat`, and `GET`/`POST …/escalation`.
 //!
-//! ## What is not here yet
+//! ## The widening request
 //!
-//! Escalation approvals — modal here, one hop at a time, the approval itself the audit record
-//! (`host 20:20`) — wait on an agent being in the binary at all: there is nothing to escalate to
-//! yet, so the dialog says what it can and offers no button that does nothing.
+//! Escalation is one hop, per call, approved by a person (`host 19:03`), and this is the page that
+//! person is looking at. A turn that needs more room than the session's mode stops inside the call
+//! that needs it; the dialog polls the escalation route, shows the asked-for mode and the agent's
+//! justification, and puts two buttons under it — **Allow for this call**, and **No**. The approval
+//! is the audit record, so what it approved of is shown before it can be given, and the answer names
+//! it back.
+//!
+//! Two properties are the reason it is built this way rather than as a permission the agent asks for
+//! once: the buttons are the *only* place an answer comes from, so the page never answers on its own;
+//! and the approval buys one call, so the panel's mode and the running session's mode are the same
+//! before and after it.
 
 /// Where the panel's script is served.
 pub const SCRIPT_PATH: &str = "/panel.js";
@@ -513,6 +523,52 @@ mod tests {
         ] {
             assert!(DIALOG_STYLE.contains(selector), "{selector} is unstyled");
         }
+    }
+
+    #[test]
+    fn the_dialog_shows_the_widening_request_and_answers_it_only_when_clicked() {
+        // The route, what it asks, the reason it gives, and the answer — all four, or the person is
+        // clicking a button whose object they cannot see.
+        assert!(
+            DIALOG_SCRIPT.contains("/escalation"),
+            "the dialog never asks for a question"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("pending"),
+            "it does not read the question"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("justification"),
+            "the reason the agent gave is not shown"
+        );
+        assert!(DIALOG_SCRIPT.contains("approve"), "it never answers");
+        // Buttons, not a timer: nothing in this file may answer without a person.
+        assert!(
+            DIALOG_SCRIPT.contains("disable") || DIALOG_SCRIPT.contains("disabled"),
+            "a second click during the answer is not guarded against"
+        );
+        // Polling while the turn is in flight, and stopped when it is not: a poll that outlives the
+        // turn is a page asking for a question nobody is asking.
+        assert!(DIALOG_SCRIPT.contains("setInterval"), "nothing polls");
+        assert!(
+            DIALOG_SCRIPT.contains("clearInterval"),
+            "a poll outlives the turn it was started for"
+        );
+        for selector in [
+            "#deepnest-dialog-asked",
+            "#deepnest-dialog-asked-what",
+            "#deepnest-dialog-asked-why",
+            "#deepnest-dialog-allow",
+            "#deepnest-dialog-refuse",
+        ] {
+            assert!(DIALOG_STYLE.contains(selector), "{selector} is unstyled");
+        }
+        // `all: initial` leaves a button with no border and no size, so a hidden block that becomes
+        // visible needs its own rule for `[hidden]` as well as for itself.
+        assert!(
+            DIALOG_STYLE.contains("#deepnest-dialog-asked[hidden]"),
+            "the question cannot be hidden again"
+        );
     }
 
     #[test]

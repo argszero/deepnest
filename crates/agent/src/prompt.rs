@@ -152,7 +152,14 @@ restart deepnest itself — it is the process running this page, and the sandbox
 running instance back. And you may not read a machine credential out to somewhere else: no cloud \
 metadata endpoints, no tunnels out. Both are refused before the command runs.\n\n\
 **Risk does not hide in one command.** A write is a write whether it is `>` or `tee` or a build \
-script; the fence checks the process, not the spelling.\n",
+script; the fence checks the process, not the spelling.\n\n\
+**If a call needs more room than this mode gives, ask for it in the call itself.** Add two \
+arguments to the call that needs it: `request_mode`, naming the mode you need \
+(`workspace-write` or `danger-full-access`), and `justification`, one sentence a person can judge. \
+The user is asked on the page, about that call and no other: the call then runs wider, or does not \
+run at all, and the result says which. The session's mode does not move. Ask only when the work \
+truly cannot be done where you are — every request spends the user's attention, and a refusal is \
+an answer you do not repeat.\n",
     );
 
     out.push_str(
@@ -295,6 +302,16 @@ mod tests {
         for absent in ["emrg", "boss", "rants", "scheduler", "system.j2"] {
             assert!(!prompt.to_lowercase().contains(absent), "leaked {absent}");
         }
+    }
+
+    #[test]
+    fn the_prompt_says_how_to_ask_for_more_room_and_that_one_call_is_all_it_buys() {
+        let prompt = system_prompt(&ctx());
+        assert!(prompt.contains("request_mode"), "{prompt}");
+        assert!(prompt.contains("justification"), "{prompt}");
+        // The two facts a model must not get wrong: who is asked, and what does not move.
+        assert!(prompt.contains("asked on the page"), "{prompt}");
+        assert!(prompt.contains("session's mode does not move"), "{prompt}");
     }
 
     #[test]

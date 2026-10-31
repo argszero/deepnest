@@ -157,7 +157,7 @@ Three modes: `read-only`, `workspace-write`, `danger-full-access`. The fence is 
 
 One function, `writable_roots()`, feeds both the file tools' refusal path and the OS profile, so the two can never answer differently (`impl, ref: emrg/sandbox/roots.py`). The writable set is exactly: the app directory, the toolchain directory, and the temp directory.
 
-Escalation is a **jump table, one hop, per call**: the tool call carries the requested tier and a justification, the host approves it on the web page, and the session default never moves. `read-only` may jump straight to `danger-full-access`; `danger-full-access` has nowhere to go; a request that does not widen is refused (`impl, ref: emrg/sandbox/escalation.py`).
+Escalation is a **jump table, one hop, per call**: the tool call carries the requested tier and a justification, the host approves it on the web page, and the session default never moves. `read-only` may jump straight to `danger-full-access`; `danger-full-access` has nowhere to go; a request that does not widen is refused, before the host is asked anything (`impl, ref: emrg/sandbox/escalation.py`). The question reaches the person through `GET`/`POST /api/apps/<slug>/escalation` — the route the dialog polls while a turn is waiting.
 
 Protected files — unwritable in every mode, compared by file **identity** rather than by string: device+inode on unix, volume serial+file index on Windows — are `config.toml`, `deepnest.token`, and the skill state file (`impl, ref: emrg/sandbox/policy.py::same_file`). `std` has no stable Windows API for that pair, so the syscall is delegated to `same-file` rather than reimplemented.
 
@@ -445,10 +445,25 @@ right:
   `document.cookie` and never touches the panel's `<meta>`, so a page whose own agent rewrote it
   cannot get a token out of the box either.
 
-**Still to come**: the escalation approvals inside that dialog — modal here, one hop at a time, the
-approval itself the audit record (`host 20:20`). The agent is in the binary, so the route answers;
-what is missing is the modal that answers a request for a wider tier, and it waits for the tier it
-would grant.
+**The escalation prompt is in that dialog** (`decided in implementation`, 2026-10-31). One hop, one
+call, approved by a person — and the person is looking at this page. Four decisions carry it:
+
+- **The request rides in the call that needs the room.** `request_mode` and `justification` are two
+  argument keys on the tool call, read and removed before the tool sees them. A tool of its own would
+  ask for room without naming what for, and a separate round trip would spend a model call to say
+  what the call already says. The loop checks the jump table **before** anybody is asked, so a
+  request that does not widen never becomes a question — a host shown "widen workspace-write to
+  read-only?" is being asked to approve a narrowing, and a host asked enough of those stops reading.
+- **The turn waits, the page polls.** `GET /api/apps/<slug>/escalation` is what the dialog asks while
+  a message is in flight; `POST` to the same path is the answer. The wait is bounded at two minutes,
+  and what comes back when it runs out is *nobody answered* rather than *no* — the model's next move
+  differs, and so does what the user should do about it.
+- **One call, and the session does not move.** The approval produces a `Grant` for that call's
+  context alone; the session's own policy is borrowed and never written to, and the tool result the
+  model reads says both halves — the mode the call ran at, and the mode the session is still in.
+- **A second cookie, not a wider one.** The page already holds a cookie scoped to the chat route; the
+  question route gets its own value and its own path, so the capability to spend an agent turn cannot
+  answer a widening request. A value names an app *and* a route, and the router checks both.
 
 ### `crates/packaging` — the single file
 
@@ -512,11 +527,11 @@ One module per cycle, each landing with its tests:
    contract (slug, manifest, discovery, log tail, `GET /api/apps`), the process lifecycle (port
    allocation, start/stop/restart), and the template and the build (`POST /api/apps/<slug>/create`
    and `/build`). All three are wired into the binary, so this is not a module that sits unread.
-7. `crates/gateway` + `crates/web` — the single door, the panel, the dialog. **In progress**: the
-   gateway's forward, the HTTP layer under it, the WebSocket upgrade, unbuffered streaming, the panel
-   and the dialog injection with its CSP rewrite are in, and the binary serves connections
-   concurrently; the escalation prompt inside the dialog remains, and the agent it talks to
-   is now in the binary.
+7. `crates/gateway` + `crates/web` — the single door, the panel, the dialog. **Landed**: the
+   gateway's forward, the HTTP layer under it, the WebSocket upgrade, unbuffered streaming, the panel,
+   the dialog injection with its CSP rewrite, and the escalation prompt inside that dialog — the
+   request carried by a call, the page polling for it, and the answer widening exactly one call. The
+   binary serves connections concurrently, which is what lets a turn wait while the page answers.
 8. `crates/skills` — loader, catalog, installer. **In progress**: the loader (two roots, two
    layouts, shadowing, skip reporting, the prompt summary), the bundled catalog, the `.state.json`
    that says which skills may be refreshed, the install path for a self-publishing package, and the
