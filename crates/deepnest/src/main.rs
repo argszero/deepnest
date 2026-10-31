@@ -175,10 +175,40 @@ fn serve() -> Result<(), Failure> {
         env!("CARGO_PKG_VERSION"),
         running.url()
     );
-    println!("  config: {}", config_path.display());
-    println!("  token:  {} (mode 0600)", token_path.display());
-    println!("  apps:   {}", apps_dir.display());
-    println!("  logs:   {}", home.join(deepnest_apps::LOGS_DIR).display());
+    println!("  config:    {}", config_path.display());
+    println!("  token:     {} (mode 0600)", token_path.display());
+    println!("  apps:      {}", apps_dir.display());
+    println!(
+        "  logs:      {}",
+        home.join(deepnest_apps::LOGS_DIR).display()
+    );
+
+    // The toolchain directory is read only here, after the port: the bind is the single-instance
+    // admission, so by this point no other deepnest can be filling a staging directory, and what is
+    // under `toolchain/` is from a run that already ended. Sweeping before the bind would let a
+    // second instance delete the staging directory the first one is writing.
+    match deepnest_packaging::sweep(&home) {
+        Ok(removed) => {
+            for path in removed {
+                eprintln!(
+                    "deepnest: removed a leftover from an interrupted unpack: {}",
+                    path.display()
+                );
+            }
+        }
+        // A toolchain directory that cannot be read is worth saying and not worth stopping for: the
+        // panel is where a user finds out what is wrong, and refusing to start takes the panel away.
+        Err(error) => eprintln!("deepnest: cannot inspect the toolchain directory: {error}"),
+    }
+    let toolchain = deepnest_packaging::status(
+        &home,
+        deepnest_packaging::VERSION,
+        deepnest_packaging::PAYLOAD,
+    )
+    .map(|status| status.to_string())
+    .unwrap_or_else(|error| format!("cannot be read: {error}"));
+    println!("  toolchain: {toolchain}");
+
     let _ = std::io::stdout().flush();
 
     // The listener runs on its own thread; this one waits for the process to be ended. There is
