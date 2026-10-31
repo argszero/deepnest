@@ -47,7 +47,7 @@ pub mod updates;
 pub use deepnest_gateway::http;
 
 pub use config::{Config, ConfigError, Llm};
-pub use home::{home, prepare_home, HOME_ENV};
+pub use home::{home, prepare, prepare_home, HOME_ENV};
 pub use router::Router;
 pub use server::{start, BindAttempts, BindError, Server, ServerOptions, DEFAULT_PORT, LOOPBACK};
 pub use token::Token;

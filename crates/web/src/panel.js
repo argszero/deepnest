@@ -313,35 +313,39 @@
   var REFRESH_POLL_MS = 500;
   var REFRESH_POLLS = 240;
 
-  function askRefresh(name, row, press) {
-    press.textContent = "Refreshing " + name + "...";
+  function askRefresh(name, row, press, verb) {
+    verb = verb || "Refresh";
+    press.textContent = verb + "ing " + name + "...";
     return api("/api/skills/refresh", { method: "POST", body: JSON.stringify({ name: name }) })
       .then(function () {
-        return awaitRefresh(name, row, REFRESH_POLLS);
+        return awaitRefresh(name, row, REFRESH_POLLS, verb);
       })
       .then(function () {
         // Enabled again either way: a refresh that failed can be asked for again, and one that
         // worked is cheap to repeat.
-        press.textContent = "Refresh " + name;
+        press.textContent = verb + " " + name;
       })
       .catch(function (error) {
-        press.textContent = "Refresh " + name;
+        press.textContent = verb + " " + name;
         throw error;
       });
   }
 
-  function awaitRefresh(name, row, left) {
+  function awaitRefresh(name, row, left, verb) {
+    // "Refreshed" or "Installed", from the word on the press that was used: a first install
+    // reported as a refresh would describe something that never happened.
+    var done = (verb || "Refresh").toLowerCase() + "ed";
     return api("/api/skills/refresh").then(function (answer) {
       var refresh = answer && answer.refresh;
       if (refresh && refresh.name === name && refresh.state !== "refreshing") {
         if (refresh.state === "refreshed") {
           reportRefresh(
             row,
-            "refreshed" + (refresh.version ? " to " + refresh.version : ", version still unknown"),
+            done + (refresh.version ? " to " + refresh.version : ", version still unknown"),
             "note"
           );
         } else {
-          reportRefresh(row, "not refreshed: " + (refresh.detail || "no reason given"), "bad");
+          reportRefresh(row, "not " + done + ": " + (refresh.detail || "no reason given"), "bad");
         }
         return null;
       }
@@ -351,10 +355,31 @@
       }
       return new Promise(function (resolve) {
         setTimeout(function () {
-          resolve(awaitRefresh(name, row, left - 1));
+          resolve(awaitRefresh(name, row, left - 1, verb));
         }, REFRESH_POLL_MS);
       });
     });
+  }
+
+  // ---- install what the catalog offers -------------------------------------------------------
+
+  // Those rows arrive in the markup, because the catalog is a file the user edits; this binds the
+  // one press per entry deepnest can fetch. An install and a refresh are one operation on the
+  // server — `installer::install` writes the file either way and says which happened through
+  // `replaced` — so both presses use the queue and the poll above rather than a second of each.
+  function bindOffers() {
+    var rows = document.querySelectorAll("[data-offer]");
+    for (var i = 0; i < rows.length; i += 1) {
+      bindOffer(rows[i]);
+    }
+  }
+
+  function bindOffer(row) {
+    var name = row.getAttribute("data-offer");
+    var press = button("Install " + name, function () {
+      return askRefresh(name, row, press, "Install");
+    });
+    row.appendChild(press);
   }
 
   // Replaced rather than appended: a second press must not leave the previous answer standing
@@ -369,5 +394,6 @@
     said.textContent = " " + text;
   }
 
+  bindOffers();
   refreshUpdates();
 })();

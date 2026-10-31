@@ -309,6 +309,31 @@ The catalog that ships inside the binary is itself an ordinary skill file carryi
 
 **The bundled catalog is a floor, not a source of truth.** `catalog::ensure` writes it only when the file is absent, which covers a fresh install and an upgrade whose file was deleted, and never overwrites a catalog the user curated.
 
+**What has landed since: the floor is laid, and the catalog is offered** (`decided in
+implementation`, 2026-11-01). `home::prepare` calls `catalog::ensure` beside `prepare_home`, and
+`serve()` calls `prepare` — the one place a start already runs. `ensure` had no caller before, so a
+machine that had never been given the file by hand had no catalog at all: every refresh was refused
+with "the catalog names no skill called ...", and the two entries the binary ships existed only
+inside the binary. `prepare` is a function rather than two lines in `main` so a test can ask what a
+start leaves behind without starting one. Four decisions:
+
+- **The panel lists what the catalog offers and this home does not have**, with one install press per
+  entry deepnest can fetch. A catalog whose entries nobody is shown has only the loader's one line to
+  recommend them with, and the loader's line is a sentence, not an action.
+- **An entry deepnest cannot fetch says which field is missing, and gets no press.** `repo`,
+  `install` and `dest` are named one at a time, so a hand-edited catalog that dropped one is a
+  fixable line rather than a mystery; a press there could only run something the entry never
+  described.
+- **The offered rows are rendered by the server, like the installed ones**, because the catalog is a
+  file the user edits; only the press is the script's, since a button without a script would be a
+  claim the page cannot keep. An install and a refresh are one operation on the server —
+  `installer::install` writes the file either way and reports which happened through `replaced` — so
+  both presses share the refresh queue and poll instead of growing a second copy of each, and the
+  outcome sentence takes its word from the press that was used.
+- **A catalog line that will not parse is reported where unusable skills already are.** The same
+  fact one level up: an entry that vanished without a word is indistinguishable from a catalog that
+  never held it.
+
 **The release check has landed, and its request goes through a seam of its own** (`decided in
 implementation`, 2026-10-31). `crates/skills::release` answers "is there a newer release than the
 one on disk?" — one request, one comparison — and `Releases` is the seam the request goes through.
