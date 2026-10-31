@@ -1,0 +1,15 @@
+[package]
+name = "deepnest-agent"
+description = "The app agent: turn loop, tool dispatch, two-layer persistence and the system prompt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+deepnest-llm = { path = "../llm" }
+deepnest-sandbox = { path = "../sandbox" }
+deepnest-tools = { path = "../tools" }
+serde = { workspace = true }
+serde_json = { workspace = true }

@@ -12,6 +12,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "deepnest-agent"
+version = "0.1.0"
+dependencies = [
+ "deepnest-llm",
+ "deepnest-sandbox",
+ "deepnest-tools",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "deepnest-command-scan"
 version = "0.1.0"
 dependencies = [
