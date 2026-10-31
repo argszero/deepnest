@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use socket2::{Domain, Protocol, Socket, Type};
 
 use crate::http::{self, Method, ParseError, ReadError, Response};
-use crate::router::Router;
+use crate::router::{Lifecycle, Router};
 use crate::token::{self, Token};
 
 /// The port the design fixes. It is the only port anyone — user, browser, README — knows.
@@ -145,6 +145,10 @@ pub struct ServerOptions {
     /// `~/.deepnest/apps`, for the panel and `/api/apps`. `None` reports that the directory is
     /// unknown rather than answering that there are no apps.
     pub apps_dir: Option<PathBuf>,
+    /// The process supervisor, when this process may start and stop apps. `None` leaves the
+    /// lifecycle routes answering `503`: a server that read apps but could not run them would
+    /// otherwise have to pretend the button worked.
+    pub lifecycle: Option<Lifecycle>,
     /// How often the keepalive re-asserts the token file.
     pub keepalive: Duration,
     pub bind: BindAttempts,
@@ -158,6 +162,7 @@ impl Default for ServerOptions {
             token_path: None,
             model: None,
             apps_dir: None,
+            lifecycle: None,
             keepalive: Duration::from_secs(30),
             bind: BindAttempts::default(),
         }
@@ -256,8 +261,15 @@ pub fn start(options: ServerOptions) -> Result<Server, StartError> {
     })?;
 
     let mut router = Router::new(addr.port(), options.model.clone(), options.token.clone());
-    if let Some(dir) = options.apps_dir.clone() {
-        router = router.with_apps_dir(dir);
+    match (options.lifecycle.clone(), options.apps_dir.clone()) {
+        // The supervisor is what makes the lifecycle routes real, and a home always implies
+        // `home/apps` — so a caller that gave the home need not spell the directory twice.
+        (Some(lifecycle), dir) => {
+            let apps = dir.unwrap_or_else(|| deepnest_apps::apps_dir(&lifecycle.home));
+            router = router.with_lifecycle(lifecycle.supervisor, lifecycle.home, apps);
+        }
+        (None, Some(dir)) => router = router.with_apps_dir(dir),
+        (None, None) => {}
     }
     let router = Arc::new(router);
     let keepalive = match (options.token_path.clone(), options.token) {
@@ -333,7 +345,18 @@ fn answer(mut stream: TcpStream, router: &Router) -> io::Result<()> {
             (router.respond(&request), head_only)
         }
         Err(ReadError::Parse(ParseError::UnsupportedMethod)) => (
-            Response::text(405, "this server answers GET and HEAD\n").header("Allow", "GET, HEAD"),
+            Response::text(405, "this server answers GET, HEAD, POST and DELETE\n")
+                .header("Allow", "GET, HEAD, POST, DELETE"),
+            false,
+        ),
+        // Nothing here reads a body, so a request that announces one is refused before its route
+        // is even looked at: answering "done" to a request whose content was never seen is the
+        // failure this arm exists to prevent.
+        Err(ReadError::Parse(ParseError::Body)) => (
+            Response::text(
+                411,
+                "this server reads no request body: send the action in the path\n",
+            ),
             false,
         ),
         Err(ReadError::Parse(ParseError::Oversized)) => {

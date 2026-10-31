@@ -83,6 +83,7 @@ fn start(scratch: &Scratch, model: Option<&str>) -> (server::Server, Token) {
         token_path: Some(scratch.token_path()),
         model: model.map(str::to_string),
         apps_dir: Some(scratch.apps()),
+        lifecycle: None,
         keepalive: Duration::from_millis(20),
         bind: brisk(),
     })
@@ -174,17 +175,75 @@ fn head_answers_with_the_headers_a_get_would_have() {
 }
 
 #[test]
-fn a_post_is_refused_with_a_method_not_allowed() {
+fn a_method_this_server_does_not_serve_is_refused_with_a_method_not_allowed() {
     let scratch = Scratch::new("method");
     let (running, _token) = start(&scratch, None);
     let addr = running.addr();
 
+    // PUT is a real HTTP method this build does not answer; the refusal names the four it does,
+    // so a client does not have to guess.
     let answer = request(
         addr,
-        &format!("POST / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", addr.port()),
+        &format!("PUT / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", addr.port()),
     );
     assert!(answer.starts_with("HTTP/1.1 405"), "{answer}");
-    assert!(answer.contains("Allow: GET, HEAD"));
+    assert!(
+        answer.contains("Allow: GET, HEAD, POST, DELETE"),
+        "{answer}"
+    );
+
+    running.shutdown();
+}
+
+#[test]
+fn a_request_with_a_body_is_refused_rather_than_half_read() {
+    let scratch = Scratch::new("body");
+    let (running, token) = start(&scratch, None);
+    let addr = running.addr();
+
+    // Nothing in this build reads a body. Answering the route anyway would report "done" to a
+    // request whose content was never seen, so the request is refused before routing.
+    let answer = request(
+        addr,
+        &format!(
+            "POST /api/apps/notes/start HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {}\r\nContent-Length: 9\r\n\r\nanything",
+            addr.port(),
+            token.as_str()
+        ),
+    );
+    assert!(answer.starts_with("HTTP/1.1 411"), "{answer}");
+
+    running.shutdown();
+}
+
+#[test]
+fn the_lifecycle_route_answers_over_a_real_socket() {
+    // This server was started without a supervisor, so the answer is the honest one: the route
+    // exists, needs the token, and says this process cannot run an app. What the supervisor does
+    // with a real app is `deepnest-apps`' test, and the router's with a stand-in.
+    let scratch = Scratch::new("lifecycle");
+    let (running, token) = start(&scratch, None);
+    let addr = running.addr();
+
+    let refused = request(
+        addr,
+        &format!(
+            "POST /api/apps/notes/start HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n",
+            addr.port()
+        ),
+    );
+    assert!(refused.starts_with("HTTP/1.1 401"), "{refused}");
+
+    let answered = request(
+        addr,
+        &format!(
+            "POST /api/apps/notes/start HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: Bearer {}\r\n\r\n",
+            addr.port(),
+            token.as_str()
+        ),
+    );
+    assert!(answered.starts_with("HTTP/1.1 503"), "{answered}");
+    assert!(answered.contains("without a supervisor"), "{answered}");
 
     running.shutdown();
 }
@@ -263,6 +322,7 @@ fn the_whole_home_is_assembled_the_way_the_binary_assembles_it() {
         token_path: Some(scratch.token_path()),
         model: Some(config.model().to_string()),
         apps_dir: Some(scratch.apps()),
+        lifecycle: None,
         keepalive: Duration::from_secs(30),
         bind: brisk(),
     })

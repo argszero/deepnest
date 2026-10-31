@@ -20,14 +20,18 @@
 //!   an app that does not appear indistinguishable from an app that does not exist, and the user's
 //!   only clue would be that the panel is emptier than they expected.
 //!
-//! What this crate deliberately does **not** do yet: it does not create an app, build it, start or
-//! stop it, or allocate its port. Those are the same module's next half — the template and the
-//! process lifecycle — and they land once this contract does, because a lifecycle written against
-//! an unagreed directory shape is a lifecycle rewritten.
+//! [`process`] is the other half: an app's port (allocated per start, never persisted, never
+//! visible), the supervisor that starts it and waits until it **answers** rather than until it was
+//! spawned, and stop/restart. Building the app is not here — `start` runs a binary that already
+//! exists and names the path it expected when one does not.
+//!
+//! What this crate deliberately does **not** do yet: it does not create an app or build it. That is
+//! the template, which is the one remaining piece of `crates/apps`.
 
 pub mod listing;
 pub mod logs;
 pub mod manifest;
+pub mod process;
 pub mod slug;
 
 use std::path::{Path, PathBuf};
@@ -36,6 +40,10 @@ pub use listing::{list, App, Listing, Skipped};
 pub use logs::{log_path, tail, LOGS_DIR, MAX_TAIL_BYTES};
 pub use manifest::{
     AppInfo, Manifest, ManifestError, CURRENT_TEMPLATE, FILE_NAME as MANIFEST_FILE,
+};
+pub use process::{
+    allocate, run_command, Exit, Handle, Port, Prober, Spawner, Spec, StartError, State,
+    StdSpawner, Supervisor, TcpProber, DEFAULT_READINESS, EXPECTED_BINARY, PORT_ENV,
 };
 pub use slug::{Slug, SlugError, MAX_CHARS as MAX_SLUG_CHARS};
 

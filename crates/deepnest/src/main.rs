@@ -10,12 +10,23 @@
 //! What this build does not do, and says so rather than half-doing: it does not open the browser.
 //! The page it would open is a placeholder, and opening one on every start is worth exactly as
 //! much as the panel behind it — which arrives with `crates/web`.
+//!
+//! The one piece of state this process owns beyond the port is the **supervisor**: the apps it
+//! started. It is built here and lives as long as the process, and it is deliberately *not* run
+//! down on the way out, because there is no way out to run it down on — this process waits on a
+//! park and ends by signal, so there is no point at which `stop_all` could be called before the
+//! operating system ends everything at once. An app that outlives a killed deepnest is therefore
+//! reachable only by pid for now; the shutdown path that would close it is `crates/gateway`'s,
+//! together with the real server loop. Saying that here is better than a `Drop` that suggests a
+//! clean exit this build does not have.
 
 use std::io::Write;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::thread;
 
 use deepnest::config::{self, ConfigError};
+use deepnest::router::Lifecycle;
 use deepnest::server::{self, BindError, ServerOptions, StartError};
 use deepnest::token::{self, TokenError};
 use deepnest::{home, prepare_home};
@@ -133,12 +144,21 @@ fn serve() -> Result<(), Failure> {
     // directory, and the listing reports that as "none yet" rather than as a fault.
     let apps_dir = deepnest_apps::apps_dir(&home);
 
+    // The supervisor owns every app process this run starts. Built before the port is taken so
+    // that a refused second instance has started nothing, and shared rather than moved because
+    // the HTTP worker answers state questions from another thread.
+    let supervisor = Arc::new(deepnest_apps::Supervisor::new());
+
     let options = ServerOptions {
         port: server::DEFAULT_PORT,
         token: Some(token),
         token_path: Some(token_path.clone()),
         model: config.as_ref().map(|config| config.model().to_string()),
         apps_dir: Some(apps_dir.clone()),
+        lifecycle: Some(Lifecycle {
+            supervisor: Arc::clone(&supervisor),
+            home: home.clone(),
+        }),
         ..Default::default()
     };
 
@@ -160,6 +180,7 @@ fn serve() -> Result<(), Failure> {
     println!("  config: {}", config_path.display());
     println!("  token:  {} (mode 0600)", token_path.display());
     println!("  apps:   {}", apps_dir.display());
+    println!("  logs:   {}", home.join(deepnest_apps::LOGS_DIR).display());
     let _ = std::io::stdout().flush();
 
     // The listener runs on its own thread; this one waits for the process to be ended. There is
