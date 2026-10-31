@@ -12,9 +12,14 @@ name = "deepnest"
 path = "src/main.rs"
 
 [dependencies]
+deepnest-agent = { path = "../agent" }
 deepnest-apps = { path = "../apps" }
 deepnest-gateway = { path = "../gateway" }
+deepnest-llm = { path = "../llm" }
 deepnest-packaging = { path = "../packaging" }
+deepnest-sandbox = { path = "../sandbox" }
+deepnest-skills = { path = "../skills" }
+deepnest-tools = { path = "../tools" }
 deepnest-web = { path = "../web" }
 getrandom = "0.2"
 serde = { workspace = true }

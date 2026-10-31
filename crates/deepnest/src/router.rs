@@ -42,7 +42,7 @@
 //! token written there would be a token the app could read and spend.
 
 use std::fmt::{self, Write as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use deepnest_apps::{
@@ -50,11 +50,13 @@ use deepnest_apps::{
 };
 use serde_json::{json, Value};
 
-use deepnest_gateway::{Answer, ForwardError, Forwarder, StdForwarder, Target};
+use deepnest_gateway::{Answer, ForwardError, Forwarder, PlainHttp, StdForwarder, Target};
 use deepnest_packaging::{Probe, StdProbe};
 use deepnest_web::Panel;
 
+use crate::chat;
 use crate::http::{Method, Request, Response};
+use crate::model::Endpoint;
 use crate::token::Token;
 
 /// What the router needs in order to make an app real: the supervisor that owns its process, the
@@ -247,10 +249,14 @@ impl Router {
         // One route reads a body, and every other route refuses one by name. Reading it and then
         // routing anyway would answer "done" to a request whose content was never looked at, which
         // is the one answer a server must not give about something it did not read.
-        if !request.body.is_empty() && path != CONFIG_PATH {
+        if !request.body.is_empty() && !takes_a_body(path) {
             return Answer::Full(Response::text(
                 400,
-                format!("{path} takes no request body — send none, or send one to {CONFIG_PATH}\n"),
+                format!(
+                    "{path} takes no request body — send none, or send one to {CONFIG_PATH} or \
+                     POST /api/apps/<slug>/{}\n",
+                    chat::ACTION
+                ),
             ));
         }
 
@@ -697,10 +703,18 @@ impl Router {
         // `POST` and nothing else. A state change behind `GET` is one a browser may make by
         // prefetching a link, and a `405` naming the method is what stops a client guessing.
         if request.method != Method::Post {
+            // `chat` is the one verb here that does not change a process, so it is the one that
+            // must not claim to: what a caller needs to know is the method, and the wording only
+            // has to be true.
+            let what = if action == Action::Chat {
+                "takes a message"
+            } else {
+                "changes state"
+            };
             return Response::json(
                 405,
                 error_body(&format!(
-                    "{action_text} changes state: POST /api/apps/{slug_text}/{action_text}"
+                    "{action_text} {what}: POST /api/apps/{slug_text}/{action_text}"
                 )),
             )
             .header("Allow", "POST");
@@ -718,8 +732,8 @@ impl Router {
             return Response::json(
                 503,
                 error_body(
-                    "this process cannot create, build, start or stop apps: it was started \
-                     without a lifecycle",
+                    "this process cannot create, build, start, stop or answer an app: it was \
+                     started without a lifecycle",
                 ),
             );
         };
@@ -797,6 +811,7 @@ impl Router {
                 let log = deepnest_apps::log_path(&lifecycle.home, &slug);
                 started(&slug, lifecycle.supervisor.restart(&slug, &dir, log))
             }
+            Action::Chat => self.chat(&request.body, &dir, &slug, &lifecycle.home),
             Action::Build => {
                 // The README's promise, kept before the first step instead of discovered by a
                 // compiler: `crates/apps` reports a step whose program will not start, and that
@@ -837,6 +852,61 @@ impl Router {
         }
     }
 
+    /// `POST /api/apps/<slug>/chat` — one message, answered by that app's own agent.
+    ///
+    /// Three refusals come before any turn starts, and each names a different next step: a body
+    /// that is not a message, a process with no config file to read, and a config that has no model
+    /// in it yet (`412`, because the first-run form is the fix and it is one request away).
+    ///
+    /// The turn itself is `crate::chat`'s; what is here is the half that only the router can do —
+    /// reading the endpoint out of the file the panel writes, and turning a `Reply` into a
+    /// response. The model is built per request rather than held: `POST /api/config` can change the
+    /// endpoint at any moment, and an agent assembled at startup would answer the old one until the
+    /// next start.
+    fn chat(&self, body: &[u8], dir: &Path, slug: &Slug, home: &Path) -> Response {
+        let message = match chat::message_from(body) {
+            Ok(message) => message,
+            Err(reason) => return Response::json(400, error_body(&reason)),
+        };
+        let Some(config_path) = &self.config_path else {
+            return Response::json(
+                503,
+                error_body(
+                    "this process has no config file to read: it was started without one, so \
+                     there is no model endpoint to ask",
+                ),
+            );
+        };
+        let llm = match crate::config::load(config_path) {
+            Ok(Some(config)) => config.llm,
+            // First run, and the answer is the form rather than a fault.
+            Ok(None) => {
+                return Response::json(
+                    412,
+                    error_body(&format!(
+                        "no model is configured yet — POST {CONFIG_PATH} with base_url, api_key \
+                         and model, then send the message again"
+                    )),
+                )
+            }
+            Err(error) => {
+                return Response::json(
+                    500,
+                    error_body(&format!("the config could not be read: {error}")),
+                )
+            }
+        };
+
+        let model: Arc<dyn deepnest_agent::Model> = Arc::new(Endpoint::new(
+            llm.base_url,
+            llm.api_key,
+            llm.model,
+            Arc::new(PlainHttp::new()),
+        ));
+        let reply = chat::answer(model, home, dir, slug, &message);
+        Response::json(reply.status, reply.body.to_string())
+    }
+
     fn health(&self) -> String {
         json!({
             "status": "ok",
@@ -858,6 +928,8 @@ enum Action {
     Start,
     Stop,
     Restart,
+    /// Send one message to the app's agent, in the body.
+    Chat,
 }
 
 impl Action {
@@ -868,12 +940,13 @@ impl Action {
             "start" => Some(Self::Start),
             "stop" => Some(Self::Stop),
             "restart" => Some(Self::Restart),
+            chat::ACTION => Some(Self::Chat),
             _ => None,
         }
     }
 
     /// The verbs, for a refusal that tells the caller what would have worked.
-    const VERBS: &str = "create, build, start, stop or restart";
+    const VERBS: &str = "create, build, start, stop, restart or chat";
 }
 
 /// The value of one query parameter, percent-decoded.
@@ -995,6 +1068,20 @@ fn unauthorized() -> Response {
 }
 
 /// The one route that reads a request body.
+/// The routes that read a request body, and no others.
+///
+/// Two, for one reason: `/api/config` carries an API key and `chat` carries what the user typed,
+/// and neither belongs in a URL — it is written into the browser's history and into whatever logs
+/// the URL. Everything else refuses a body by name rather than routing past it, because reading a
+/// request's content and then ignoring it is answering about something that was never looked at.
+fn takes_a_body(path: &str) -> bool {
+    path == CONFIG_PATH
+        || path
+            .strip_prefix("/api/apps/")
+            .and_then(|rest| rest.split_once('/'))
+            .is_some_and(|(_, action)| action == chat::ACTION)
+}
+
 const CONFIG_PATH: &str = "/api/config";
 
 /// The body `POST /api/config` reads.
@@ -1848,7 +1935,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_action_is_not_found_and_the_refusal_lists_the_five_that_exist() {
+    fn an_unknown_action_is_not_found_and_the_refusal_lists_the_six_that_exist() {
         let scratch = Scratch::new("life-action");
         scratch.built_app("notes", "Notes");
         let router = supervised(&scratch);
@@ -1856,7 +1943,7 @@ mod tests {
         let unknown = router.respond(&post("/api/apps/notes/delete")).complete();
         assert_eq!(unknown.status, 404);
         assert!(
-            body(&unknown).contains("create, build, start, stop or restart"),
+            body(&unknown).contains("create, build, start, stop, restart or chat"),
             "{:?}",
             unknown
         );
@@ -1866,9 +1953,107 @@ mod tests {
         let bare = router.respond(&post("/api/apps/notes")).complete();
         assert_eq!(bare.status, 404);
         assert!(
-            body(&bare).contains("create, build, start, stop or restart"),
+            body(&bare).contains("create, build, start, stop, restart or chat"),
             "{:?}",
             bare
+        );
+    }
+
+    #[test]
+    fn the_chat_route_needs_the_token_like_every_other_api_route() {
+        let scratch = Scratch::new("chat-token");
+        scratch.app("notes", "Notes");
+        let router = supervised(&scratch);
+        let payload = r#"{"message":"hi"}"#;
+        let wire = format!(
+            "POST /api/apps/notes/chat HTTP/1.1\r\nHost: 127.0.0.1:4270\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{payload}",
+            payload.len()
+        );
+        let mut reader = wire.as_bytes();
+        let request = crate::http::read(&mut reader).unwrap();
+
+        // A message is the user's own text and the answer quotes their app: reaching the port is
+        // not enough to spend a model call on it.
+        assert_eq!(router.respond(&request).complete().status, 401);
+    }
+
+    #[test]
+    fn a_message_says_the_model_is_not_configured_before_it_says_anything_else() {
+        let scratch = Scratch::new("chat-first-run");
+        scratch.app("notes", "Notes");
+        // The config path is set and the file is not there: first run, and the answer is the form
+        // rather than a fault. `412` and not `500`, because nothing here is broken.
+        let router = supervised(&scratch).with_config_path(scratch.base.join("config.toml"));
+
+        let response = router
+            .respond(&post_body(
+                "/api/apps/notes/chat",
+                r#"{"message":"what is on my list?"}"#,
+            ))
+            .complete();
+        assert_eq!(response.status, 412, "{:?}", response);
+        assert!(
+            error_text(&response).contains("POST /api/config"),
+            "{:?}",
+            response
+        );
+    }
+
+    #[test]
+    fn the_chat_route_reads_a_body_and_every_other_route_still_refuses_one() {
+        let scratch = Scratch::new("chat-body");
+        scratch.app("notes", "Notes");
+        let router = supervised(&scratch).with_config_path(scratch.base.join("config.toml"));
+
+        // Past the body check and on to the agent: the config refusal is how this test knows the
+        // body was accepted rather than dropped at the door.
+        let chat = router
+            .respond(&post_body("/api/apps/notes/chat", r#"{"message":"hi"}"#))
+            .complete();
+        assert_eq!(chat.status, 412, "{:?}", chat);
+
+        // The same body on a route that does not read one is refused by name — answering "done"
+        // to content nobody looked at is the answer a server must not give.
+        let start = router
+            .respond(&post_body("/api/apps/notes/start", r#"{"message":"hi"}"#))
+            .complete();
+        assert_eq!(start.status, 400, "{:?}", start);
+        assert!(
+            error_text(&start).contains("takes no request body"),
+            "{:?}",
+            start
+        );
+    }
+
+    #[test]
+    fn a_chat_sent_as_a_get_is_told_the_method_it_needs() {
+        let scratch = Scratch::new("chat-method");
+        scratch.app("notes", "Notes");
+        let router = supervised(&scratch);
+
+        let request = parse(&format!(
+            "GET /api/apps/notes/chat HTTP/1.1\r\nHost: 127.0.0.1:4270\r\n\
+             authorization: bearer {}\r\n",
+            "a".repeat(64)
+        ))
+        .unwrap();
+        let response = router.respond(&request).complete();
+        assert_eq!(response.status, 405, "{:?}", response);
+        assert!(
+            response
+                .headers
+                .iter()
+                .any(|(name, value)| name.eq_ignore_ascii_case("allow") && value == "POST"),
+            "{:?}",
+            response
+        );
+        // `chat` does not change a process, so it must not claim to: a message saying it "changes
+        // state" would be the wrong reassurance about what a `POST` here does.
+        assert!(
+            error_text(&response).contains("takes a message"),
+            "{:?}",
+            response
         );
     }
 

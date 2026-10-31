@@ -148,6 +148,27 @@ impl Client {
         }
     }
 
+    /// One whole answer, in the shape the loop reads.
+    ///
+    /// The turn a stream eventually assembles and the turn a single response carries are the same
+    /// thing to the caller, so both arrive as an [`AssistantTurn`]. What is lost is the *arrival*
+    /// of the text — a caller that wants to show the answer being written needs
+    /// [`Self::chat_stream`], and this path is for an adapter that can only send a whole request
+    /// and read a whole answer.
+    pub fn turn(&self, request: &ChatRequest) -> Result<AssistantTurn, LlmError> {
+        let response = self.chat(request)?;
+        let Some(choice) = response.choices.into_iter().next() else {
+            // `chat` already refuses an empty list; this is the same rule stated where the value is
+            // consumed, so a reader of this function does not have to hold `chat`'s body in mind.
+            return Err(LlmError::transport("response contained no choices"));
+        };
+        Ok(AssistantTurn {
+            content: choice.message.content,
+            tool_calls: choice.message.tool_calls.unwrap_or_default(),
+            finish_reason: FinishReason::from_wire(choice.finish_reason.as_deref()),
+        })
+    }
+
     /// One streamed request, assembled into a completed turn.
     ///
     /// A turn the provider refused arrives as `Err` whose class is
