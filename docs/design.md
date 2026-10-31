@@ -314,6 +314,15 @@ can rather than offering a button that does nothing.
 
 zstd-compressed toolchain payload unpacked on first run **atomically** — into a temp directory, then renamed, so a half-unpacked toolchain can never be mistaken for a complete one. C toolchain is not bundled: check for Xcode CLT / VS C++ Build Tools before the first build and guide the install.
 
+**What has landed so far: the toolchain directory contract** (`decided in implementation`, 2026-10-31). `crates/packaging` now answers where an unpacked payload lives (`~/.deepnest/toolchain/<version>/`), what makes one usable, and what an unpack that was killed leaves behind. Four decisions came with it:
+
+- **The staging directory is a sibling of the one it becomes, inside `toolchain/`.** Unpacking into the system temp directory is the obvious choice and the wrong one: publishing the result would then be a rename **across a filesystem boundary** whenever home and temp live on different volumes, and a rename across volumes is not a rename — it is a copy followed by a delete, whose interruption leaves exactly the half-unpacked directory this module exists to prevent.
+- **A directory is usable because a marker says so, not because it exists.** `adopt` writes the marker inside the staging directory *before* the rename, so the published name appears only once its contents are complete; a directory whose marker is missing is reported as interrupted and never used. `crates/apps` makes the same move with `deepnest.toml`: a directory is what its marker says it is.
+- **The marker names the payload, not the version.** A version directory can outlive the build that filled it — two development builds both call themselves `0.1.0`, and a restore can put an older one back over an upgrade — so a directory carrying a different payload is reported and replaced, where a bare version comparison would have called it ready and left the user running last week's compiler.
+- **An interrupted unpack is swept, not resumed.** Half of one payload is not something to continue from; the process that owns the port removes the leftovers at startup and names them, because the port is the single-instance admission — it is what proves no other deepnest can be filling a staging directory at that moment.
+
+**Still to come: the payload itself.** Unpacking a zstd archive into a `Staging` and publishing it, the C toolchain deepnest deliberately does not bundle (README already promises the check before the first build, so that one is a promise to keep rather than a decision to take), and signing every bundled Mach-O before packing. All three are written against the contract above and change none of it: the unpack fills `Staging::dir` and calls `Staging::adopt`, and nothing else may write inside `toolchain/`.
+
 macOS ships signed and notarized (`host 20:48`). Every Mach-O inside the bundled toolchain must be **signed before packing**, because first-run unpacking does not re-sign, and an unsigned child process is refused under hardened runtime. Windows ships unsigned (`host 20:56`) — SmartScreen will warn on first run, and both README and the first-run page say so plainly rather than teaching users to bypass security prompts blindly.
 
 ## 5. Interfaces that must not drift
@@ -363,7 +372,10 @@ One module per cycle, each landing with its tests:
    layouts, shadowing, skip reporting, the prompt summary), the bundled catalog and the `.state.json`
    that says which skills may be refreshed have landed; the installer that fetches what the catalog
    names — a subprocess for a self-publishing package, an HTTP client for release tags — remains.
-9. `crates/packaging` — payload, first-run unpack, signing.
+9. `crates/packaging` — payload, first-run unpack, signing. **In progress**: the toolchain
+   directory contract has landed — where a payload unpacks, the marker that makes a directory
+   whole, and the sweep that removes what an interrupted unpack left behind. The zstd unpack, the
+   C toolchain check and signing remain.
 
 ## 7. Non-negotiables
 

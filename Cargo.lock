@@ -58,6 +58,7 @@ dependencies = [
  "base64",
  "deepnest-apps",
  "deepnest-gateway",
+ "deepnest-packaging",
  "deepnest-web",
  "getrandom",
  "serde",
@@ -104,6 +105,10 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "deepnest-packaging"
+version = "0.1.0"
 
 [[package]]
 name = "deepnest-sandbox"
