@@ -22,6 +22,7 @@ use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -36,6 +37,27 @@ const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 /// How long the binary gets to come up, and the app to answer after being started.
 const PATIENCE: Duration = Duration::from_secs(30);
+
+/// How long the binary gets to end after being asked to stop, which includes the bounded wait for
+/// its connections to notice the listener is gone.
+///
+/// Unix only, like the test that uses it — and gated the same way for a reason worth stating: this
+/// file is compiled on all three platforms, clippy runs with `-D warnings`, and a helper left
+/// behind by a `#[cfg]`'d test is a `dead_code` error on the platform that skips it. That is how
+/// this constant broke the windows-latest leg of PR #36, before the gate existed.
+#[cfg(unix)]
+const EXIT_PATIENCE: Duration = Duration::from_secs(15);
+
+/// The port is fixed by the design, so two tests in this file cannot run at the same time: whoever
+/// holds this one runs a deepnest on 4270, and the other waits its turn. Without it the second test
+/// to start would find the port taken and report that as the code's fault.
+static DOOR: Mutex<()> = Mutex::new(());
+
+fn door() -> MutexGuard<'static, ()> {
+    // A panicking test poisons this, and the next one still deserves a run: what it needs is the
+    // port, not a clean lock.
+    DOOR.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// An installed deepnest in a temporary directory: a home, an app, and the child serving it.
 struct Install {
@@ -179,13 +201,54 @@ impl Install {
     }
 
     /// Start the app through the API, as the panel does, and insist it worked.
-    fn start_app(&self) {
+    ///
+    /// The answer is the app's state, which carries the port the supervisor gave it — read rather
+    /// than assumed, because that number is allocated per start and it is the only handle this test
+    /// has on the app process afterwards.
+    fn start_app(&self) -> u16 {
         let answer = self.call("POST", "/api/apps/notes/start");
         assert!(
             answer.starts_with("HTTP/1.1 200"),
             "starting the app failed: {answer}{}",
             self.read_log()
         );
+        port_from(&answer)
+    }
+
+    /// Ask this process to stop, the way a terminal and a session manager do, and wait for it to
+    /// end. The child is gone either way.
+    ///
+    /// `kill` rather than a signal call, so this file needs no dependency for one line. Unix only:
+    /// Windows has no `SIGTERM`, and what its equivalent needs — a console control event — is a
+    /// console this test does not have.
+    #[cfg(unix)]
+    fn ask_to_stop(&mut self, signal: &str) -> std::process::ExitStatus {
+        let mut child = self.child.take().expect("the binary is running");
+        let asked = Command::new("kill")
+            .arg(format!("-{signal}"))
+            .arg(child.id().to_string())
+            .status()
+            .expect("run kill to deliver the signal");
+        assert!(asked.success(), "kill -{signal} did not deliver: {asked}");
+
+        let deadline = Instant::now() + EXIT_PATIENCE;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return status,
+                Ok(None) => {}
+                Err(error) => panic!("cannot ask the binary whether it ended: {error}"),
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "the binary was still running {EXIT_PATIENCE:?} after SIG{signal}. \
+                     Its output:\n{}",
+                    self.read_log()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
     }
 }
 
@@ -250,6 +313,7 @@ fn handshake(target: &str) -> String {
 /// a second start finding this one already there.
 #[test]
 fn an_app_is_served_through_the_door_the_way_a_browser_sees_it() {
+    let _held = door();
     let mut install = Install::new();
     install.start();
     install.start_app();
@@ -463,6 +527,91 @@ fn an_app_is_served_through_the_door_the_way_a_browser_sees_it() {
         install.get("/api/health").starts_with("HTTP/1.1 200"),
         "the second start disturbed the first one"
     );
+}
+
+/// A stop request is heard, and it is a *success*: the process ends on purpose, the app it started
+/// ends with it, and the port comes free so the next start can take it.
+///
+/// Both signals the binary answers for are used — the one a terminal sends and the one a session
+/// manager sends — because the second is a manifest feature flag: one that silently stopped being
+/// enabled would leave a `kill` ending the supervisor without running it down, which is the exact
+/// defect this file is here to catch.
+#[cfg(unix)]
+#[test]
+fn a_stop_request_ends_the_app_with_the_process() {
+    let _held = door();
+    let mut install = Install::new();
+    install.start();
+    let app = install.start_app();
+    assert!(
+        install
+            .get("/app/notes/api/items")
+            .contains("{\"items\":[1]}"),
+        "the app was not serving before the stop{}",
+        install.read_log()
+    );
+
+    // Ctrl-C, which is what the terminal this was started from sends.
+    let ended = install.ask_to_stop("INT");
+    assert!(
+        ended.success(),
+        "a stop that was heard is not a failure: {ended}{}",
+        install.read_log()
+    );
+    assert!(
+        closes(app),
+        "the app outlived the process that started it: 127.0.0.1:{app} still answers"
+    );
+
+    // The port is free, which is what makes the second run possible at all — and on it the signal
+    // is the one a session manager sends.
+    install.start();
+    let app = install.start_app();
+    let ended = install.ask_to_stop("TERM");
+    assert!(
+        ended.success(),
+        "a SIGTERM stop is not a failure either: {ended}{}",
+        install.read_log()
+    );
+    assert!(
+        closes(app),
+        "the app outlived the process that started it: 127.0.0.1:{app} still answers"
+    );
+}
+
+/// The port an app's state answer says it was given, or a failure that carries the whole answer —
+/// `"port":null` means the app is not running, and that is worth seeing rather than guessing at.
+fn port_from(answer: &str) -> u16 {
+    let at = answer
+        .find("\"port\"")
+        .unwrap_or_else(|| panic!("the app's state carries no port: {answer}"));
+    let digits: String = answer[at + "\"port\"".len()..]
+        .trim_start_matches(':')
+        .trim_start()
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .collect();
+    digits
+        .parse()
+        .unwrap_or_else(|_| panic!("the app's port is not a number: {answer}"))
+}
+
+/// Whether nothing answers on this port any more, allowing the process it belonged to a moment to
+/// finish dying: the supervisor sends the kill and returns without waiting for it.
+///
+/// Unix only, with the test above: nothing else in this file watches a process it did not start.
+#[cfg(unix)]
+fn closes(port: u16) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if TcpStream::connect(("127.0.0.1", port)).is_err() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 /// `Vec<u8>::windows` will not take a needle of a different type, and the needle here is a byte

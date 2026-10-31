@@ -37,6 +37,7 @@ pub mod open;
 pub mod rebuild;
 pub mod router;
 pub mod server;
+pub mod stop;
 pub mod token;
 pub mod updates;
 
