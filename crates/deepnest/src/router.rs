@@ -51,6 +51,7 @@ use deepnest_apps::{
 use serde_json::{json, Value};
 
 use deepnest_gateway::{Answer, ForwardError, Forwarder, StdForwarder, Target};
+use deepnest_packaging::{Probe, StdProbe};
 use deepnest_web::Panel;
 
 use crate::http::{Method, Request, Response};
@@ -71,6 +72,10 @@ pub struct Lifecycle {
     /// `Prober` are: the router's job is deciding *which* app, and a test of that decision should
     /// not need an app listening on the port the kernel happened to allocate.
     pub forwarder: Arc<dyn Forwarder>,
+    /// How deepnest finds out whether this machine can compile C at all. A trait object for the
+    /// same reason `builder` is one: the check that refuses a build has to be testable on a machine
+    /// that happens to have a compiler, and on one that does not.
+    pub preflight: Arc<dyn Probe>,
     pub home: PathBuf,
 }
 
@@ -81,6 +86,7 @@ impl Lifecycle {
             supervisor,
             builder: Arc::new(StdRunner::new()),
             forwarder: Arc::new(StdForwarder),
+            preflight: Arc::new(StdProbe),
             home: home.into(),
         }
     }
@@ -94,6 +100,12 @@ impl Lifecycle {
     /// The same lifecycle with a different build runner.
     pub fn with_builder(mut self, builder: Arc<dyn Runner>) -> Self {
         self.builder = builder;
+        self
+    }
+
+    /// The same lifecycle with a different C-toolchain probe.
+    pub fn with_preflight(mut self, preflight: Arc<dyn Probe>) -> Self {
+        self.preflight = preflight;
         self
     }
 }
@@ -201,6 +213,14 @@ impl Router {
     pub fn with_forwarder(mut self, forwarder: Arc<dyn Forwarder>) -> Self {
         if let Some(lifecycle) = self.lifecycle.take() {
             self.lifecycle = Some(lifecycle.with_forwarder(forwarder));
+        }
+        self
+    }
+
+    /// Decide whether a build may start with `preflight` instead of asking this machine.
+    pub fn with_preflight(mut self, preflight: Arc<dyn Probe>) -> Self {
+        if let Some(lifecycle) = self.lifecycle.take() {
+            self.lifecycle = Some(lifecycle.with_preflight(preflight));
         }
         self
     }
@@ -778,6 +798,18 @@ impl Router {
                 started(&slug, lifecycle.supervisor.restart(&slug, &dir, log))
             }
             Action::Build => {
+                // The README's promise, kept before the first step instead of discovered by a
+                // compiler: `crates/apps` reports a step whose program will not start, and that
+                // report is truthful but late — `bun install` and `bun run build` have already
+                // run, and the user is a minute into a compile that was never going to work.
+                // `Undetermined` refuses too, because "cannot tell" is not "yes".
+                let preflight = deepnest_packaging::check(lifecycle.preflight.as_ref());
+                if !preflight.ready() {
+                    return Response::json(
+                        412,
+                        error_body(&format!("`{slug}` cannot be built yet: {preflight}")),
+                    );
+                }
                 let log = deepnest_apps::build_log_path(&lifecycle.home, &slug);
                 match deepnest_apps::build(&dir, log, lifecycle.builder.as_ref()) {
                     Ok(built) => Response::json(
@@ -1008,6 +1040,23 @@ mod tests {
 
     fn body(response: &Response) -> String {
         String::from_utf8(response.body.clone()).unwrap()
+    }
+
+    /// What the person on the other end actually reads: the `error` field, decoded.
+    ///
+    /// A refusal quotes the toolchain advice verbatim, and on Linux and Windows that advice names
+    /// a workload in quotes — `"Desktop development with C++"`. Those arrive JSON-escaped, so
+    /// comparing the raw body against the message it carries fails on exactly the platforms whose
+    /// advice matters most.
+    fn error_text(response: &Response) -> String {
+        let raw = body(response);
+        match serde_json::from_str::<Value>(&raw) {
+            Ok(value) => value
+                .get("error")
+                .and_then(Value::as_str)
+                .map_or(raw.clone(), ToString::to_string),
+            Err(_) => raw,
+        }
     }
 
     #[test]
@@ -1324,6 +1373,7 @@ mod tests {
                 scratch.apps(),
             )
             .with_builder(Arc::new(FakeBuilder::succeeds()))
+            .with_preflight(Arc::new(CcInstalled))
             .with_forwarder(forwarder);
         (router, supervisor)
     }
@@ -1576,6 +1626,10 @@ mod tests {
     }
 
     /// The router with the build runner a test chooses.
+    ///
+    /// The C-toolchain probe is a fake that always finds one: whether this machine can compile C is
+    /// a fact about the machine, and a test of the build *route* must not change its answer between
+    /// a laptop and a CI image. The refusal has its own tests, which choose the answer they want.
     fn supervised_with(scratch: &Scratch, builder: Arc<dyn deepnest_apps::Runner>) -> Router {
         let supervisor = Arc::new(deepnest_apps::Supervisor::with_parts(
             Box::new(FakeSpawner),
@@ -1584,6 +1638,27 @@ mod tests {
         router()
             .with_lifecycle(supervisor, scratch.base.clone(), scratch.apps())
             .with_builder(builder)
+            .with_preflight(Arc::new(CcInstalled))
+    }
+
+    /// A probe that finds the C toolchain, so a build route runs its steps here.
+    struct CcInstalled;
+
+    impl Probe for CcInstalled {
+        fn answers(&self, _kind: deepnest_packaging::Kind) -> deepnest_packaging::Finding {
+            deepnest_packaging::Finding::Present {
+                at: "/usr/bin/cc".to_string(),
+            }
+        }
+    }
+
+    /// A probe that says whatever a test needs it to say.
+    struct CcSaying(deepnest_packaging::Finding);
+
+    impl Probe for CcSaying {
+        fn answers(&self, _kind: deepnest_packaging::Kind) -> deepnest_packaging::Finding {
+            self.0.clone()
+        }
     }
 
     /// A build runner that records the steps it was asked to run.
@@ -1870,6 +1945,70 @@ mod tests {
 
         let listing = body(&router.respond(&authorized_get("/api/apps")).complete());
         assert!(listing.contains("My Notes — v2"), "{listing}");
+    }
+
+    #[test]
+    fn a_build_without_a_c_toolchain_is_refused_before_any_step_runs() {
+        let scratch = Scratch::new("build-no-cc");
+        scratch.built_app("notes", "Notes");
+        let builder = Arc::new(FakeBuilder::succeeds());
+        let response = supervised_with(&scratch, builder.clone())
+            .with_preflight(Arc::new(CcSaying(deepnest_packaging::Finding::Missing {
+                detail: "none of cc, gcc, clang is on PATH".to_string(),
+            })))
+            .respond(&post("/api/apps/notes/build"))
+            .complete();
+
+        // A precondition that is not met is not a build that failed: nothing was attempted, so
+        // `412` says that and the caller can act on it without reading a build log.
+        assert_eq!(response.status, 412, "{:?}", response);
+        assert!(
+            builder.steps().is_empty(),
+            "the plan must not start without a C compiler: {:?}",
+            builder.steps()
+        );
+
+        let answer = error_text(&response);
+        assert!(
+            answer.contains(deepnest_packaging::requirement().name),
+            "{answer}"
+        );
+        assert!(
+            answer.contains("none of cc, gcc, clang"),
+            "the report has to say what the probe saw: {answer}"
+        );
+        // The promise the README makes is the fix, printed where the user will see it.
+        assert!(
+            answer.contains(deepnest_packaging::requirement().fix),
+            "the refusal has to walk the user through installing it: {answer}"
+        );
+    }
+
+    #[test]
+    fn a_build_whose_toolchain_check_could_not_be_answered_is_refused_too() {
+        let scratch = Scratch::new("build-unknown-cc");
+        scratch.built_app("notes", "Notes");
+        let builder = Arc::new(FakeBuilder::succeeds());
+        let response = supervised_with(&scratch, builder.clone())
+            .with_preflight(Arc::new(CcSaying(
+                deepnest_packaging::Finding::Undetermined {
+                    why: "`xcode-select -p` could not be run".to_string(),
+                },
+            )))
+            .respond(&post("/api/apps/notes/build"))
+            .complete();
+
+        // Fail closed: "cannot tell" is not "yes", and a build started on it would spend a minute
+        // arriving at the same refusal from a compiler instead of from this check.
+        assert_eq!(response.status, 412, "{:?}", response);
+        assert!(
+            builder.steps().is_empty(),
+            "an unanswerable check must not let the plan start: {:?}",
+            builder.steps()
+        );
+        let answer = error_text(&response);
+        assert!(answer.contains("could not tell"), "{answer}");
+        assert!(answer.contains("xcode-select -p"), "{answer}");
     }
 
     #[test]
