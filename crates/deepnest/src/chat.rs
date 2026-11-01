@@ -6,10 +6,16 @@
 //!
 //! - **One agent per app, and its state lives in the app's own directory** ([`AgentPaths`]), so
 //!   deleting an app deletes its conversation and backing an app up backs the conversation up.
-//! - **Every tool call goes through the fence.** The tools are `crates/tools`' six leaves and the
-//!   policy is `crates/sandbox`'s for this app: the app directory, the toolchain and temp — the
-//!   three roots `writable_roots` already derives, so the file tools and the shell agree because
+//! - **Every tool call goes through the fence.** The tools are `crates/tools`' six leaves plus the
+//!   two seams this crate is the only one that can wire — `subagent`, whose child loop belongs to
+//!   `crates/agent`, and `install_skill`, whose catalog and publisher are [`crate::install`]'s —
+//!   and the policy is `crates/sandbox`'s for this app: the app directory, the toolchain and temp —
+//!   the three roots `writable_roots` already derives, so the file tools and the shell agree because
 //!   they are reading the same answer.
+//! - **The prompt names the tools the turn actually has.** Its tool section is rendered from the
+//!   set handed to the loop ([`registry::names`]), so it cannot advertise a tool this turn cannot
+//!   dispatch, or leave out one it can. That set is built before the prompt for exactly this
+//!   reason.
 //! - **The skills are the real loader's.** The prompt's skill index comes from
 //!   `deepnest_skills::load`, so a skill the user installed is in front of the agent rather than
 //!   in a list this file maintained separately.
@@ -42,8 +48,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use deepnest_agent::{
-    prompt::system_prompt, Agent, AgentError, AgentPaths, Approver, Cancellation, MemoryStore,
-    Model, PromptContext, Session, TurnOutcome,
+    prompt::system_prompt, Agent, AgentError, AgentPaths, Approver, Cancellation, LoopRunner,
+    MemoryStore, Model, PromptContext, Session, TurnOutcome,
 };
 use deepnest_apps::{manifest, Slug};
 use deepnest_llm::ToolDefinition;
@@ -275,23 +281,18 @@ pub fn answer(
         })
         .collect();
 
-    let system = system_prompt(
-        &PromptContext::new(
-            slug.as_str(),
-            app_dir.display().to_string(),
-            Mode::WorkspaceWrite.as_str(),
-        )
-        .with_writable(writable)
-        .with_memory_index(memory)
-        .with_skills(skills)
-        .with_app_url(format!("/app/{slug}/")),
-    );
-    // Appended rather than folded into the prompt template: what a build said is this app's own
-    // state, not a rule of the agent's, and the template is `crates/agent`'s to own.
-    let system = match &terms.build_note {
-        Some(note) => format!("{system}\n\n{note}"),
-        None => system,
-    };
+    // Everything the prompt claims is gathered before the prompt is rendered, because its tool
+    // section is rendered from the set built below. That order is the point: a prompt assembled
+    // first is a prompt that can name a tool this turn does not have.
+    let context = PromptContext::new(
+        slug.as_str(),
+        app_dir.display().to_string(),
+        Mode::WorkspaceWrite.as_str(),
+    )
+    .with_writable(writable)
+    .with_memory_index(memory)
+    .with_skills(skills)
+    .with_app_url(format!("/app/{slug}/"));
 
     // One flag shared with every tool: the loop owns the turn, so what a tool touched is recorded
     // where the tools run and read where the answer is assembled.
@@ -306,7 +307,13 @@ pub fn answer(
             app_dir.to_path_buf(),
         )),
     ));
-    let tools: Vec<Box<dyn Tool>> = registry::with_installer(installer)
+    // The child loop `subagent` delegates to: the same model, the app's own context, and the app's
+    // own `AgentPaths`, so each call keeps its conversation under
+    // `<app>/.agent/subagents/<NNNN>/history.jsonl` and never appends to the parent's file. The
+    // child gets the six leaves and neither seam, so a subagent cannot start a subagent, and it has
+    // no approver, so it cannot widen the policy its parent is fenced by.
+    let runner = Arc::new(LoopRunner::new(Arc::clone(&model), paths, context.clone()));
+    let tools: Vec<Box<dyn Tool>> = registry::with_seams(Some(runner), Some(installer))
         .into_iter()
         .map(|tool| {
             Box::new(Recorder {
@@ -315,6 +322,16 @@ pub fn answer(
             }) as Box<dyn Tool>
         })
         .collect();
+
+    // The tool section names this exact vector — the one the agent below dispatches with — so the
+    // prompt and the request's schema cannot come apart.
+    let system = system_prompt(&context.with_tools(registry::names(&tools)));
+    // Appended rather than folded into the prompt template: what a build said is this app's own
+    // state, not a rule of the agent's, and the template is `crates/agent`'s to own.
+    let system = match &terms.build_note {
+        Some(note) => format!("{system}\n\n{note}"),
+        None => system,
+    };
 
     let mut agent = Agent::new(
         model,
@@ -439,6 +456,8 @@ mod tests {
     struct Scripted {
         replies: std::sync::Mutex<Vec<Result<AssistantTurn, LlmError>>>,
         seen: std::sync::Mutex<Vec<Vec<Message>>>,
+        /// What each request was told it could call — the other half of the prompt's tool section.
+        offered: std::sync::Mutex<Vec<Vec<ToolDefinition>>>,
     }
 
     impl Scripted {
@@ -446,6 +465,7 @@ mod tests {
             Self {
                 replies: std::sync::Mutex::new(replies),
                 seen: std::sync::Mutex::new(Vec::new()),
+                offered: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
@@ -454,15 +474,40 @@ mod tests {
         fn turn(
             &self,
             messages: &[Message],
-            _tools: &[ToolDefinition],
+            tools: &[ToolDefinition],
         ) -> Result<AssistantTurn, LlmError> {
             self.seen.lock().unwrap().push(messages.to_vec());
+            self.offered.lock().unwrap().push(tools.to_vec());
             let mut replies = self.replies.lock().unwrap();
             if replies.is_empty() {
                 panic!("the model was asked more times than the script has answers");
             }
             replies.remove(0)
         }
+    }
+
+    /// The tool names the prompt advertises, read back out of the section it prints them in.
+    fn advertised(system: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut inside = false;
+        for line in system.lines() {
+            if line.starts_with("## Your tools") {
+                inside = true;
+                continue;
+            }
+            if !inside {
+                continue;
+            }
+            if line.starts_with("## ") {
+                break;
+            }
+            if let Some(rest) = line.strip_prefix("- `") {
+                if let Some(end) = rest.find('`') {
+                    names.push(rest[..end].to_string());
+                }
+            }
+        }
+        names
     }
 
     /// A typed message: the words, and nothing pasted with them — the shape four of these tests
@@ -715,6 +760,51 @@ mod tests {
             "{}",
             reply.body
         );
+    }
+
+    #[test]
+    fn the_prompt_advertises_exactly_the_tools_the_request_offers() {
+        // The whole cut in one assertion. Before it, the prompt named `subagent` — a tool this
+        // dialog never wired — and left out `install_skill`, which it did wire. The model that
+        // believed the sentence got "there is no tool called subagent" back.
+        let scratch = Scratch::new("tool-truth");
+        let model = Arc::new(Scripted::new(vec![Ok(AssistantTurn {
+            content: Some("ok".to_string()),
+            tool_calls: Vec::new(),
+            finish_reason: FinishReason::Stop,
+        })]));
+
+        let reply = answer(
+            Arc::clone(&model) as Arc<dyn Model>,
+            &scratch.home,
+            &scratch.app_dir(),
+            &scratch.slug(),
+            &ask_of("hello"),
+            &Terms::default(),
+        );
+        assert_eq!(reply.status, 200, "{}", reply.body);
+
+        let seen = model.seen.lock().unwrap();
+        let system = seen[0][0].content.clone().unwrap_or_default();
+        let offered: Vec<String> = model.offered.lock().unwrap()[0]
+            .iter()
+            .map(|definition| definition.function.name.clone())
+            .collect();
+
+        assert_eq!(
+            advertised(&system),
+            offered,
+            "the sentence in front of the model and the schema beside it must be one list"
+        );
+        // Both seams are wired in a dialog turn, which is what made this dialog's tool set wrong
+        // in the first place: it could only ever pick one of them.
+        for expected in ["subagent", "install_skill"] {
+            assert!(
+                offered.iter().any(|name| name == expected),
+                "{expected} is missing from {offered:?}"
+            );
+        }
+        assert_eq!(offered.len(), 8, "{offered:?}");
     }
 
     #[test]
