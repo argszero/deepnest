@@ -2043,8 +2043,122 @@
       return;
     }
     event.preventDefault();
+    // A fresh message ends the walk: the next `Up` should start again from the newest one sent, not
+    // from wherever the last walk stopped.
+    recallAt = 0;
+    recalled = false;
     form.requestSubmit();
   });
+
+  // `Up` in an empty box walks back through the messages already sent, and `Down` walks forward
+  // again, ending on the empty box it started from.
+  //
+  // Both keys are left alone unless the box holds nothing the person typed: a person moving the
+  // caret around a sentence they are writing is doing something else entirely, and taking the key
+  // for a history walk would replace the paragraph under them. Measured against the box holding
+  // "half a thought": the browser itself kept the text (`value` unchanged), and that is the
+  // behaviour this must not break. An empty box is the easy case — there is no caret to move — and
+  // a recalled message counts as empty-able because nobody has edited it yet.
+  input.addEventListener("keydown", function (event) {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") {
+      return;
+    }
+    if (event.isComposing) {
+      return;
+    }
+    if (input.value !== "" && !recalled) {
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      if (recallAt >= sentByHand.length) {
+        // At the oldest message: nothing left to walk to, so the key changes nothing rather than
+        // emptying a box the person is reading. The default is still taken away, because otherwise
+        // the browser moves the caret to the start of the message the person is looking at.
+        event.preventDefault();
+        return;
+      }
+      recallAt += 1;
+      event.preventDefault();
+      putBack(sentByHand[sentByHand.length - recallAt]);
+      return;
+    }
+    // `Down`. Past the newest message is the empty box, which is what a person who walked back and
+    // then changed their mind expects to arrive at.
+    if (recallAt === 0) {
+      return;
+    }
+    recallAt -= 1;
+    event.preventDefault();
+    putBack(recallAt === 0 ? "" : sentByHand[sentByHand.length - recallAt]);
+  });
+
+  // The messages this page has sent, newest last, so the box can hand one back. Measured in Chrome
+  // with a real key press, on the box after a message had gone: `Up` on the empty box left it empty
+  // (`value: ""`), while the stub had the message — so the sentence was sent, recorded in the
+  // transcript, and the one place it could not be reached again was the box it was typed in. Every
+  // agent front end this project is modelled on hands it back, and the reason is ordinary: a
+  // message that wants a word changed has to be retyped from nothing without it.
+  //
+  // Kept here rather than read from the transcript, because the transcript is the server's record of
+  // what was *said*, and what this key gives back is what was *typed* — markers and all, so the
+  // message can be sent again with the same pictures in it.
+  var sentByHand = [];
+  var RECALL_KEPT = 50;
+
+  // The messages a person would expect `Up` to walk. Kept short on purpose: a box that remembers the
+  // whole session turns one stray arrow key into a page of scrolling.
+  function remember(text) {
+    var one = String(text).trim();
+    if (!one) {
+      return;
+    }
+    // Written twice in a row is one message, not two: the key would otherwise spend two presses
+    // returning the same sentence.
+    if (sentByHand[sentByHand.length - 1] === one) {
+      return;
+    }
+    sentByHand.push(one);
+    if (sentByHand.length > RECALL_KEPT) {
+      sentByHand.shift();
+    }
+  }
+
+  // Which message `Up` is on, counted from the newest: 0 is "not walking", 1 is the last one sent.
+  var recallAt = 0;
+
+  // Whether what the box holds right now is a message this key put there and nobody has touched
+  // since. Without it the walk stops after one step: the box is no longer empty, so the guard that
+  // protects a half-typed sentence would refuse the second `Up` too — measured in Chrome, pressing
+  // `Up` twice returned the same message both times and never reached the one before it.
+  var recalled = false;
+
+  // A person's own edit ends the walk, so the next `Up` starts again from the newest message rather
+  // than from wherever the walk had stopped. `putBack` sets `value` directly, and setting a value
+  // from script does not fire this, which is what keeps a recalled message from resetting its own
+  // position.
+  input.addEventListener("input", function () {
+    recallAt = 0;
+    recalled = false;
+  });
+
+  // A message put back into the box, with the caret at its end. Position 0 is the default after
+  // setting `value`, and it would put the next word the person types in front of the sentence they
+  // just asked for.
+  function putBack(text) {
+    input.value = text;
+    recalled = text !== "";
+    input.focus();
+    var end = input.value.length;
+    try {
+      input.setSelectionRange(end, end);
+    } catch (error) {
+      // A box the browser will not let us place a caret in still holds the text, which is the part
+      // that matters.
+    }
+    // The markers in a recalled message refer to pictures this page no longer holds, so the note
+    // that counts them would be describing attachments that are not there.
+    refreshNote();
+  }
 
   form.addEventListener("submit", function (event) {
     event.preventDefault();
@@ -2061,6 +2175,9 @@
     }
 
     send.disabled = true;
+    // Remembered before the answer arrives, not after: this is the message that was typed, and a
+    // turn that fails still leaves the person wanting it back to fix and resend.
+    remember(text);
     // Two timers for the one turn: this one asks the server what the question is, and
     // `watchTheTurn` re-reads the transcript so the page can say what the turn is doing. `Asking…`
     // with nothing after it was the whole of what this page said for 112 seconds, and the reason a
