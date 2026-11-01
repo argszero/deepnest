@@ -4,11 +4,13 @@
 //! *told about* and the set the dispatcher *can run* must be the same set. Two lists that agree
 //! today is a feature that breaks silently the day one of them gains a member.
 //!
-//! Two entry points, and the difference between them is the whole reason `subagent` is a seam:
+//! Three entry points, and the difference between them is the whole reason `subagent` is a seam:
 //! [`all`] is the six leaf tools, which need nothing but a [`crate::ToolContext`]; [`with_runner`]
-//! adds `subagent` once the caller supplies the agent loop it delegates to. A caller that has not
-//! built a loop yet gets a set the model is told about and that runs — not a set with a hole in
-//! it, which is what a `subagent` tool with no runner would be.
+//! adds `subagent` once the caller supplies the agent loop it delegates to; and
+//! [`with_installer`] adds `install_skill` once the caller supplies the catalog it installs from.
+//! A caller that has not built a loop — or found a home to read a catalog under — gets a set the
+//! model is told about and that runs, not a set with a hole in it, which is what a `subagent` tool
+//! with no runner or an `install_skill` with no catalog would be.
 //!
 //! The **browser** is not here at any level: browser driving and screenshots are a skill, not a
 //! core tool (design §4). The core opens a page in the system browser and runs the skill's own
@@ -21,6 +23,7 @@ use deepnest_llm::ToolDefinition;
 use crate::files::{EditTool, ReadTool, WriteTool};
 use crate::search::{GlobTool, GrepTool};
 use crate::shell::BashTool;
+use crate::skill::{InstallSkillTool, SkillInstaller};
 use crate::subagent::{SubagentRunner, SubagentTool};
 use crate::Tool;
 
@@ -43,6 +46,13 @@ pub fn all() -> Vec<Box<dyn Tool>> {
 pub fn with_runner(runner: Arc<dyn SubagentRunner>) -> Vec<Box<dyn Tool>> {
     let mut tools = all();
     tools.push(Box::new(SubagentTool::new(runner)));
+    tools
+}
+
+/// The same set with `install_skill` added, once the caller can install from a catalog.
+pub fn with_installer(installer: Arc<dyn SkillInstaller>) -> Vec<Box<dyn Tool>> {
+    let mut tools = all();
+    tools.push(Box::new(InstallSkillTool::new(installer)));
     tools
 }
 
@@ -95,6 +105,18 @@ mod tests {
         }
     }
 
+    struct StubInstaller;
+
+    impl SkillInstaller for StubInstaller {
+        fn install(&self, _request: &crate::SkillInstallRequest, _ctx: &ToolContext) -> ToolResult {
+            ToolResult::ok("install_skill", "stub")
+        }
+    }
+
+    fn installer() -> Arc<dyn SkillInstaller> {
+        Arc::new(StubInstaller)
+    }
+
     fn runner() -> Option<Arc<dyn SubagentRunner>> {
         Some(Arc::new(StubRunner))
     }
@@ -116,7 +138,11 @@ mod tests {
 
     #[test]
     fn every_tool_is_named_once_and_its_definition_agrees() {
-        for tools in [all(), with_runner(Arc::new(StubRunner))] {
+        for tools in [
+            all(),
+            with_runner(Arc::new(StubRunner)),
+            with_installer(installer()),
+        ] {
             let mut seen = HashSet::new();
             for tool in &tools {
                 let name = tool.name();
@@ -159,6 +185,27 @@ mod tests {
         assert!(!names(None).contains(&"subagent"));
         assert!(find("subagent", None).is_none());
         assert!(find("subagent", runner()).is_some());
+    }
+
+    #[test]
+    fn install_skill_is_absent_until_an_installer_is_supplied() {
+        // The same rule for the second injected tool: an `install_skill` with no catalog behind it
+        // would be a call the model is told about and that cannot run.
+        assert!(!names(None).contains(&"install_skill"));
+        let with = with_installer(installer());
+        let named: Vec<&str> = with.iter().map(|tool| tool.name()).collect();
+        assert!(named.contains(&"install_skill"), "{named:?}");
+        assert_eq!(
+            named.len(),
+            7,
+            "the six leaves and install_skill: {named:?}"
+        );
+        // And a loop-only caller does not get it, because this caller has no catalog.
+        let loop_only: Vec<&str> = with_runner(Arc::new(StubRunner))
+            .iter()
+            .map(|tool| tool.name())
+            .collect();
+        assert!(!loop_only.contains(&"install_skill"), "{loop_only:?}");
     }
 
     #[test]

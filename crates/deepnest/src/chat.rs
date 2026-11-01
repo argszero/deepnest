@@ -48,7 +48,7 @@ use deepnest_agent::{
 use deepnest_apps::{manifest, Slug};
 use deepnest_llm::ToolDefinition;
 use deepnest_sandbox::{roots::writable_roots, Mode, Policy};
-use deepnest_tools::{registry, Tool, ToolContext, ToolResult};
+use deepnest_tools::{registry, StdSpawner, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
 /// The verb this module answers, under `POST /api/apps/<slug>/`.
@@ -296,7 +296,17 @@ pub fn answer(
     // One flag shared with every tool: the loop owns the turn, so what a tool touched is recorded
     // where the tools run and read where the answer is assembled.
     let changed = Arc::new(AtomicBool::new(false));
-    let tools: Vec<Box<dyn Tool>> = registry::all()
+    // The install an agent may run, wired here because this is where the home is. The publisher is
+    // the deadline-bearing one: a turn cannot outlive its own request waiting on somebody else's
+    // program, which is the debt `crates/skills` says whoever wires the real publisher owes.
+    let installer = Arc::new(crate::install::DialogInstaller::new(
+        home.to_path_buf(),
+        Arc::new(crate::install::SpawnerPublisher::new(
+            Arc::new(StdSpawner),
+            app_dir.to_path_buf(),
+        )),
+    ));
+    let tools: Vec<Box<dyn Tool>> = registry::with_installer(installer)
         .into_iter()
         .map(|tool| {
             Box::new(Recorder {

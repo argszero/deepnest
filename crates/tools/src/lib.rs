@@ -26,7 +26,10 @@
 //! only opens a page in the system browser. And `subagent` is present as a **seam** rather than a
 //! leaf: its schema, its argument readers and its refusals live in [`subagent::SubagentTool`],
 //! and the agent loop it delegates to is injected by `crates/agent` — which is what keeps this
-//! crate underneath that one instead of beside it.
+//! crate underneath that one instead of beside it. `install_skill` is the same shape for the same
+//! reason ([`skill::InstallSkillTool`]): the tool's words live here, and the catalog, the state
+//! file and the publisher a skill install needs are injected by the binary, which is the only
+//! crate that knows where the home is.
 
 pub mod args;
 pub mod files;
@@ -34,6 +37,7 @@ pub mod path;
 pub mod registry;
 pub mod search;
 pub mod shell;
+pub mod skill;
 pub mod subagent;
 
 use std::path::PathBuf;
@@ -44,6 +48,7 @@ use serde_json::Value;
 pub use args::{boolean_argument, count_argument, optional_string_argument, string_argument};
 pub use path::{resolve_target, special_file_kind, SpecialFile};
 pub use shell::{BashTool, ShellOutcome, ShellResult, Spawner, StdSpawner};
+pub use skill::{InstallSkillTool, SkillInstallRequest, SkillInstaller};
 pub use subagent::{SubagentRequest, SubagentRunner, SubagentTool};
 
 /// The text budget for one tool result, in characters.

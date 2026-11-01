@@ -34,6 +34,7 @@ pub mod escalation;
 pub mod grant;
 pub mod history;
 pub mod home;
+pub mod install;
 pub mod model;
 pub mod open;
 pub mod payload;

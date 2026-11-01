@@ -91,7 +91,9 @@ Windows 后端在体量上远超其它两个（EMRG：ACL、FFI、受限令牌�
 
 ### `crates/tools` —— agent 的手 `（宿主 20:20）`
 
-`bash`、`read`、`write`、`edit`、`glob`、`grep`、`subagent`。不是精简子集：宿主定的是每应用 agent 具备接近完整的 EMRG 能力，包括启停这个应用、看日志、操作浏览器、截图。浏览器操作与截图**来自 browser-harness skill，不由核心内建**（`宿主 20:23`，`宿主 20:48` 再确认）—— 核心只负责在默认浏览器里打开应用页。
+`bash`、`read`、`write`、`edit`、`glob`、`grep`、`subagent`、`install_skill`。不是精简子集：宿主定的是每应用 agent 具备接近完整的 EMRG 能力，包括启停这个应用、看日志、操作浏览器、截图。浏览器操作与截图**来自 browser-harness skill，不由核心内建**（`宿主 20:23`，`宿主 20:48` 再确认）—— 核心只负责在默认浏览器里打开应用页。
+
+其中两个是**缝而不是叶子**，理由都是它们委托的那件事住在它不能依赖的 crate 里：`subagent` 要一个子循环（`crates/agent`），`install_skill` 要目录、状态文件和发布器（`crates/deepnest`，只有它知道 home 在哪）。没人注入就不提供 —— `registry::all` 是六个叶子，`with_runner` 与 `with_installer` 各加一个 —— 所以模型被告知的集合，永远是调度器跑得动的集合。
 
 shell 结果明确携带沙箱判定，区分「runner 没起来」与「沙箱拒绝」，超时杀进程组，被拒时追加提权提示（`实现自决, ref: emrg/tools/bash_tool_v2.py`）。
 
@@ -168,7 +170,7 @@ shell 结果明确携带沙箱判定，区分「runner 没起来」与「沙箱�
 
 `Publisher` 是 trait，理由与 `Runner`、`Spawner`、`Probe`、`Prober` 相同：值得测的每一条拒绝都发生在程序跑完之后，而跑真程序的测试量到的是那台机器上那个程序的行为。真的那个会一直等到包的进程结束——这是要说明的限界，而它的修法落在这道缝后面，不落在逻辑里。
 
-**和加载器不同，没有作为 agent 工具接进二进制。** 安装是对用户机器的副作用：它写到应用目录之外，还可能覆盖用户改过的文件，正是悬浮球该问一声的那类动作 —— 所以由 agent 发起的安装和那个提示一起落地，不抢在前面。先落地的是**人**主动要的那一版：`POST /api/skills/refresh` 由面板自己的按钮发起，按下去的人就是那个提示本来要取得的同意，所以它是一条独立的路由，而不是一个轮次能调的一步。
+**由 agent 发起的那条安装后来才落地，和它所依赖的提权提示一起**（`实现中决定`，2026-11-01）。安装是对用户机器的副作用：它写到应用目录之外，还可能覆盖用户改过的文件，正是悬浮球该问一声的那类动作 —— 所以这个工具和那个提示一起落地，不抢在前面。先落地的是**人**主动要的那一版：`POST /api/skills/refresh` 由面板自己的按钮发起，按下去的人就是那个提示本来要取得的同意，所以它是一条独立的路由，而不是一个轮次能调的一步。**agent** 要的那一版是 `install_skill`：工具的说法在 `crates/tools/src/skill.rs`（和 `subagent` 一样是一条缝），接线在 `crates/deepnest/src/install.rs`。它是一次**天生的**提权请求而不是靠策略判出来的 —— skill 装在 `~/.deepnest/skills/`，那不在三个可写根里 —— 所以在 `workspace-write` 下这次调用按策略自己的话被拒，并点名够得着的那个模式；同一次调用带上 `request_mode` 再发，只在那个人批准了这一次放宽之后才跑。那条接线同时也是 `install` 那笔债的还款处：它的模块 doc 说谁接上真发布器就欠它「一个 worker 或一个超时」，面板用 worker 还了，轮次用死线还（`SpawnerPublisher`，跑的就是 `bash` 用的那个 `Spawner`）。
 
 **此后落地的第四片：那条缝底下的 socket，以及面板读的那条路由**（`实现中决定`，2026-11-01）。`Releases` 由 `crates/deepnest/src/updates.rs` 实现在 `crates/gateway` 的 `get` 之上，而且它落在这儿、不在 `crates/skills`：这个 crate 是唯一同时依赖两边的那个，于是缝自己的 crate 保持零传输——这正是它模块 doc 要的，也是它无网络可测的原因。接线带出三条决定。
 
@@ -181,7 +183,7 @@ shell 结果明确携带沙箱判定，区分「runner 没起来」与「沙箱�
 - **刷新是入队即返回。** 真发布者是那个包、而且没有超时，等它的 `POST` 会为别人的程序占住一条连接。路由回 `202`，自有线程干活 —— `crate::rebuild` 已经是这个形状 —— 页面轮询同一条路由取结果。
 - **一次只跑一个，且是拒绝而不是排队。** 状态文件是一个文件：两个写者各自读、各自记自己的 skill，后写的会悄悄丢掉前一条记录。一次在跑时再问回 `409`，并点名在跑的是哪个。
 - **先文件，后版本。** `install` 不记版本、只保留原有的，所以版本只能来自那次检查 —— 而它在重写**之后**才问，因为文件才是用户要的，一个答不上来的 forge 不能把它取消掉。检查答不上来时，刷新照样成立、版本保留原值；原本没有就仍旧没有。
-- **这是用户的刷新，不是 agent 的。** 那个按钮就是提权提示本来要取得的同意，所以它可以先于提示落地；`install` 仍然不是一次轮次能够到的。
+- **这是用户的刷新，不是 agent 的。** 那个按钮就是提权提示本来要取得的同意，所以它可以先于提示落地。轮次要够到 `install`，只有走 `install_skill`，而且只对那个人放宽过的那一次调用。
 
 ### `crates/apps` —— 应用生命周期
 
@@ -352,7 +354,7 @@ struct MemoryStore { /* 条目 + 索引；正文永不进提示词 */ }
 5. `crates/deepnest` —— 二进制 + 三平台 CI 矩阵。排在应用生命周期**之前**：「这东西在三平台上到底能不能起来」要在答案还便宜的时候答掉。此后每个模块要么接进二进制落地，要么在 PR 里说明为什么不接。**它现在承载 agent**（`实现中决定`，2026-10-31）：`POST /api/apps/<slug>/chat` 用一个真·按应用 agent 跑完一个轮次，所以它下面那五个 crate 从一条消息就能碰到，而不只是从测试里。
 6. `crates/apps` —— 模板、编译、生命周期、日志。**已落地**，三片：目录契约 → 进程生命周期（端口分配、启停）→ 模板与编译（`POST /api/apps/<slug>/create` 与 `/build`）。三片全部接进二进制。
 7. `crates/gateway` + `crates/web` —— 唯一的门、面板、悬浮球。**已落地**：gateway 的转发、它底下那层 HTTP、WebSocket 升级、不缓冲的流式、面板、悬浮球注入与随之而动的 CSP 改写，以及球里的提权提示 —— 申请由调用携带、页面轮询取它、回答只放宽一次调用。二进制并发地服务连接，正是它让一个轮次能一边等、页面一边作答。
-8. `crates/skills` —— 加载器、目录、安装器。**进行中**：加载器（两个根、两种布局、遮蔽、跳过报告、提示词摘要）、随二进制内置的目录、记录哪些 skill 可被刷新的 `.state.json`、自发布包的安装路径、带自己一条一次性请求缝的 release 比对，以及那条缝底下的 socket 均已落地——socket 就是 `crates/deepnest/src/updates.rs`，它的路由是 `GET /api/skills/updates`，面板脚本从那里读。**对答案动手**也已落地（本片）：面板的刷新按钮走 `POST /api/skills/refresh`，对每个允许刷新的 skill 调一次 `installer::install`，再由 `release::check` 的 `adoptable()` 经 `record_update` 把采纳的版本记进状态文件。这个 crate 里只剩 agent 发起的那条安装没接——它属于提权提示那一片。
+8. `crates/skills` —— 加载器、目录、安装器。**已落地**：加载器（两个根、两种布局、遮蔽、跳过报告、提示词摘要）、随二进制内置的目录、记录哪些 skill 可被刷新的 `.state.json`、自发布包的安装路径、带自己一条一次性请求缝的 release 比对，以及那条缝底下的 socket 均已落地——socket 就是 `crates/deepnest/src/updates.rs`，它的路由是 `GET /api/skills/updates`，面板脚本从那里读。**对答案动手**也已落地（本片）：面板的刷新按钮走 `POST /api/skills/refresh`，对每个允许刷新的 skill 调一次 `installer::install`，再由 `release::check` 的 `adoptable()` 经 `record_update` 把采纳的版本记进状态文件。agent 发起的那条安装也已落地：`install_skill`（`crates/tools/src/skill.rs`，接线在 `crates/deepnest/src/install.rs`）在轮次内够到 `installer::install`，并且是写应用目录之外的唯一那条路 —— 在会话模式下被拒，只在那个人放宽过的那一次调用里跑。这个 crate 当初要有的每一片，现在都落地了。
 9. `crates/packaging` —— 载荷、首启解包、签名。**进行中**：工具链的目录契约已落地（载荷解到哪、什么标记让一个目录算完整、清掉被中断解包残留的清扫），C 工具链预检也已落地并接进 `build` 路由（缺就回 `412`，一步不跑），解包本身也已落地（`crates/packaging/src/unpack.rs`）：tar 套在 zstd 流里，逐条目读取，任何路径与链接目标在写入之前先对着工具链根判定。它还没接进二进制，也接不进去：build 里还没有它要读的载荷。剩下的就是那份载荷和它的签名。
 
 ## 7. 不可让步
