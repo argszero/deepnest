@@ -55,9 +55,12 @@
 }
 
 /* Wider than the note-and-one-link panel it started as: a transcript needs a reading measure, and
- * a box that scrolls its own conversation rather than growing past the page it sits on. */
+ * a box that scrolls its own conversation rather than growing past the page it sits on. The column
+ * layout and `overflow: hidden` are what keep that promise: a panel that is only `max-height` tall
+ * with block children draws the newest lines *outside* its own rounded border. */
 #deepnest-dialog-panel {
-  display: block;
+  display: flex;
+  flex-direction: column;
   box-sizing: border-box;
   position: absolute;
   right: 0;
@@ -70,6 +73,7 @@
   background: #1e1e23;
   color: #f4f4f6;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
 }
 
 #deepnest-dialog-panel[hidden] {
@@ -377,6 +381,40 @@
   overscroll-behavior: contain;
 }
 
+/* Only the transcript gives up height when the panel runs out of room; the field, the buttons and
+ * the status line keep the size they were drawn at. */
+#deepnest-dialog-panel > * {
+  flex: none;
+}
+
+#deepnest-dialog-panel > #deepnest-dialog-transcript {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* A scrollbar that belongs on a dark panel. Left to the platform it is a light slab laid over the
+ * end of every row, which is where each call's ending is written: the browser screenshot showed
+ * `ok` and `refused` half hidden behind it. `color-scheme` reaches the overlay scrollbar's colours
+ * on its own, and the parts below pin the width so it takes room instead of covering text. */
+#deepnest-dialog-transcript {
+  color-scheme: dark;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.24) transparent;
+}
+
+#deepnest-dialog-transcript::-webkit-scrollbar {
+  width: 8px;
+}
+
+#deepnest-dialog-transcript::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+#deepnest-dialog-transcript::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.24);
+}
+
 #deepnest-dialog-transcript[hidden] {
   display: none;
 }
@@ -415,8 +453,190 @@
   margin: 0.25rem 0 0;
   font: 12px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   color: rgba(244, 244, 246, 0.9);
+  overflow-wrap: anywhere;
+}
+
+/* The answer is Markdown, so its blocks come with their own margins — flattened here so the
+ * spacing between them belongs to the transcript rather than to the browser's defaults. */
+#deepnest-dialog-transcript .deepnest-said > * {
+  margin: 0.3rem 0 0;
+}
+
+#deepnest-dialog-transcript .deepnest-said > *:first-child {
+  margin-top: 0;
+}
+
+#deepnest-dialog-transcript .deepnest-said ul,
+#deepnest-dialog-transcript .deepnest-said ol {
+  padding-left: 1.1rem;
+}
+
+#deepnest-dialog-transcript .deepnest-said li {
+  margin: 0.1rem 0 0;
+}
+
+#deepnest-dialog-transcript .deepnest-said h3,
+#deepnest-dialog-transcript .deepnest-said h4,
+#deepnest-dialog-transcript .deepnest-said h5,
+#deepnest-dialog-transcript .deepnest-said h6 {
+  font: 600 12px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #ffffff;
+}
+
+#deepnest-dialog-transcript .deepnest-said code {
+  font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 0 0.2rem;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* `display` and `box-sizing` are spelled out because `all: initial` above leaves a `pre` an
+ * *inline* box: it then sizes itself to its longest line instead of to the panel, and a fenced
+ * block in the answer pushes the text 188px past the edge of a 22rem dialog. Measured, not
+ * guessed — the browser said `PRE … display=inline … w=493` inside a 305px transcript column. */
+#deepnest-dialog-transcript .deepnest-said pre {
+  display: block;
+  box-sizing: border-box;
+  max-width: 100%;
+  margin: 0.3rem 0 0;
+  padding: 0.4rem 0.5rem;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.35);
+  overflow-x: auto;
+}
+
+/* The line wraps rather than scrolls sideways: the column is 19rem wide, so a code line that
+ * keeps its own width is a line nobody can read without dragging. */
+#deepnest-dialog-transcript .deepnest-said pre code {
+  padding: 0;
+  background: none;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+#deepnest-dialog-transcript .deepnest-said a {
+  color: #7aa7ff;
+}
+
+/* One row per tool call. A monospace line, because a tool name and a path are what a person scans
+ * and prose spacing makes a list of them unreadable. */
+#deepnest-dialog-transcript .deepnest-calls {
+  display: block;
+  box-sizing: border-box;
+  margin: 0.25rem 0 0;
+}
+
+#deepnest-dialog-transcript .deepnest-call {
+  display: flex;
+  box-sizing: border-box;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.3rem;
+  padding: 0.12rem 0;
+  font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow-wrap: anywhere;
+}
+
+#deepnest-dialog-transcript .deepnest-call-name {
+  color: rgba(244, 244, 246, 0.95);
+}
+
+/* The argument is what a long path lives in, so it is the one part that gives way: without this a
+ * deep path pushes the ending off the edge of a 22rem panel, and the ending is the whole point of
+ * the row. */
+#deepnest-dialog-transcript .deepnest-call-what {
+  color: rgba(244, 244, 246, 0.6);
+  flex: 1 1 6rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The ending, and the only colour that carries a verdict: a refusal is not a failure, and neither
+ * is the ordinary end of a call. */
+#deepnest-dialog-transcript .deepnest-call-state {
+  color: rgba(244, 244, 246, 0.45);
+  margin-left: auto;
+  /* One word, never broken: a state reading "refu⏎sed" is a state nobody reads. */
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+#deepnest-dialog-transcript .deepnest-call-ok .deepnest-call-state {
+  color: #6bbf7a;
+}
+
+#deepnest-dialog-transcript .deepnest-call-failed .deepnest-call-state {
+  color: #e0716d;
+}
+
+#deepnest-dialog-transcript .deepnest-call-refused .deepnest-call-state {
+  color: #d8a53a;
+}
+
+#deepnest-dialog-transcript .deepnest-call-waiting .deepnest-call-state {
+  color: #6ea8fe;
+}
+
+#deepnest-dialog-transcript .deepnest-call-out {
+  flex-basis: 100%;
+  margin: 0.1rem 0 0;
+}
+
+/* `all: initial` above leaves a `summary` an inline box with no marker of its own, so the fold
+ * reads as the bare word "output" and nothing on screen says it opens. The caret is drawn here. */
+#deepnest-dialog-transcript .deepnest-call-out summary {
+  display: block;
+  cursor: pointer;
+  color: rgba(244, 244, 246, 0.45);
+}
+
+#deepnest-dialog-transcript .deepnest-call-out summary::before {
+  content: "\25B8\00a0";
+  color: rgba(244, 244, 246, 0.5);
+}
+
+#deepnest-dialog-transcript .deepnest-call-out[open] > summary::before {
+  content: "\25BE\00a0";
+}
+
+/* Same reason as the fenced block in the answer: `all: initial` leaves a `pre` inline, so a long
+ * tool result would run past the panel instead of staying inside it. */
+#deepnest-dialog-transcript .deepnest-call-out pre {
+  display: block;
+  box-sizing: border-box;
+  max-width: 100%;
+  margin: 0.2rem 0 0;
+  padding: 0.35rem 0.45rem;
+  max-height: 12rem;
+  overflow: auto;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.35);
+  color: rgba(244, 244, 246, 0.8);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The way back to the newest line, offered only to a reader who left it. */
+#deepnest-dialog-jump {
+  /* `all: initial` first, then what this rule means: it resets every property, `display` among
+   * them, so anything written above it would be thrown away. */
+  all: initial;
+  display: block;
+  box-sizing: border-box;
+  margin: 0.15rem 0 0.6rem;
+  padding: 0.15rem 0.4rem;
+  border: 1px solid rgba(110, 168, 254, 0.5);
+  border-radius: 999px;
+  background: rgba(110, 168, 254, 0.14);
+  font: 11px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #cfe0ff;
+  cursor: pointer;
+}
+
+#deepnest-dialog-jump[hidden] {
+  display: none;
 }
 
 /* What came with the question, when the question had words of its own. */

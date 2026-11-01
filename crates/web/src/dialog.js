@@ -500,9 +500,19 @@
   transcript.setAttribute("role", "log");
   transcript.setAttribute("aria-label", "This app's conversation");
 
+  // The way back to the newest line, offered only when the reader has left it. A transcript that
+  // being written to keeps pulling its own scroll to the end is a transcript a person cannot read
+  // while the agent works, which is exactly when reading it is worth something.
+  var jump = document.createElement("button");
+  jump.type = "button";
+  jump.id = "deepnest-dialog-jump";
+  jump.textContent = "Jump to the latest";
+  jump.hidden = true;
+
   panel.appendChild(title);
   panel.appendChild(note);
   panel.appendChild(transcript);
+  panel.appendChild(jump);
   panel.appendChild(pictureNote);
   panel.appendChild(form);
   panel.appendChild(asked);
@@ -711,6 +721,205 @@
     return parts.join(" and ");
   }
 
+  // ---- The calls a turn made ---------------------------------------------------------------
+
+  // A disclosure a person opened stays open across a poll. The transcript is rebuilt whenever the
+  // file grew, which while a turn runs is every round, and a row that shut itself while its own
+  // turn was still running would be a row nobody could read.
+  var openedCalls = {};
+
+  // How a call ended, in the one word the row shows.
+  //
+  // `live` is what separates a call that is still out from one that never answered: the same empty
+  // state means "running" in the turn being watched and "no result" in a turn that is over.
+  function stateWord(state, live) {
+    if (state === "ok" || state === "failed" || state === "refused") {
+      return state;
+    }
+    // An ending the file recorded before it recorded which one. Not "ok": nothing said it was.
+    if (state === "done") {
+      return "done";
+    }
+    return live ? "running" : "no result";
+  }
+
+  // What the agent ran, one row each: the tool, the argument that says what it was about, and how
+  // it ended. The count this replaced — "ran 12 tools" — was the one thing a person could not
+  // check, and the file had every call in it.
+  //
+  // The output sits behind a disclosure: a turn that read four files is four lines to scan and a
+  // great deal not to scroll past, and the whole of it is one press away.
+  function renderCalls(turn, live) {
+    var box = document.createElement("div");
+    box.className = "deepnest-calls";
+    (turn.calls || []).forEach(function (call, index) {
+      var row = document.createElement("div");
+      row.className = "deepnest-call deepnest-call-" + (call.state || "waiting");
+
+      var name = document.createElement("span");
+      name.className = "deepnest-call-name";
+      name.textContent = call.name;
+      row.appendChild(name);
+
+      if (call.what) {
+        var what = document.createElement("span");
+        what.className = "deepnest-call-what";
+        what.textContent = call.what;
+        row.appendChild(what);
+      }
+
+      var state = document.createElement("span");
+      state.className = "deepnest-call-state";
+      state.textContent = stateWord(call.state, live);
+      row.appendChild(state);
+
+      if (call.output) {
+        // Keyed by the turn's own timestamp rather than by position: the list is rebuilt on every
+        // poll and an index would move under the row that was open.
+        var key = turn.at + "\u0000" + index + "\u0000" + call.name;
+        var more = document.createElement("details");
+        more.className = "deepnest-call-out";
+        var summary = document.createElement("summary");
+        summary.textContent = "output";
+        var pre = document.createElement("pre");
+        pre.textContent = call.output;
+        more.appendChild(summary);
+        more.appendChild(pre);
+        more.open = !!openedCalls[key];
+        more.addEventListener("toggle", function () {
+          if (more.open) {
+            openedCalls[key] = true;
+          } else {
+            delete openedCalls[key];
+          }
+        });
+        row.appendChild(more);
+      }
+      box.appendChild(row);
+    });
+    return box;
+  }
+
+  // ---- The answer, as the model wrote it ----------------------------------------------------
+
+  // The model writes Markdown — lists, `code`, **emphasis**, fenced blocks — and the transcript
+  // showed that source to the person. This renders the small subset that actually appears, and it
+  // builds nodes instead of markup: every character here was written by a model, and `textContent`
+  // is the only way those words reach a page without also deciding what the page does.
+  var INLINE = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\(https?:\/\/[^)\s]+\))/;
+
+  function withInline(into, text) {
+    var rest = text;
+    while (rest.length > 0) {
+      var found = INLINE.exec(rest);
+      if (!found) {
+        into.appendChild(document.createTextNode(rest));
+        return;
+      }
+      if (found.index > 0) {
+        into.appendChild(document.createTextNode(rest.slice(0, found.index)));
+      }
+      var piece = found[0];
+      if (piece.charAt(0) === "`") {
+        var code = document.createElement("code");
+        code.textContent = piece.slice(1, -1);
+        into.appendChild(code);
+      } else if (piece.slice(0, 2) === "**") {
+        var strong = document.createElement("strong");
+        withInline(strong, piece.slice(2, -2));
+        into.appendChild(strong);
+      } else if (piece.charAt(0) === "*") {
+        var em = document.createElement("em");
+        withInline(em, piece.slice(1, -1));
+        into.appendChild(em);
+      } else {
+        var close = piece.indexOf("]");
+        var link = document.createElement("a");
+        link.textContent = piece.slice(1, close);
+        link.href = piece.slice(close + 2, -1);
+        // Only `http:` and `https:` — the pattern refuses anything else, so a `javascript:` link a
+        // model was talked into writing is text, not a link.
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        into.appendChild(link);
+      }
+      rest = rest.slice(found.index + piece.length);
+    }
+  }
+
+  var BULLET = /^\s*([-*+]|\d+[.)])\s+(.*)$/;
+  var HEADING = /^(#{1,4})\s+(.*)$/;
+
+  function renderWords(text) {
+    var box = document.createDocumentFragment();
+    var lines = String(text).split("\n");
+    var i = 0;
+    while (i < lines.length) {
+      var line = lines[i];
+      if (!line.trim()) {
+        i++;
+        continue;
+      }
+      if (line.indexOf("```") === 0) {
+        var body = [];
+        i++;
+        while (i < lines.length && lines[i].indexOf("```") !== 0) {
+          body.push(lines[i]);
+          i++;
+        }
+        i++;
+        var pre = document.createElement("pre");
+        var code = document.createElement("code");
+        code.textContent = body.join("\n");
+        pre.appendChild(code);
+        box.appendChild(pre);
+        continue;
+      }
+      var heading = HEADING.exec(line);
+      if (heading) {
+        // Three levels down from an h1: the box is not a document, and a heading the size of the
+        // panel title would outrank the app's own name.
+        var level = Math.min(6, heading[1].length + 2);
+        var title = document.createElement("h" + level);
+        withInline(title, heading[2]);
+        box.appendChild(title);
+        i++;
+        continue;
+      }
+      if (BULLET.test(line)) {
+        var ordered = /\d/.test(BULLET.exec(line)[1]);
+        var list = document.createElement(ordered ? "ol" : "ul");
+        while (i < lines.length) {
+          var item = BULLET.exec(lines[i]);
+          if (!item) {
+            break;
+          }
+          var point = document.createElement("li");
+          withInline(point, item[2]);
+          list.appendChild(point);
+          i++;
+        }
+        box.appendChild(list);
+        continue;
+      }
+      var words = [];
+      while (
+        i < lines.length &&
+        lines[i].trim() &&
+        lines[i].indexOf("```") !== 0 &&
+        !BULLET.test(lines[i]) &&
+        !HEADING.test(lines[i])
+      ) {
+        words.push(lines[i]);
+        i++;
+      }
+      var paragraph = document.createElement("p");
+      withInline(paragraph, words.join(" "));
+      box.appendChild(paragraph);
+    }
+    return box;
+  }
+
   function renderTurn(turn, live) {
     var line = document.createElement("div");
     line.className = live ? "deepnest-turn deepnest-running" : "deepnest-turn";
@@ -727,9 +936,12 @@
     asked.textContent =
       turn.user || (pictures + files > 0 ? withWhat(pictures, files) : "");
 
+    var calls = turn.calls || [];
     var did = document.createElement("p");
     did.className = "deepnest-did";
-    if (turn.tools > 0) {
+    // Only when there are no rows to draw — a count is what a transcript falls back on, and the
+    // rows say the same thing better.
+    if (turn.tools > 0 && calls.length === 0) {
       did.textContent =
         "ran " + turn.tools + (turn.tools === 1 ? " tool" : " tools");
     }
@@ -746,10 +958,13 @@
     if (did.textContent) {
       line.appendChild(did);
     }
+    if (calls.length > 0) {
+      line.appendChild(renderCalls(turn, live));
+    }
     if (turn.reply) {
-      var said = document.createElement("p");
+      var said = document.createElement("div");
       said.className = "deepnest-said";
-      said.textContent = turn.reply;
+      said.appendChild(renderWords(turn.reply));
       line.appendChild(said);
     }
     // The agent's own notes: why a turn ended early, what it could not run. This is the line the
@@ -763,6 +978,10 @@
     });
     return line;
   }
+
+  transcript.addEventListener("scroll", function () {
+    offerTheLatest(atTheLatest());
+  });
 
   // What was last drawn, so a poll that found nothing new does not redraw: a transcript rebuilt
   // every second would fight the person scrolling through it.
@@ -784,8 +1003,7 @@
     // Read the scroll position before replacing the children, and restore it only if the person was
     // already at the newest end. Auto-scrolling a reader who scrolled up is the page deciding it
     // knows better, which is the one thing a transcript being written to must not do.
-    var atTheEnd =
-      transcript.scrollTop + transcript.clientHeight >= transcript.scrollHeight - 8;
+    var atTheEnd = atTheLatest();
     transcript.textContent = "";
     recent.forEach(function (turn, index) {
       transcript.appendChild(renderTurn(turn, live && index === recent.length - 1));
@@ -795,6 +1013,21 @@
       // Newest at the bottom, which is where a conversation is read from.
       transcript.scrollTop = transcript.scrollHeight;
     }
+    offerTheLatest(atTheEnd);
+  }
+
+  // Whether the reader is at the newest end of the transcript.
+  function atTheLatest() {
+    return (
+      transcript.scrollTop + transcript.clientHeight >= transcript.scrollHeight - 8
+    );
+  }
+
+  // Offer the way back rather than taking it: hidden while the reader is at the end, hidden when
+  // there is nothing to scroll, and shown only to someone who scrolled away from the newest line.
+  function offerTheLatest(atTheEnd) {
+    var overflows = transcript.scrollHeight > transcript.clientHeight + 8;
+    jump.hidden = atTheEnd || !overflows || transcript.hidden;
   }
 
   function readHistory() {
@@ -1193,6 +1426,11 @@
 
   refuse.addEventListener("click", function () {
     answerTheQuestion(false);
+  });
+
+  jump.addEventListener("click", function () {
+    transcript.scrollTop = transcript.scrollHeight;
+    offerTheLatest(atTheLatest());
   });
 
   ball.addEventListener("click", function () {

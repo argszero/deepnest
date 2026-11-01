@@ -51,6 +51,15 @@ pub struct Record {
     pub tool_calls: Option<Vec<deepnest_llm::ToolCall>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// How a tool call ended — `"ok"`, `"failed"` or `"refused"` — on the `tool` line that answers
+    /// it, and absent everywhere else.
+    ///
+    /// Written to the file rather than inferred from the text: a refusal and a failure both arrive
+    /// as an error whose wording is the tool's own, and a page trying to tell them apart by reading
+    /// prose would be guessing. Absent on a line written before this field existed, which a reader
+    /// has to treat as "ended, way unknown" rather than as success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
     /// When it was written, UTC, to the second. Ordering is the file's, so this is for the reader
     /// and never for the sort.
     #[serde(default)]
@@ -71,6 +80,7 @@ impl Record {
             images: message.images.clone(),
             tool_calls: message.tool_calls.clone(),
             tool_call_id: message.tool_call_id.clone(),
+            outcome: None,
             at: now_iso(),
         }
     }
@@ -101,6 +111,7 @@ impl Record {
             images: None,
             tool_calls: None,
             tool_call_id: None,
+            outcome: None,
             at: now_iso(),
         }
     }
@@ -203,6 +214,18 @@ impl Session {
     /// Append a message, returning the record that was written.
     pub fn append_message(&self, message: &Message) -> std::io::Result<Record> {
         let record = Record::from_message(message);
+        self.append(&record)?;
+        Ok(record)
+    }
+
+    /// Append a tool result, recording how the call ended beside it.
+    ///
+    /// The ending is not part of what the model is sent — a refusal and a failure are the same
+    /// answer to it — so it lives on the record rather than on [`Message`]: the page shows what
+    /// the file keeps, and the model is not handed a second story about its own call.
+    pub fn append_result(&self, message: &Message, outcome: &str) -> std::io::Result<Record> {
+        let mut record = Record::from_message(message);
+        record.outcome = Some(outcome.to_string());
         self.append(&record)?;
         Ok(record)
     }

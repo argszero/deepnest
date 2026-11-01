@@ -365,7 +365,10 @@ impl Agent {
                     });
                 }
                 let result = self.dispatch(call);
-                self.append(&Message::tool(call.id.clone(), result.content))?;
+                // Read the ending before the content is moved into the message: both come from
+                // the same result, and only one of them is for the model.
+                let outcome = result.outcome();
+                self.append_result(&Message::tool(call.id.clone(), result.content), outcome)?;
             }
         }
 
@@ -534,6 +537,16 @@ impl Agent {
     fn append(&self, message: &Message) -> Result<(), AgentError> {
         self.session
             .append_message(message)
+            .map(|_| ())
+            .map_err(|err| AgentError::Session {
+                reason: err.to_string(),
+            })
+    }
+
+    /// Write a tool result together with how its call ended.
+    fn append_result(&self, message: &Message, outcome: &str) -> Result<(), AgentError> {
+        self.session
+            .append_result(message, outcome)
             .map(|_| ())
             .map_err(|err| AgentError::Session {
                 reason: err.to_string(),
