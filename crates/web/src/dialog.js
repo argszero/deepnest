@@ -2016,6 +2016,36 @@
     });
   }
 
+  // Enter sends the message, Shift+Enter starts a line — the shape every agent front end has, and
+  // the one this box did not. Measured in Chrome with a real key press, on the box holding "fix the
+  // failing tests": `Enter` reached the textarea as a `keydown`, the browser turned it into a line
+  // break, the form was submitted **0** times and the stub saw **0** chat requests. So a person who
+  // types a sentence and presses Enter gets a second line and has to reach for the mouse, while
+  // Claude Code, Codex and the harness this project is modelled on all send on Enter.
+  //
+  // `requestSubmit` rather than `.click()` on the button: the button is disabled for the length of
+  // a turn, and that would silently turn the key off. The handler below is the one place that knows
+  // what sending means, so Enter goes through it instead of repeating any of it here.
+  input.addEventListener("keydown", function (event) {
+    if (event.key !== "Enter" || event.shiftKey) {
+      return;
+    }
+    // An input method's Enter belongs to the input method. The candidate window is open and the
+    // person is choosing a character: sending here would post half a word and lose the rest. The
+    // host writes Chinese, so this is not a hypothetical — and `keyCode` is the same guard for the
+    // browsers that report composition as 229 instead of setting `isComposing`.
+    if (event.isComposing || event.keyCode === 229) {
+      return;
+    }
+    // Nothing can be sent during a turn, so the key is left to do what it visibly does — a line
+    // break — rather than becoming a no-op that reads as a broken key.
+    if (send.disabled) {
+      return;
+    }
+    event.preventDefault();
+    form.requestSubmit();
+  });
+
   form.addEventListener("submit", function (event) {
     event.preventDefault();
     var text = input.value.trim();
