@@ -55,6 +55,17 @@ deepnest does not bundle a C toolchain, and will not: it is large, platform-spec
 
 deepnest checks for them before the first build and walks you through installing what is missing, instead of failing halfway through compilation.
 
+## Opening a macOS build
+
+A build published here without a Developer ID is **ad-hoc signed**, not signed by an Apple identity. macOS will therefore refuse it on the first double-click, with a message that says the developer cannot be verified.
+
+That is expected, and it is not a warning to ignore lightly — it is the one thing a signature buys and this project does not have yet. To open one anyway:
+
+1. Right-click `Deepnest.app` (or the `.dmg`) and choose **Open**.
+2. Choose **Open** again in the dialog that appears.
+
+macOS remembers the decision for that copy. A build that has been signed with a Developer ID and notarized needs none of this and opens on a double-click; the release notes say which of the two a given download is.
+
 ## The name
 
 `deepnest` here has nothing to do with [Deepnest](https://deepnest.io), the open-source nesting (layout optimisation) tool for laser, plasma and CNC cutting, or its ports. Different project, different problem — this one generates applications.
