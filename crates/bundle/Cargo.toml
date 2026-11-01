@@ -1,6 +1,6 @@
 [package]
 name = "deepnest-bundle"
-description = "The macOS app bundle deepnest ships in: the two files a bundle is made of, the Info.plist that makes the system launch one, which files inside a tree a signature has to cover, and what makes this refuse to write a bundle that opens and does nothing"
+description = "The macOS app bundle deepnest ships in: the two files a bundle is made of, the Info.plist that makes the system launch one, which files inside a tree a signature has to cover, the codesign run over that list, and what makes this refuse to write a bundle that opens and does nothing"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

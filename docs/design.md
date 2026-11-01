@@ -672,7 +672,7 @@ A hard link is packed as a file: it is a second name for the same bytes, and fin
 - **The payload's programs are under `bin/`, and that directory is prepended to `PATH`.** Prepending, not merging: a bundled toolchain has to win over one the machine happens to have, or a self-contained binary would build the user's app with whatever version was installed. A payload with no `bin/` leaves `PATH` alone instead of pointing it at a directory that does not exist.
 - **The `Runner` is where the payload meets the build.** `payload::Toolchain` implements the same seam `crates/apps` already had — `StdRunner` gained a `path_prefix` and nothing else changed — so a build that cannot get its toolchain reports that as the step's own outcome, where the user is already reading, instead of as a missing program.
 
-Still to come: **the signature over the archive**, and the `codesign` run itself — what the binaries to sign *are* is now decided and tested (`crates/bundle/src/macho.rs`, below), so what is missing there is an identity and a password rather than an answer.
+Still to come: **the signature over the archive**. The `codesign` run itself has landed (`crates/bundle/src/sign.rs`, below) and asks this repository for no password at all — only for an identity whose key is already in a keychain, which is a pipeline step's business.
 
 macOS ships signed and notarized (`host 20:48`). Every Mach-O inside the bundled toolchain must be **signed before packing**, because first-run unpacking does not re-sign, and an unsigned child process is refused under hardened runtime. Windows ships unsigned (`host 20:56`) — SmartScreen will warn on first run, and both README and the first-run page say so plainly rather than teaching users to bypass security prompts blindly.
 
@@ -693,6 +693,16 @@ The bundle is **unsigned**, and the disk image is `hdiutil`'s: a signature cover
 - **The order is sorted and an unreadable entry is refused.** Sorted so two signing logs of the same tree can be diffed, which is the choice the packer already made; refused rather than passed over, because skipping what cannot be read is this failure wearing a green build.
 
 It signs nothing and knows nothing about `codesign`, which is deliberate: the enumeration is the half of "sign every Mach-O" that fails quietly, so it is the half that has to be checkable on the two platforms that ship no `codesign` at all.
+
+**The signing step is landed too, and it takes no secret** (`decided in implementation`, 2026-11-01). `crates/bundle/src/sign.rs` takes the list `macho.rs` produces and runs `codesign` over each file, verifying each signature before it reports success; `deepnest-bundle --sign <dir>` is the command a pipeline calls. Five decisions:
+
+- **The identity is a name read from `DEEPNEST_SIGNING_IDENTITY`, and no password passes through this program.** The certificate and its key reach a keychain in a step of their own; a password that reaches a program is a password in that program's process table, and a design that needs one is a design that only works with a `.p12` and a prompt. A missing identity is refused by name rather than producing an unsigned bundle that looks finished.
+- **Every file gets `--options runtime --timestamp --force`.** Hardened runtime and a secure timestamp are what notarization will not accept without — failing at signing is hours cheaper than failing at notarization. `--force` is not about overwriting: every arm64 binary already carries the ad-hoc signature its linker left, and `codesign` will not replace one without it, so a run without `--force` fails on the first file.
+- **Each file is verified as it is signed, and a failed verification fails the run.** Signing and being signed are different claims and only the second is what the loader reads, so a run that never asks reports "codesign exited 0 and the signature is not there" as a green build.
+- **A tree with no binaries is refused rather than signed happily.** An empty payload is the wrong directory or a packer that dropped its content, and a green signing step is the last chance to notice.
+- **The signing and the verifying are a seam.** What is worth testing is the decision — which files, in what order, and what happens when the second one fails — and a test of that cannot own a certificate. `StdSigner` is the only part that needs macOS.
+
+Measured end to end on this machine with an ad-hoc identity: `deepnest-bundle --sign` finds the bundle's executable, signs and verifies it, `codesign -dv` reports `flags=0x10002(adhoc,runtime)`, and `codesign --verify --strict` on the resulting `.app` says valid on disk. **A secure timestamp was not observed**, because ad-hoc signing produces none; it needs a real Developer ID identity, which is the part still missing.
 
 ## 5. Interfaces that must not drift
 
@@ -760,11 +770,12 @@ One module per cycle, each landing with its tests:
    every path and every link target checked against the toolchain root before anything is written.
    It is not wired into the binary yet, and cannot be: there is no payload in the build for it to
    read. What remains is that payload and the signing of it.
-10. `crates/bundle` — the macOS app bundle, and which files a signature covers. **Landed**:
-    `Deepnest.app` laid out around a binary that has already been built, by `deepnest-bundle`, which
-    is what the release pipeline calls; and `src/macho.rs`, which walks a tree and says which of its
-    files are Mach-O binaries, tested on all three platforms. The `codesign` run over that list is
-    still item 9's remaining half, and it covers files that have to exist before it can be applied.
+10. `crates/bundle` — the macOS app bundle, and signing it. **Landed**: `Deepnest.app` laid out
+    around a binary that has already been built, by `deepnest-bundle`; `src/macho.rs`, which walks a
+    tree and says which of its files are Mach-O binaries; and `src/sign.rs`, which signs each of them
+    and verifies each signature (`deepnest-bundle --sign <dir>`), all three tested on every platform.
+    What is missing is not code but a Developer ID identity in a keychain, and then notarization —
+    which needs an Apple ID, a team id and an app-specific password.
 
 ## 7. Non-negotiables
 
