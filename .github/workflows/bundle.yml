@@ -1,0 +1,113 @@
+name: macOS bundle
+
+# What this produces is **a bundle to look at, not a release.** The `.app` inside the artifact is
+# unsigned, so Gatekeeper refuses it on any machine except the one that built it, and nothing here
+# attaches anything to a tag. It exists so the layout that `crates/bundle` writes can be produced the
+# way a release would produce it, and so the disk image around it is somebody else's problem to
+# check rather than a step discovered at the first release.
+#
+# Deliberately missing, and what each one needs:
+#
+#   1. Signing every Mach-O — `codesign --options runtime --timestamp` over the binary, and over
+#      each executable inside the payload before it is packed, because first-run unpacking does not
+#      re-sign and an unsigned child process is refused under hardened runtime. Needs a Developer ID
+#      Application certificate and its password, which is a secret this repository does not hold.
+#   2. Notarization — `notarytool submit --wait`, then `stapler staple` on the `.dmg`. Needs the
+#      Apple ID, the team id and an app-specific password.
+#   3. The tag path — `on: push: tags`, a version taken from the tag instead of the workspace, the
+#      `.dmg` attached to a GitHub release, and a README note on opening an unsigned build. It waits
+#      on 1 and 2, because a release that ships unsigned is a download that does not open.
+#
+# Until then this runs on request only: a release pipeline is not a test loop, and the layout's
+# correctness is the unit tests `cargo test --workspace` runs on all three platforms.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bundle-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bundle:
+    name: macOS bundle
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache the build
+        uses: Swatinem/rust-cache@v2
+
+      # No `DEEPNEST_PAYLOAD`, so this binary carries no toolchain and resolves one from `PATH` — the
+      # same build CI tests. A payload means compressing a real toolchain tree, which is the next step
+      # of the packaging work and not this one's.
+      - name: Build
+        run: cargo build --release --locked -p deepnest
+
+      # No `--version`: this build is not a release, so the workspace's own version is the honest
+      # one. The release path passes the tag, which is the only case where the two differ.
+      - name: Lay out the bundle
+        run: >-
+          cargo run --release --locked -p deepnest-bundle --
+          --binary target/release/deepnest --into dist
+
+      # The bundle is checked the way the system will read it rather than by listing the directory:
+      # an `Info.plist` that does not parse is a bundle the Finder offers to open and the system then
+      # declines, with no message anyone can act on.
+      - name: Check the bundle the system will read
+        run: |
+          set -eux
+          plutil -lint dist/Deepnest.app/Contents/Info.plist
+          executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' \
+            dist/Deepnest.app/Contents/Info.plist)
+          test -x "dist/Deepnest.app/Contents/MacOS/$executable"
+          file "dist/Deepnest.app/Contents/MacOS/$executable"
+
+          # Ad-hoc — what the linker leaves on arm64 — and *not* a Developer ID. This is a claim the
+          # header of this file makes, so it fails the day this workflow starts signing with an
+          # identity instead of the release path doing it: a bundle signed on its own, with an
+          # unsigned toolchain still inside its payload, is the failure that looks finished.
+          signature=$(codesign -dv "dist/Deepnest.app/Contents/MacOS/$executable" 2>&1)
+          echo "$signature"
+          case "$signature" in
+            *"Signature=adhoc"*) ;;
+            *) echo "expected an ad-hoc signature on an unsigned bundle" >&2; exit 1 ;;
+          esac
+
+          # And Gatekeeper refuses it, which is the other half of the header: this artifact is
+          # something to look at, never something to ship.
+          if spctl -a -t exec -vv dist/Deepnest.app; then
+            echo "Gatekeeper accepted a bundle nobody signed" >&2
+            exit 1
+          fi
+
+      # The one step no local run could prove: `hdiutil` needs to attach a disk image to copy into,
+      # and it is refused inside the sandbox this project's own runs are confined to. So it verifies
+      # itself here rather than being trusted — a disk image that cannot be read back is not a disk
+      # image — and the first dispatch of this workflow is its first real execution.
+      - name: Make the disk image
+        run: |
+          set -eux
+          hdiutil create -volname Deepnest -srcfolder dist/Deepnest.app \
+            -ov -format UDZO dist/Deepnest.dmg
+          hdiutil verify dist/Deepnest.dmg
+          shasum -a 256 dist/Deepnest.dmg | tee dist/Deepnest.dmg.sha256
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: Deepnest-macos-unsigned
+          path: |
+            dist/Deepnest.dmg
+            dist/Deepnest.dmg.sha256
+          if-no-files-found: error
+          retention-days: 14

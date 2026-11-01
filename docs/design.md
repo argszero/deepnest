@@ -676,6 +676,15 @@ Still to come: **the signature over the archive**, plus signing every bundled Ma
 
 macOS ships signed and notarized (`host 20:48`). Every Mach-O inside the bundled toolchain must be **signed before packing**, because first-run unpacking does not re-sign, and an unsigned child process is refused under hardened runtime. Windows ships unsigned (`host 20:56`) — SmartScreen will warn on first run, and both README and the first-run page say so plainly rather than teaching users to bypass security prompts blindly.
 
+**The bundle around the binary has landed too** (`decided in implementation`, 2026-11-01). `crates/bundle` lays out `Deepnest.app` around a binary that already exists, and its own binary `deepnest-bundle` is what the release pipeline calls to make one. It has no dependencies, and it compiles and passes its tests on all three platforms although only one of them reads a `.app` — a layout is directories and a copied file, and a writer whose correctness the two non-macOS legs cannot vouch for is a writer nobody vouches for. Four decisions:
+
+- **Two files, because only two are load-bearing.** `Contents/Info.plist` is what the system reads to learn what to launch, and `Contents/MacOS/deepnest` is what it launches. Icons, localizations and embedded frameworks are optional, and a name written before something needs it is a name every later reader has to keep in step.
+- **The plist is text, so the version is escaped, and a version the system cannot read is refused.** `CFBundleVersion` accepts only dot-separated numbers, so a tag carrying a word is refused by name at the moment the fix is a line in the release script, rather than producing a bundle that installs and then cannot be notarized.
+- **An existing path is refused, never written into.** Half a bundle looks whole — a `Contents/` that lost its executable between two writes is still something the Finder offers to open.
+- **The executable bit is set rather than inherited.** A binary that arrives `0644` is a bundle that opens onto nothing, and the system's own refusal to `exec` it never reaches a person.
+
+The bundle is **unsigned**, and the disk image is `hdiutil`'s: a signature covers files that exist, so it comes after this, and a Rust wrapper around a program only one platform has would be a second thing to keep correct for no reading it adds.
+
 ## 5. Interfaces that must not drift
 
 Three boundaries carry most of the future cost, so they are fixed here:
@@ -742,6 +751,10 @@ One module per cycle, each landing with its tests:
    every path and every link target checked against the toolchain root before anything is written.
    It is not wired into the binary yet, and cannot be: there is no payload in the build for it to
    read. What remains is that payload and the signing of it.
+10. `crates/bundle` — the macOS app bundle. **Landed**: `Deepnest.app` laid out around a binary that
+    has already been built, by `deepnest-bundle`, which is what the release pipeline calls. It is
+    unsigned on purpose: the signature is item 9's remaining half, and it covers files that have to
+    exist before it can be applied.
 
 ## 7. Non-negotiables
 

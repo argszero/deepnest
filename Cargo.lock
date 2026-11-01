@@ -155,6 +155,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "deepnest-bundle"
+version = "0.1.0"
+
+[[package]]
 name = "deepnest-command-scan"
 version = "0.1.0"
 dependencies = [
