@@ -220,7 +220,9 @@ A shell-text scanner for the read-direction escapes and for the one prohibition 
 
 ### `crates/tools` — the agent's hands `(host 20:20)`
 
-`bash`, `read`, `write`, `edit`, `glob`, `grep`, `subagent`. Not a reduced set: the host decision is that the per-app agent has near-complete EMRG capability, including starting and stopping the app, reading its logs, driving a browser and taking screenshots. Browser driving and screen capture come **from the browser-harness skill, not from the core** (`host 20:23`, re-confirmed `host 20:48`) — the core only opens the app page in the default browser.
+`bash`, `read`, `write`, `edit`, `glob`, `grep`, `subagent`, `install_skill`. Not a reduced set: the host decision is that the per-app agent has near-complete EMRG capability, including starting and stopping the app, reading its logs, driving a browser and taking screenshots. Browser driving and screen capture come **from the browser-harness skill, not from the core** (`host 20:23`, re-confirmed `host 20:48`) — the core only opens the app page in the default browser.
+
+Two of those are **seams rather than leaves**, and both exist because the thing they delegate to lives in a crate this one must not depend on: `subagent` needs a child loop (`crates/agent`) and `install_skill` needs a catalog, a state file and a publisher (`crates/deepnest`, which is the only crate that knows where the home is). Neither is offered until the caller supplies it — `registry::all` is the six leaves, `with_runner` and `with_installer` add one each — so the set the model is told about is always the set the dispatcher can run.
 
 A shell result carries the sandbox verdict explicitly, distinguishes "the runner never started" from "the sandbox refused", kills the process group on timeout, and appends the escalation hint when it was refused (`impl, ref: emrg/tools/bash_tool_v2.py`).
 
@@ -385,7 +387,7 @@ comparable on its first refresh.
 
 The `Publisher` is a trait for the same reason `Runner`, `Spawner`, `Probe` and `Prober` are: every refusal worth testing happens *after* a program has run, and a test that ran a real one would measure whatever that program does on the machine running the suite. The real one waits as long as the package takes — a limit worth naming, and one whose fix goes behind this seam rather than into the logic.
 
-**Not wired in as an agent tool, unlike the loader.** Installing is a side effect on the user's machine: it writes outside the app directory and can replace a file the user edited, which is exactly the kind of call the dialog is meant to ask about — so an install an *agent* would run lands with that prompt, not before it. What landed first is the version a *person* asks for: `POST /api/skills/refresh` runs the package from the panel's own button, where the person pressing it is the consent that prompt exists to obtain, and it is a route of its own rather than a call a turn can make.
+**The install an *agent* runs came later, with the escalation prompt it needed** (`decided in implementation`, 2026-11-01). Installing is a side effect on the user's machine: it writes outside the app directory and can replace a file the user edited, which is exactly the kind of call the dialog is meant to ask about — so the tool arrived with that prompt, not before it. The version a *person* asks for came first: `POST /api/skills/refresh` runs the package from the panel's own button, where the person pressing it is the consent that prompt exists to obtain, and it is a route of its own rather than a call a turn can make. The version an *agent* asks for is `install_skill`: the tool's words are `crates/tools/src/skill.rs` (a seam, like `subagent`) and the wiring is `crates/deepnest/src/install.rs`. It is a widening request **by construction** rather than by policy — a skill lives in `~/.deepnest/skills/`, which is outside the three writable roots — so at `workspace-write` the call is refused in the policy's own words plus the mode that would reach it, and the same call sent with `request_mode` runs only after the person approved that one widening. That wiring is also where `install`'s debt was paid: its module doc says whoever wires the real publisher in owes it "either a worker or a timeout", the panel paid with a worker, and a turn pays with a deadline (`SpawnerPublisher`, the same `Spawner` `bash` runs commands through).
 
 **What has landed since: the socket under the release check, and the route the panel reads**
 (`decided in implementation`, 2026-11-01). `Releases` is implemented by
@@ -425,8 +427,8 @@ file. It is the first caller `install` has ever had. Four decisions came with it
   is what the user asked for and a forge that cannot answer must not be able to cancel it. A check
   that cannot answer leaves the refresh standing with the version it had, and `None` when it had none.
 - **It is the user's refresh, not the agent's.** The button is the consent the dialog exists to
-  obtain, which is what lets this land before the escalation prompt does; `install` is still
-  unreachable from a turn.
+  obtain, which is what let this land before the escalation prompt did. A turn reaches `install`
+  only through `install_skill`, and only for the one call the person widened.
 
 ### `crates/apps` — app lifecycle
 
@@ -694,7 +696,7 @@ One module per cycle, each landing with its tests:
    the dialog injection with its CSP rewrite, and the escalation prompt inside that dialog — the
    request carried by a call, the page polling for it, and the answer widening exactly one call. The
    binary serves connections concurrently, which is what lets a turn wait while the page answers.
-8. `crates/skills` — loader, catalog, installer. **In progress**: the loader (two roots, two
+8. `crates/skills` — loader, catalog, installer. **Landed**: the loader (two roots, two
    layouts, shadowing, skip reporting, the prompt summary), the bundled catalog, the `.state.json`
    that says which skills may be refreshed, the install path for a self-publishing package, the
    release check with its own one-request seam, and the socket under that seam have landed — the
@@ -702,8 +704,11 @@ One module per cycle, each landing with its tests:
    panel's script reads it there. **Acting on the answer has landed too**: `POST
    /api/skills/refresh` runs `installer::install` for one managed skill and then `record_update` with
    the version the check adopted, so every row the panel offers has a button (`crates/deepnest/src/refresh.rs`).
-   What remains in this crate is the install an *agent* would run, which belongs with the escalation
-   prompt.
+   What remained in this crate was the install an *agent* would run, and it has landed too:
+   `install_skill` (`crates/tools/src/skill.rs`, wired in `crates/deepnest/src/install.rs`) reaches
+   `installer::install` from inside a turn, and gets there the only way a write outside the app can —
+   refused at the session's mode, and run only for the one call the person widened. Every part this
+   crate was to have has now landed.
 9. `crates/packaging` — payload, first-run unpack, signing. **In progress**: the toolchain
    directory contract has landed (where a payload unpacks, the marker that makes a directory whole,
    and the sweep that removes what an interrupted unpack left behind), so has the C toolchain
