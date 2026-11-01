@@ -5,7 +5,16 @@
 //! behind that suggests a run happened. The port comes last because taking it is the admission —
 //! the second instance is refused at the bind, after its own token has been read (not minted),
 //! and it exits reporting the address of the instance that already owns the port instead of
-//! pretending to start.
+//! pretending to start. What that order settles is when the port is **taken**; which port is
+//! wanted is read with the rest of the command line, before anything is written, so a typo in
+//! `$DEEPNEST_PORT` is a usage error rather than a start that minted a token and then failed.
+//!
+//! **4270 is the port, and it is the only one anyone has to know.** `$DEEPNEST_PORT` moves this
+//! run elsewhere, and it exists for two callers who cannot use the fixed one: a test suite that
+//! would otherwise have to ask a person to close their own deepnest, and a second instance
+//! somebody wants beside the first. It does not weaken the rule it works around — the single
+//! instance admission is still the bind, and the bind is still exclusive, on whichever port was
+//! asked for.
 //!
 //! **A start ends by opening the panel in the desktop's browser** ([`deepnest::open`]): the
 //! README's first sentence is "one double-click, one page in your browser", and this is the half of
@@ -58,7 +67,14 @@ Configuration — $DEEPNEST_HOME/config.toml (default ~/.deepnest/config.toml):
 
 Environment:
   DEEPNEST_HOME   relocate the deepnest home (default ~/.deepnest)
+  DEEPNEST_PORT   listen somewhere other than 4270 (default 4270; 0 asks the operating system
+                  for a free port). For a second instance beside the first, and for the tests,
+                  which must not need a person to close theirs first. The single-instance rule
+                  is the exclusive bind, on whichever port is chosen.
 ";
+
+/// The variable that moves this run off the design's port.
+const PORT_VAR: &str = "DEEPNEST_PORT";
 
 fn main() -> ExitCode {
     match run() {
@@ -137,6 +153,12 @@ where
 }
 
 fn serve(opening: Opening) -> Result<(), Failure> {
+    // First, before the home is prepared and before a token is minted: which port this run wants is
+    // a command-line fact, and a bad one is a usage error — the kind that must not leave a token
+    // file behind that suggests a start happened.
+    let port_value = std::env::var(PORT_VAR).ok();
+    let port = port_from_env(port_value.as_deref())?;
+
     let home = home().ok_or_else(|| {
         Failure::new(
             1,
@@ -183,7 +205,7 @@ fn serve(opening: Opening) -> Result<(), Failure> {
     let supervisor = Arc::new(deepnest_apps::Supervisor::new());
 
     let options = ServerOptions {
-        port: server::DEFAULT_PORT,
+        port,
         token: Some(token),
         token_path: Some(token_path.clone()),
         model: config.as_ref().map(|config| config.model().to_string()),
@@ -306,6 +328,33 @@ fn report(outcome: Result<(), deepnest::open::OpenError>, url: &str) {
     }
 }
 
+/// The port this run is asked to listen on, from `$DEEPNEST_PORT`.
+///
+/// Absent, empty and whitespace all mean the port the design fixes. Anything else has to be a port
+/// number, and a value that is not one is refused **by name** rather than falling back to 4270: a
+/// silent fallback would be a run that looks moved and is not, and the callers of this variable are
+/// exactly the ones that cannot afford the difference — a test that believed it had moved off 4270
+/// while the binary took it would blame the port's owner on the code, which is the failure this
+/// variable exists to end.
+///
+/// `0` is a real answer, not a missing one: it asks the operating system to pick, and the banner
+/// prints the port it picked.
+fn port_from_env(value: Option<&str>) -> Result<u16, Failure> {
+    let Some(text) = value.map(str::trim).filter(|text| !text.is_empty()) else {
+        return Ok(server::DEFAULT_PORT);
+    };
+    text.parse::<u16>().map_err(|_| {
+        Failure::new(
+            2,
+            format!(
+                "{PORT_VAR} must be a port number from 0 to {}, and `{text}` is not one — \
+                 0 asks the operating system for a free port",
+                u16::MAX
+            ),
+        )
+    })
+}
+
 fn config_failure(error: ConfigError) -> Failure {
     Failure::new(1, explain_config(&error))
 }
@@ -394,6 +443,52 @@ mod tests {
         // reading the source.
         assert!(USAGE.contains("--no-open"), "{USAGE}");
         assert!(USAGE.contains("open"), "{USAGE}");
+    }
+
+    #[test]
+    fn no_port_variable_means_the_port_the_design_fixes() {
+        // The default is the product's: nothing a person does has to mention a port to get 4270.
+        for absent in [None, Some(""), Some("   ")] {
+            assert_eq!(
+                port_from_env(absent).ok(),
+                Some(server::DEFAULT_PORT),
+                "{absent:?} is not a request for another port"
+            );
+        }
+    }
+
+    #[test]
+    fn a_port_in_the_variable_is_the_port_this_run_wants() {
+        assert_eq!(port_from_env(Some("5000")).ok(), Some(5000));
+        // Padded is still a number a person typed.
+        assert_eq!(port_from_env(Some(" 5100 ")).ok(), Some(5100));
+        // And zero is an answer: the operating system picks, and the banner says which.
+        assert_eq!(port_from_env(Some("0")).ok(), Some(0));
+    }
+
+    #[test]
+    fn a_port_that_is_not_one_is_refused_by_name_and_not_fallen_back_on() {
+        // The whole point: a run that looks moved must not silently be on 4270, because the caller
+        // that sets this variable is the one that cannot have the fixed port.
+        for bad in ["forty", "-1", "70000", "42.5", "4270ish"] {
+            let failure = match port_from_env(Some(bad)) {
+                Err(failure) => failure,
+                Ok(port) => panic!("`{bad}` was read as a port: {port}"),
+            };
+            assert_eq!(failure.code, 2, "a bad variable is a usage error");
+            assert!(
+                failure.message.contains("DEEPNEST_PORT"),
+                "{}",
+                failure.message
+            );
+            assert!(failure.message.contains(bad), "{}", failure.message);
+        }
+    }
+
+    #[test]
+    fn the_usage_text_names_the_variable_that_moves_the_port() {
+        assert!(USAGE.contains("DEEPNEST_PORT"), "{USAGE}");
+        assert!(USAGE.contains("4270"), "{USAGE}");
     }
 
     #[test]
