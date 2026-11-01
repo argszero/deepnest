@@ -10,3 +10,6 @@ publish = false
 [dependencies]
 serde = { workspace = true }
 toml = "0.8"
+
+[dev-dependencies]
+socket2 = "0.5"
