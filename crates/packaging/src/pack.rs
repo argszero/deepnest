@@ -42,9 +42,17 @@ use crate::unpack::{checked_link, Refusal};
 /// How hard the payload is compressed.
 ///
 /// The trade is the release build's time against the user's first run: what is compressed once here
-/// is decompressed once on every machine that installs deepnest. This is `zstd`'s own default, and
-/// the level every existing payload in this crate's tests is built at.
-const LEVEL: i32 = 3;
+/// is decompressed once on every machine that installs deepnest. It is 19 because that is the level
+/// the documented size was measured at, and the default (3) shipped a payload a quarter larger than
+/// the promise: on a 639 MB toolchain tree, level 3 packs to 192.4 MB in 3.4 s and level 19 to
+/// 148.7 MB in 1m52s. What the release build spends is paid once per tag; what the level saves is
+/// paid again by every person who downloads the result.
+///
+/// Single-threaded on purpose. A frame compressed by several threads depends on how the input was
+/// split between them, and the promise above — the same tree packs to the same bytes — is what lets
+/// a signature over the archive mean the payload did not change. Compression level changes how hard
+/// each block is searched, not how the blocks are arranged, so it keeps that promise.
+const LEVEL: i32 = 19;
 
 /// What a pack produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
