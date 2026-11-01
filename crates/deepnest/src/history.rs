@@ -18,6 +18,11 @@
 //! - **The agent's own notes are part of the transcript.** `the round budget of 24 ran out` is
 //!   what the user needed to read and could not; a note is written for a reader of the file, and
 //!   the page is that reader.
+//! - **A turn is readable while it runs.** The agent flushes a record per round, so a reader who
+//!   asks mid-turn sees the turn grow: [`Turn::rounds`] and [`Turn::tools`] climb as the model is
+//!   asked again and the calls are made. That is what lets the page say what is happening instead
+//!   of only that something is, and it needs nothing beyond this file — no progress channel, no
+//!   second copy of the state.
 //! - **A missing or unreadable line is an empty conversation, not a failure.** A page that cannot
 //!   show what happened is worse than a page showing "nothing yet", and a `500` in a dialog that
 //!   has just been opened says the app is broken when it may only be new.
@@ -42,6 +47,12 @@ pub struct Turn {
     pub reply: String,
     /// How many tool calls the agent made about it — the number a reader has no other way to see.
     pub tools: usize,
+    /// How many times the model was asked in this turn.
+    ///
+    /// One more than a tool call count is not the same thing, and it is the number that says a
+    /// turn is working rather than stuck: a round with no calls is the model thinking, and a turn
+    /// that has stopped growing is the one worth telling the user about.
+    pub rounds: usize,
     /// The agent's own notes, in order: why a turn ended early, what it could not run.
     pub notes: Vec<String>,
     /// When the user's message was written, UTC to the second, as the file wrote it.
@@ -83,6 +94,7 @@ fn push(turns: &mut Vec<Turn>, record: &Record) {
             user: record.content.clone().unwrap_or_default(),
             reply: String::new(),
             tools: 0,
+            rounds: 0,
             notes: Vec::new(),
             at: record.at.clone(),
         }),
@@ -90,6 +102,7 @@ fn push(turns: &mut Vec<Turn>, record: &Record) {
             let Some(turn) = turns.last_mut() else {
                 return;
             };
+            turn.rounds += 1;
             turn.tools += record.tool_calls.as_ref().map_or(0, Vec::len);
             // Only the newest prose is the answer; an agent that writes a line before each tool
             // call would otherwise have a transcript of its own narration.
@@ -176,7 +189,31 @@ mod tests {
         // Two calls on the assistant line, and the tool results are not counted again: the
         // number the page shows is how many things the agent did, not how many lines the file has.
         assert_eq!(turns[0].tools, 2);
+        // Two assistant lines: the one that asked for the calls, and the one that answered.
+        assert_eq!(turns[0].rounds, 2);
         assert_eq!(turns[0].at, "2026-11-01T01:00:01Z");
+    }
+
+    #[test]
+    fn a_turn_is_readable_while_it_is_still_running() {
+        // The state the page polls in: a question asked, a few rounds spent, no answer yet. Reading
+        // it has to say how far the turn has got rather than failing on the missing reply, because
+        // "still working" and "never started" are the two readings the page exists to separate.
+        let scratch = Scratch::new("mid-turn");
+        scratch.write(&[ASK, TOOLS, RESULT]);
+        let turns = read(&scratch.base);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].user, "build a todo list");
+        assert_eq!(turns[0].reply, "");
+        assert_eq!(turns[0].rounds, 1, "one round has happened: {turns:?}");
+        assert_eq!(turns[0].tools, 2);
+        // And it grows: the next read of the same turn sees the round that followed.
+        scratch.write(&[ASK, TOOLS, RESULT, TOOLS, RESULT, REPLY]);
+        let later = read(&scratch.base);
+        // Two more rounds of tool calls and then the answer, on top of the one already there.
+        assert_eq!(later[0].rounds, 3, "{later:?}");
+        assert_eq!(later[0].tools, 4);
+        assert_eq!(later[0].reply, "Done: three files.");
     }
 
     #[test]

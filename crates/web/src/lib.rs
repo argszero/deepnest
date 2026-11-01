@@ -636,6 +636,61 @@ mod tests {
     }
 
     #[test]
+    fn the_dialog_says_what_a_running_turn_is_doing_and_stops_when_it_ends() {
+        // The measured defect: one turn ran 112 seconds and 24 rounds and the page said a single
+        // word for all of it, so a turn that had rewritten the app read as a turn that never ran.
+        // The reader is the transcript route, re-read on a timer for as long as the request is out
+        // — nothing new is stored and the server is not told it is being watched.
+        assert!(
+            DIALOG_SCRIPT.contains("PROGRESS_MS"),
+            "nothing re-reads the turn while it runs"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("setInterval(readHistory"),
+            "the timer does not read the transcript, so it cannot say how far the turn has got"
+        );
+        // The two numbers that separate "working" from "stuck": the rounds spent and the calls made.
+        assert!(
+            DIALOG_SCRIPT.contains("last.rounds"),
+            "the round count is not shown"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("last.tools"),
+            "the tool count is not shown"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#""Working — round ""#)
+                || DIALOG_SCRIPT.contains("\"Working — round \""),
+            "the line does not name the round it is on"
+        );
+        // Every exit from a turn goes through `stopPolling` — the answer, the refusal, the expired
+        // grant, the dead server — so that is where the watcher has to stop. A watcher that
+        // outlived its turn would poll a file nothing is writing.
+        let stop = &DIALOG_SCRIPT[DIALOG_SCRIPT
+            .find("function stopPolling()")
+            .expect("the box stops its timers somewhere")..];
+        let stop = &stop[..stop.find("\n  }").expect("the function ends")];
+        assert!(
+            stop.contains("stopWatching()"),
+            "stopPolling does not stop the progress watcher: {stop}"
+        );
+        // A line that changes every second must not be announced every second: the progress line
+        // turns the live region off, and the answer that finally matters turns it back on.
+        assert!(
+            DIALOG_SCRIPT.contains(r#"setAttribute("aria-live", "off")"#),
+            "a line that rewrites itself every second is announced every second"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#"setAttribute("aria-live", "polite")"#),
+            "the answer never gets its announcement back"
+        );
+        // `all: initial` leaves both of them invisible without a rule of their own.
+        for selector in ["#deepnest-dialog-answer.live", ".deepnest-running"] {
+            assert!(DIALOG_STYLE.contains(selector), "{selector} is unstyled");
+        }
+    }
+
+    #[test]
     fn the_dialog_says_what_went_wrong_instead_of_failing_silently() {
         // Three failures a user can hit, each with a different next step, and the box has to name
         // the step: the grant expired, the server is gone, and the answer was a refusal.
