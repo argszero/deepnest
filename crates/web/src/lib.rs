@@ -916,13 +916,59 @@ mod tests {
             "a link in an answer can reach into this page"
         );
         let words = DIALOG_SCRIPT
-            .find("function renderWords(text)")
+            .find("function renderWords(text, what)")
             .expect("the renderer exists");
         let body = &DIALOG_SCRIPT[words..];
         let body = &body[..body.find("\n  }").expect("it ends")];
         assert!(
             !body.contains("innerHTML") && !body.contains("insertAdjacentHTML"),
             "the renderer assembles markup"
+        );
+    }
+
+    #[test]
+    fn every_copy_control_says_which_exchange_it_is_in() {
+        // Two scopes of copy control (a block, and the whole answer) times six exchanges was
+        // twelve controls with two names between them. Measured in Chrome's own accessibility tree
+        // against six exchanges: the announced names were "Copy this code block" and "Copy this
+        // answer", six of each, with nothing saying which exchange a control belonged to — so a
+        // person with a screen reader could copy the wrong answer twice before noticing.
+        assert!(
+            DIALOG_SCRIPT.contains("function copyNames(turn, number)"),
+            "the controls have no per-exchange name to share"
+        );
+        // Named by what was asked, which is the one thing about a turn a person recognizes; the
+        // position is the fallback for a message that carried only a picture and has no words.
+        assert!(
+            DIALOG_SCRIPT.contains(r#"where: 'the answer to "' + question + '"'"#)
+                && DIALOG_SCRIPT.contains(r#"answer: 'Copy the answer to "' + question + '"'"#),
+            "the answer is not named by the question it answers"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#"answer: "Copy the answer in " + place"#),
+            "a message with no words has no name to fall back on"
+        );
+        // A block says which block, in which answer, and only bothers with an ordinal when there
+        // is more than one.
+        assert!(
+            DIALOG_SCRIPT.contains("function blockLabel(language, what, ordinal, total)"),
+            "a block is named without saying which block it is"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#"" of " + total + " in " + what"#),
+            "two blocks in one answer are named the same"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("var names = copyNames(turn, number);"),
+            "the names are built but never used"
+        );
+        // The old fixed words are gone from the code. They are quoted in the comment above, which
+        // is where this repository records what a fix replaced — so the assertion is about the
+        // control's argument, not about the phrase being absent from the file.
+        assert!(
+            !DIALOG_SCRIPT.contains(r#"copyControl("deepnest-answer-copy", "Copy this answer""#)
+                && !DIALOG_SCRIPT.contains(r#""Copy this code block","#),
+            "a control still carries the name that said nothing"
         );
     }
 
@@ -1006,7 +1052,7 @@ mod tests {
         // this, the only way out of a fenced block was to select it by hand — through a `pre` that
         // wrapped, so the selection picked up the dialog's own line breaks.
         assert!(
-            DIALOG_SCRIPT.contains("function fencedBlock(language, source)"),
+            DIALOG_SCRIPT.contains("function fencedBlock(language, source, what, ordinal, total)"),
             "a fenced block is drawn without the language its fence named"
         );
         assert!(
@@ -1115,7 +1161,7 @@ mod tests {
             "a list line is read without the indent that says what it sits under"
         );
         let words = DIALOG_SCRIPT
-            .find("function renderWords(text)")
+            .find("function renderWords(text, what)")
             .expect("the renderer exists");
         let body = &DIALOG_SCRIPT[words..];
         let body = &body[..body.find("\n  }").expect("it ends")];
