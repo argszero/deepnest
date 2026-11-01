@@ -525,6 +525,31 @@
   // already here; what was missing was a way in.
   transcript.setAttribute("tabindex", "0");
 
+  // Finding an exchange, in a conversation too long to read through.
+  //
+  // The transcript draws the newest twenty turns and offers a press for the twenty before them, so
+  // in a long conversation most of it is not in the page at all: measured in Chrome over forty
+  // exchanges, the panel opened with twenty drawn, the first exchange on screen was number 21, and
+  // the browser's own find for a phrase in exchange 7 answered `false` — a page cannot be searched
+  // for words it does not contain. Nine presses is what it took to have two hundred exchanges in
+  // one conversation on screen.
+  //
+  // So the field appears only when the panel is withholding something: on a conversation that fits
+  // in the window there is nothing for it to find that scrolling would not, and a search box over
+  // three exchanges is furniture. While it holds a phrase the window is not applied at all and the
+  // search runs over every exchange the conversation has.
+  var find = document.createElement("input");
+  find.type = "search";
+  find.id = "deepnest-dialog-find";
+  find.placeholder = "Find an exchange…";
+  find.setAttribute("aria-label", "Find an exchange in this conversation");
+  find.hidden = true;
+
+  var found = document.createElement("p");
+  found.id = "deepnest-dialog-found";
+  found.hidden = true;
+  found.setAttribute("role", "status");
+
   // The way back to the newest line, offered only when the reader has left it. A transcript that
   // being written to keeps pulling its own scroll to the end is a transcript a person cannot read
   // while the agent works, which is exactly when reading it is worth something.
@@ -556,6 +581,8 @@
   panel.appendChild(head);
   panel.appendChild(note);
   panel.appendChild(drawer);
+  panel.appendChild(find);
+  panel.appendChild(found);
   panel.appendChild(transcript);
   panel.appendChild(jump);
   panel.appendChild(pictureNote);
@@ -1705,18 +1732,64 @@
     return more;
   }
 
+  // What an exchange is searched on: the words the person said, the words the agent answered, the
+  // notes, and what each tool call was about. Those are the four things the transcript draws, so a
+  // phrase a person can see is a phrase this finds — a search narrower than the page would report
+  // "no exchange matches" about words on the screen.
+  function matches(turn, needle) {
+    var fields = [turn.user || "", turn.reply || ""].concat(turn.notes || []);
+    (turn.calls || []).forEach(function (call) {
+      fields.push(call.name || "");
+      fields.push(call.what || "");
+    });
+    var haystack = fields.join("\n").toLowerCase();
+    return haystack.indexOf(needle) >= 0;
+  }
+
   function showTurns(turns, live) {
     if (!turns || turns.length === 0) {
       drawn = "";
       shownTurns = TURNS_SHOWN;
       holdingPlace = false;
+      finding = "";
+      find.hidden = true;
+      found.hidden = true;
       transcript.textContent = "";
       transcript.hidden = true;
       return;
     }
-    var recent = turns.slice(-shownTurns);
-    var older = turns.length - recent.length;
-    var print = JSON.stringify(recent) + (live ? "+" : "");
+    // Numbered first: a search draws exchanges from anywhere in the conversation, and each one has
+    // to keep the number it has in the conversation rather than the position it landed in on
+    // screen. The drawer counts the same way, so "exchange 7" means one thing everywhere.
+    var numbered = turns.map(function (turn, index) {
+      return { turn: turn, number: index + 1 };
+    });
+    var recent;
+    var older;
+    if (finding) {
+      // A search is not a page: it looks through the whole conversation, and it says so, because
+      // "no exchange matches" is a different answer from "not in the twenty on screen".
+      recent = numbered.filter(function (entry) {
+        return matches(entry.turn, finding);
+      });
+      older = 0;
+    } else {
+      recent = numbered.slice(-shownTurns);
+      older = numbered.length - recent.length;
+    }
+    find.hidden = older === 0 && !finding;
+    found.hidden = !finding;
+    if (finding) {
+      found.textContent =
+        recent.length === 0
+          ? "No exchange matches that."
+          : "Showing " +
+            recent.length +
+            " of " +
+            numbered.length +
+            (numbered.length === 1 ? " exchange" : " exchanges");
+    }
+    var print = JSON.stringify(recent) + (live ? "+" : "") + "|" + finding;
     if (print === drawn) {
       // Nothing was redrawn, so there is no place to hold: a flag kept for a redraw that did not
       // happen would be spent on the next one, which moved something else.
@@ -1736,12 +1809,13 @@
     if (older > 0) {
       transcript.appendChild(drawEarlier(older));
     }
-    recent.forEach(function (turn, index) {
+    recent.forEach(function (entry, index) {
       transcript.appendChild(
-        // `older + index + 1` is where this turn stands in the conversation, not in the window:
-        // the drawer says "exchange 12" of the same counting, so a fallback name and the drawer
-        // agree instead of numbering the same turn two ways.
-        renderTurn(turn, live && index === recent.length - 1, older + index + 1)
+        // `entry.number` is where this turn stands in the conversation, not in the window: the
+        // drawer says "exchange 12" of the same counting, so a fallback name and the drawer agree
+        // instead of numbering the same turn two ways — and a searched-for exchange keeps its own
+        // number however few of its neighbours are on screen.
+        renderTurn(entry.turn, live && entry.number === numbered.length, entry.number)
       );
     });
     transcript.hidden = false;
@@ -2125,6 +2199,33 @@
 
   // Which message `Up` is on, counted from the newest: 0 is "not walking", 1 is the last one sent.
   var recallAt = 0;
+
+  // The phrase the transcript is being searched for, lowercased once so every comparison is the
+  // same comparison. Empty is the ordinary window.
+  var finding = "";
+
+  // Typing searches; emptying the field puts the window back. Both go through `readHistory` because
+  // the conversation is the server's and this page only draws a view of it — filtering a copy held
+  // here would drift from the file the moment a turn landed.
+  find.addEventListener("input", function () {
+    finding = find.value.trim().toLowerCase();
+    readHistory();
+  });
+
+  // Escape empties the field and nothing else. The panel closes on Escape through a handler on the
+  // document, so without this the one key that means "clear the search" would take the whole panel
+  // away instead — and on a long conversation that is the state a person is in when they reach for
+  // it.
+  find.addEventListener("keydown", function (event) {
+    if (event.key !== "Escape") {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    find.value = "";
+    finding = "";
+    readHistory();
+  });
 
   // Whether what the box holds right now is a message this key put there and nobody has touched
   // since. Without it the walk stops after one step: the box is no longer empty, so the guard that

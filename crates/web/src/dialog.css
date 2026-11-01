@@ -1110,6 +1110,46 @@
   display: none;
 }
 
+/* Finding an exchange. It sits above the transcript and is the same width as it, because it is a
+ * way of looking at that box rather than a control beside it. */
+#deepnest-dialog-find {
+  /* `all: initial` first, then what this rule means — it resets `display` and `color` among every
+   * other property, and an input left at `initial` is inline with a black caret on a dark panel. */
+  all: initial;
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0.2rem 0 0.35rem;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 0.35rem;
+  background: rgba(255, 255, 255, 0.06);
+  font: 12px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #f4f4f6;
+  caret-color: #7aa7ff;
+}
+
+#deepnest-dialog-find[hidden] {
+  display: none;
+}
+
+#deepnest-dialog-find::placeholder {
+  color: rgba(244, 244, 246, 0.45);
+}
+
+#deepnest-dialog-found {
+  all: initial;
+  display: block;
+  box-sizing: border-box;
+  margin: 0 0 0.4rem;
+  font: 11px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: rgba(244, 244, 246, 0.62);
+}
+
+#deepnest-dialog-found[hidden] {
+  display: none;
+}
+
 /* What came with the question, when the question had words of its own. */
 #deepnest-dialog-transcript .deepnest-pictures {
   display: block;

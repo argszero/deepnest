@@ -1570,6 +1570,71 @@ mod tests {
     }
 
     #[test]
+    fn an_exchange_can_be_found_in_a_conversation_the_window_does_not_reach() {
+        // The transcript draws the newest twenty turns, so in a long conversation the rest is not
+        // in the page at all. Measured in Chrome against forty exchanges: the panel opened with
+        // twenty drawn, the first exchange on screen was number 21, and the browser's own find for
+        // a phrase in exchange 7 answered `false` — a page cannot be searched for words it does not
+        // contain. Two hundred exchanges took nine presses of "Show the N earlier messages" to
+        // reach. After: typing the phrase into the field answered
+        // `{"drawn":1,"note":"Showing 1 of 40 exchanges","wantedInPage":true}`, and a phrase nothing
+        // says answered "No exchange matches that."
+        assert!(
+            DIALOG_SCRIPT.contains(r#"find.id = "deepnest-dialog-find";"#),
+            "there is no way to look for an exchange in a conversation the window does not reach"
+        );
+        // A search is not a page: with a phrase in the field the window is not applied, or the
+        // answer would be "not in the twenty on screen", which is a different answer from "not in
+        // the conversation" and the wrong one to give.
+        assert!(
+            DIALOG_SCRIPT.contains("recent = numbered.filter(function (entry) {"),
+            "a search only looks through the turns the window is already drawing"
+        );
+        // The window itself stays, for the reading that is not a search.
+        assert!(
+            DIALOG_SCRIPT.contains("recent = numbered.slice(-shownTurns);"),
+            "the transcript no longer draws a window when nothing is being searched for"
+        );
+        // The memo decides whether the transcript is redrawn at all, so a phrase that does not
+        // change what is drawn still has to change the answer under it.
+        assert!(
+            DIALOG_SCRIPT.contains(r#""|" + finding;"#),
+            "typing more of a phrase that matches the same turns does not redraw the count"
+        );
+        // Measured: on a conversation of twenty — the window is the whole of it — the field was
+        // not on screen at all (`findShown: false`), and after a search was cleared it went away
+        // again. A search box over a conversation that fits is furniture.
+        assert!(
+            DIALOG_SCRIPT.contains("find.hidden = older === 0 && !finding;"),
+            "the find field is offered even when the window withholds nothing"
+        );
+        // A searched-for exchange keeps the number it has in the conversation. Without that the
+        // transcript numbers a match "exchange 1" because it is first on screen, and the drawer
+        // calls the same turn by its real number.
+        assert!(
+            DIALOG_SCRIPT.contains(
+                "renderTurn(entry.turn, live && entry.number === numbered.length, entry.number)"
+            ),
+            "a found exchange is numbered by its place on screen rather than in the conversation"
+        );
+        // The panel closes on Escape through a handler on the document. Measured in Chrome with a
+        // real key press while the field held a phrase: after the field took the key, the panel was
+        // still open (`panelOpen: true`) and the window was back (twenty drawn). Without the stop,
+        // the one key that means "clear the search" is the key that takes the whole panel away.
+        let stopped = DIALOG_SCRIPT
+            .find("event.stopPropagation();")
+            .expect("the field stops the key it handles");
+        let closes = DIALOG_SCRIPT
+            .find(r#"if (event.key === "Escape" && !panel.hidden) {"#)
+            .expect("the panel closes on Escape");
+        assert!(
+            stopped < closes,
+            "the find field's Escape reaches the panel's own handler, so clearing a search closes \
+             the panel"
+        );
+    }
+
+    #[test]
     fn the_box_empties_when_the_message_goes_rather_than_when_the_answer_comes() {
         // The box used to keep the message for the whole length of a turn, because the clearing sat
         // in the branch that runs when the answer arrives. Two things followed, both measured in
@@ -2135,8 +2200,11 @@ mod tests {
         // The server sends every turn the app has, and the transcript draws a window of them. The
         // window is what a long session needs; a window nothing can move is the first exchange —
         // the one that says what the app was asked to be — drawn nowhere and said to be nowhere.
+        // `numbered` rather than `turns`: the slice is taken over the conversation with each turn
+        // carrying its own number, which is what lets a searched-for exchange keep it. The window
+        // itself is the same window, and this test is about the window.
         assert!(
-            DIALOG_SCRIPT.contains("turns.slice(-shownTurns)"),
+            DIALOG_SCRIPT.contains("numbered.slice(-shownTurns)"),
             "the transcript draws a fixed slice, so nothing can reach past it"
         );
         assert!(
