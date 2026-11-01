@@ -40,6 +40,28 @@ pub trait Model: Send + Sync {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<AssistantTurn, LlmError>;
+
+    /// The same turn, reporting the answer's text as the model writes it.
+    ///
+    /// A default implementation rather than a required method, for the same reason
+    /// `Transport::post_stream` has one: a model that cannot report early — a fake in a test, an
+    /// adapter that only has a whole response — must not be made to write a stub to say so, and a
+    /// loop that asks for fragments must still get its turn from one that stays quiet. The
+    /// observer is then simply never called, which is the truthful report of a model that had
+    /// nothing to say early rather than an error.
+    ///
+    /// What is observable is *arrival*, not content: the returned turn is the same turn
+    /// [`Self::turn`] would have produced. A caller that ignores `on_text` therefore loses nothing,
+    /// which is what lets the loop always ask the watched way.
+    fn turn_with(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        on_text: &mut dyn FnMut(&str),
+    ) -> Result<AssistantTurn, LlmError> {
+        let _ = on_text;
+        self.turn(messages, tools)
+    }
 }
 
 impl Model for deepnest_llm::Client {
@@ -52,6 +74,18 @@ impl Model for deepnest_llm::Client {
             .streaming()
             .with_tools(tools.to_vec());
         self.chat_stream(&request)
+    }
+
+    fn turn_with(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        on_text: &mut dyn FnMut(&str),
+    ) -> Result<AssistantTurn, LlmError> {
+        let request = ChatRequest::new(self.model().to_string(), messages.to_vec())
+            .streaming()
+            .with_tools(tools.to_vec());
+        self.chat_stream_with(&request, on_text)
     }
 }
 
@@ -233,6 +267,27 @@ impl Agent {
         images: &[String],
         cancel: &Cancellation,
     ) -> Result<TurnOutcome, AgentError> {
+        self.run_turn_watched(user_text, images, cancel, &mut |_| {})
+    }
+
+    /// The same turn, with the model's text handed to `on_text` as it is written.
+    ///
+    /// The observer is a parameter of the *call* rather than a field of the agent, because who is
+    /// watching is a property of this turn and not of the conversation: the same agent answers a
+    /// request nobody is watching and one a page is drawing, and only the second has anywhere to
+    /// put a fragment. Every round reports — a round that ends by asking for a tool has usually
+    /// said something first, and holding that back until the round ends is the delay this exists
+    /// to remove.
+    ///
+    /// It reports and changes nothing else: the conversation written to `history.jsonl`, the
+    /// outcome and the stop conditions are exactly those of [`Self::run_turn_with`].
+    pub fn run_turn_watched(
+        &self,
+        user_text: &str,
+        images: &[String],
+        cancel: &Cancellation,
+        on_text: &mut dyn FnMut(&str),
+    ) -> Result<TurnOutcome, AgentError> {
         let opening = if images.is_empty() {
             Message::user(user_text)
         } else {
@@ -249,7 +304,7 @@ impl Agent {
                 return Ok(self.cancel_note(round));
             }
             let messages = self.request_messages(budget)?;
-            let turn = match self.model.turn(&messages, &definitions) {
+            let turn = match self.model.turn_with(&messages, &definitions, &mut *on_text) {
                 Ok(turn) => turn,
                 Err(error) => {
                     // A refusal is an answer about the content; a length complaint is an answer
@@ -650,6 +705,78 @@ mod tests {
             .unwrap();
         assert!(user.images.is_none());
         assert_eq!(user.content.as_deref(), Some("hello"));
+    }
+
+    /// A model that reports its answer while writing it, the way a streamed endpoint does.
+    struct DictatingModel {
+        pieces: Vec<&'static str>,
+    }
+
+    impl Model for DictatingModel {
+        fn turn(
+            &self,
+            messages: &[Message],
+            tools: &[ToolDefinition],
+        ) -> Result<AssistantTurn, LlmError> {
+            self.turn_with(messages, tools, &mut |_| {})
+        }
+
+        fn turn_with(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            on_text: &mut dyn FnMut(&str),
+        ) -> Result<AssistantTurn, LlmError> {
+            for piece in &self.pieces {
+                on_text(piece);
+            }
+            Ok(answer(&self.pieces.concat()))
+        }
+    }
+
+    /// A watched turn is the same turn, with its text handed over in the pieces the model wrote
+    /// instead of in one lump at the end.
+    #[test]
+    fn a_watched_turn_hands_the_text_over_while_the_model_is_still_writing() {
+        let scratch = Scratch::new("watched");
+        let model: Arc<dyn Model> = Arc::new(DictatingModel {
+            pieces: vec!["here ", "is ", "your app"],
+        });
+        let agent = scratch.agent(model);
+
+        let mut seen: Vec<String> = Vec::new();
+        let outcome = agent
+            .run_turn_watched(
+                "build me a note app",
+                &[],
+                &Cancellation::new(),
+                &mut |text| seen.push(text.to_string()),
+            )
+            .unwrap();
+
+        assert_eq!(seen, vec!["here ", "is ", "your app"]);
+        assert_eq!(outcome.text(), "here is your app");
+    }
+
+    /// A model that cannot report early is not made to pretend it can: the trait's default leaves
+    /// the observer alone, and the turn is the turn it always was.
+    #[test]
+    fn a_watched_turn_through_a_model_that_stays_quiet_is_the_plain_turn() {
+        let scratch = Scratch::new("quiet");
+        let agent = scratch.agent(ScriptedModel::new(vec![Ok(answer("one whole answer"))]));
+
+        let mut seen: Vec<String> = Vec::new();
+        let outcome = agent
+            .run_turn_watched("hello", &[], &Cancellation::new(), &mut |text| {
+                seen.push(text.to_string())
+            })
+            .unwrap();
+
+        assert!(
+            seen.is_empty(),
+            "a model with nothing to say early reported {seen:?}"
+        );
+        assert_eq!(outcome.text(), "one whole answer");
     }
 
     #[test]

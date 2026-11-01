@@ -234,7 +234,7 @@ The system prompt is **written from scratch**. It is where most of the agent's b
 
 Four decisions were made while implementing it and are recorded here rather than in a commit message (`decided in implementation`, 2026-10-31):
 
-- **The model is reached through a `Model` trait, not through `deepnest_llm::Client`.** The loop is then testable with no network and no HTTP adapter, and the adapter (which belongs to `crates/gateway`) is swappable. `Client` implements the trait, so the binary wires the real one in one line — and that impl reads a stream, which the adapter could not serve when this was written and can serve now: `Client::turn` is what the binary still calls, because `Endpoint` has no streaming `Model` impl yet, not because the transport refuses.
+- **The model is reached through a `Model` trait, not through `deepnest_llm::Client`.** The loop is then testable with no network and no HTTP adapter, and the adapter (which belongs to `crates/gateway`) is swappable. `Client` implements the trait, so the binary wires the real one in one line — and both of that trait's shapes read a stream: `Model::turn` assembles one whole answer, which is all a caller that only wants the result needs, and `Model::turn_with` hands each fragment of the text to an observer while the model is still writing it. The second has a **default implementation** that ignores the observer and calls the first, so a model that cannot report early — a fake in a test, an adapter with only a whole response — says so by staying quiet rather than by being forced to write a stub, and the observer's silence is the truthful report of it.
 - **The trim budget is by characters and defaults to 120,000 per request**, with two repairs that a provider otherwise rejects outright: the kept tail must begin at a `user` message, and a `tool` result whose `assistant` call was trimmed away is dropped with it. A request that reports itself too long halves the budget and retries at most twice; a **refusal is never** retried that way.
 - **Cancellation is a shared flag checked before every request and before every tool call in a batch**, so a cancelled turn runs no further command. The calls that did not run are recorded in `history.jsonl` as a note, so a reader can tell a cancelled batch from a model that asked for less.
 - **The layout under `~/.deepnest/apps/<slug>/.agent/`** is `history.jsonl`, `memory/<id>.md`, `memory/MEMORY.md`, and `subagents/<NNNN>/history.jsonl` — one conversation file per subagent call, because a child appending to its parent's file is two writers on one conversation.
@@ -275,12 +275,14 @@ Five decisions came with the wiring:
   split across two reads is the ordinary case for an answer in Chinese; and a non-2xx answer is
   read whole, because a refusal is a document and has to be classified exactly as the
   non-streaming path classifies it.
-- **A turn is still answered whole, and the adapter is no longer why.** `crates/deepnest`'s
-  `model::Endpoint` implements `Model` as one `Client::turn`, and `POST …/chat` returns that one
-  answer as one JSON body; `crates/gateway` now serves `Client::chat_stream`, and nothing has yet
-  been built on top of it. What turns that into watching the answer being written is three separate
-  steps — a streaming `Model` impl, a `chat` route that writes the turn as it arrives, and a page
-  that renders it — and none of them is blocked on the transport any more.
+- **A turn is watched only when the caller asks to watch it.** `crates/deepnest`'s
+  `model::Endpoint` serves `Model::turn_with` from `Client::chat_stream_with`, so each fragment of
+  the answer reaches whoever is drawing it while the model is still writing; the loop reaches that
+  seam only through `Agent::run_turn_watched`, and `run_turn` is the same loop with an observer that
+  discards. `POST …/chat` still takes the discarding path and returns one JSON body, which is why
+  the page shows no difference yet. What is left is two steps — a `chat` route that writes the turn
+  as it arrives, and a page that renders it — and neither is blocked on the transport or on the loop
+  any more.
 - **The endpoint is read per request, not held at startup.** `POST /api/config` can change it, and
   an agent assembled once would keep asking the old one until the next start.
 - **A writing turn says `changed` and does not rebuild.** `bash` and `write`/`edit` set the flag, the
