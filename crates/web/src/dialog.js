@@ -728,6 +728,17 @@
   // The conversation route: a read, and the only thing here that is.
   var TURNS_SHOWN = 20;
 
+  // How many of them are drawn now. The server sends every turn the app has — it has no reason not
+  // to, the file is the record — so a transcript drawing a fixed last twenty was not a view of the
+  // conversation, it was the conversation with its beginning silently gone: a session long enough
+  // and the first exchange, which is the one that says what the app was asked to be, could not be
+  // read back at all. This is how far back the window reaches, and it only ever grows.
+  var shownTurns = TURNS_SHOWN;
+
+  // Set when the next redraw is adding turns *above* the ones already drawn. The reader's place is
+  // then the same line seen from below, and it has moved down by exactly what was added above it.
+  var holdingPlace = false;
+
   function historyRoute() {
     return "/api/apps/" + encodeURIComponent(slug) + "/history";
   }
@@ -868,6 +879,8 @@
     showSessions(body);
     setDrawer(false);
     drawn = "";
+    shownTurns = TURNS_SHOWN;
+    holdingPlace = false;
     transcript.textContent = "";
     transcript.hidden = true;
     transcript.scrollTop = 0;
@@ -1171,16 +1184,44 @@
   // every second would fight the person scrolling through it.
   var drawn = "";
 
+  // The turns the window has not reached yet, one press away. It is a control rather than a note
+  // because reading the start of a conversation is something a person does, and the count is what
+  // makes the gap visible: a transcript that quietly dropped its first exchanges would look like a
+  // conversation that began where the drawing began.
+  function drawEarlier(older) {
+    var more = document.createElement("button");
+    more.type = "button";
+    more.id = "deepnest-dialog-earlier";
+    more.textContent =
+      older === 1
+        ? "Show the 1 earlier message"
+        : "Show the " + older + " earlier messages";
+    more.addEventListener("click", function () {
+      shownTurns += TURNS_SHOWN;
+      // Turns are about to appear above the ones on screen, so the next redraw holds the reader's
+      // place instead of leaving them at the top of a list that grew over their head.
+      holdingPlace = true;
+      readHistory();
+    });
+    return more;
+  }
+
   function showTurns(turns, live) {
     if (!turns || turns.length === 0) {
       drawn = "";
+      shownTurns = TURNS_SHOWN;
+      holdingPlace = false;
       transcript.textContent = "";
       transcript.hidden = true;
       return;
     }
-    var recent = turns.slice(-TURNS_SHOWN);
+    var recent = turns.slice(-shownTurns);
+    var older = turns.length - recent.length;
     var print = JSON.stringify(recent) + (live ? "+" : "");
     if (print === drawn) {
+      // Nothing was redrawn, so there is no place to hold: a flag kept for a redraw that did not
+      // happen would be spent on the next one, which moved something else.
+      holdingPlace = false;
       return;
     }
     drawn = print;
@@ -1188,7 +1229,14 @@
     // already at the newest end. Auto-scrolling a reader who scrolled up is the page deciding it
     // knows better, which is the one thing a transcript being written to must not do.
     var atTheEnd = atTheLatest();
+    var wasTop = transcript.scrollTop;
+    var wasTall = transcript.scrollHeight;
+    var holding = holdingPlace;
+    holdingPlace = false;
     transcript.textContent = "";
+    if (older > 0) {
+      transcript.appendChild(drawEarlier(older));
+    }
     recent.forEach(function (turn, index) {
       transcript.appendChild(renderTurn(turn, live && index === recent.length - 1));
     });
@@ -1196,6 +1244,11 @@
     if (atTheEnd) {
       // Newest at the bottom, which is where a conversation is read from.
       transcript.scrollTop = transcript.scrollHeight;
+    } else if (holding) {
+      // The same line as before, seen from a box that grew above it: what was added is exactly the
+      // distance it moved, so the reader stays on the words they were reading instead of being
+      // carried up to the top of a list they only asked to be longer.
+      transcript.scrollTop = wasTop + (transcript.scrollHeight - wasTall);
     }
     offerTheLatest(atTheEnd);
   }
