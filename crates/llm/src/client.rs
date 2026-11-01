@@ -175,6 +175,24 @@ impl Client {
     /// [`crate::FailureKind::ContentRisk`] — the same failure a 400 refusal produces — because a
     /// caller must not be able to mistake it for an answer.
     pub fn chat_stream(&self, request: &ChatRequest) -> Result<AssistantTurn, LlmError> {
+        self.chat_stream_with(request, &mut |_| {})
+    }
+
+    /// The same streamed turn, with the answer's text handed over as it arrives.
+    ///
+    /// `on_text` receives each **fragment**, never the text so far: a caller drawing what it is
+    /// given would otherwise draw every earlier fragment again on each event. A chunk that carries
+    /// only a tool call, or only a finish reason, reports nothing, so a turn spent asking for tools
+    /// stays silent until it has something to say.
+    ///
+    /// Reporting a fragment cannot be a lie about a retry, because a stream that has delivered
+    /// anything is never retried — that is the rule the loop below already keeps, and it is what
+    /// makes reporting as it arrives safe rather than merely convenient.
+    pub fn chat_stream_with(
+        &self,
+        request: &ChatRequest,
+        on_text: &mut dyn FnMut(&str),
+    ) -> Result<AssistantTurn, LlmError> {
         let streaming = ChatRequest {
             stream: Some(true),
             ..request.clone()
@@ -185,6 +203,9 @@ impl Client {
             let mut turn = TurnAccumulator::new();
             let mut saw_done = false;
             let mut delivered = 0usize;
+            // A fresh view of the observer per attempt: the closure below takes it mutably, and one
+            // taken once is an observer the second attempt could not reach.
+            let notify = &mut *on_text;
 
             let outcome = self.transport.post_stream(&http, &mut |event| {
                 if event.is_done() {
@@ -196,6 +217,16 @@ impl Client {
                     LlmError::transport(format!("stream carried a malformed chunk: {e}"))
                 })?;
                 turn.apply(&chunk);
+                // The text *this* chunk added. Read from the chunk rather than from the
+                // accumulator, because the accumulator holds the whole answer and a caller that
+                // has already drawn the earlier fragments needs only the new one.
+                if let Some(text) = chunk
+                    .choices
+                    .first()
+                    .and_then(|choice| choice.delta.content.as_deref())
+                {
+                    notify(text);
+                }
                 Ok(())
             });
 
