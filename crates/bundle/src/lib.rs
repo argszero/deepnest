@@ -39,6 +39,13 @@
 //! directories and copying a file, so this compiles and its tests pass on the two platforms that do
 //! not ship `.app`s at all — which is what lets the CI legs that cannot build one still say the
 //! writer is correct.
+//!
+//! Which files a signature has to cover is the neighbouring question, and [`macho`] answers it: that
+//! module decides what a Mach-O is and walks a tree for the ones inside it. It is separate because
+//! the answer matters as much for the payload this bundle carries as for the bundle itself, and
+//! because it has to be checkable on the two platforms that will never run `codesign`.
+
+pub mod macho;
 
 use std::fs;
 use std::io;
