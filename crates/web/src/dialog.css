@@ -753,6 +753,15 @@
   list-style-type: decimal;
 }
 
+/* A list drawn inside an item is set in less than a list drawn in the answer is: the indent
+ * compounds, and an indent that repeats the top level's leaves three words to a line in a 19rem
+ * column. `display` needs no rule here — the `ul`/`ol` rule above reaches a sub-list too. */
+#deepnest-dialog-transcript .deepnest-said li > ul,
+#deepnest-dialog-transcript .deepnest-said li > ol {
+  margin-top: 0.1rem;
+  padding-left: 0.85rem;
+}
+
 /* `color` is stated rather than inherited, and that is the whole point of this comment: the reset
  * at the top of this file sets `color` on *every* descendant, so code inside an answer does not
  * inherit the answer's colour — it keeps the reset's black. Measured in Chrome against the running

@@ -1044,7 +1044,10 @@
     }
   }
 
-  var BULLET = /^\s*([-*+]|\d+[.)])\s+(.*)$/;
+  // A list line, in the three parts its shape is made of: how far in it starts, which marker it
+  // uses, and the words. The indent is kept rather than trimmed away, because it is the only thing
+  // that says an item sits *under* the item above it rather than after it.
+  var BULLET = /^([ \t]*)([-*+]|\d+[.)])\s+(.*)$/;
   var HEADING = /^(#{1,4})\s+(.*)$/;
 
   function renderWords(text) {
@@ -1071,6 +1074,7 @@
         box.appendChild(fencedBlock(language, body.join("\n")));
         continue;
       }
+      var bullet = BULLET.exec(line);
       var heading = HEADING.exec(line);
       if (heading) {
         // Three levels down from an h1: the box is not a document, and a heading the size of the
@@ -1082,20 +1086,57 @@
         i++;
         continue;
       }
-      if (BULLET.test(line)) {
-        var ordered = /\d/.test(BULLET.exec(line)[1]);
-        var list = document.createElement(ordered ? "ol" : "ul");
+      if (bullet) {
+        // The lists this run has opened, innermost last. The version this replaced took every
+        // consecutive bullet line into one list, whatever its indent and whatever its marker, so
+        // an answer whose steps carried their own sub-points drew the sub-points as steps: "1. read
+        // the file, 2. the header row, 3. the first data row, 4. fix the import" — and the
+        // numbering was this page's invention rather than the model's. Measured in Chrome against
+        // the running binary: six `li` in one `ol`, every one of them `decimal`, and not one list
+        // inside a list anywhere in the answer.
+        var open = [];
         while (i < lines.length) {
           var item = BULLET.exec(lines[i]);
           if (!item) {
             break;
           }
+          // A tab is one step in, counted as the two spaces it is: a model writes one or the other
+          // throughout, and two lists whose indents agree are lists of the same depth.
+          var at = item[1].replace(/\t/g, "  ").length;
+          var ordered = /\d/.test(item[2]);
+          // Out: a line less far in than the innermost list is not an item of it, so that list —
+          // and any list inside it that this line is also out of — closes.
+          while (open.length > 0 && open[open.length - 1].at > at) {
+            open.pop();
+          }
+          // The other marker at the same depth is a second list rather than a second item: a `-`
+          // under a `1.` is a bulleted list of its own, and drawing it as a numbered step makes
+          // the answer say something it did not say.
+          if (open.length > 0) {
+            var innermost = open[open.length - 1];
+            if (innermost.at === at && innermost.ordered !== ordered) {
+              open.pop();
+            }
+          }
+          // In: nothing open, or a list that starts further out than this line does, means this
+          // line opens a list — inside the item above it when there is one, and inside the answer
+          // itself when there is not.
+          var parent = open[open.length - 1];
+          if (!parent || parent.at < at) {
+            var list = document.createElement(ordered ? "ol" : "ul");
+            if (parent) {
+              parent.list.lastChild.appendChild(list);
+            } else {
+              box.appendChild(list);
+            }
+            parent = { at: at, ordered: ordered, list: list };
+            open.push(parent);
+          }
           var point = document.createElement("li");
-          withInline(point, item[2]);
-          list.appendChild(point);
+          withInline(point, item[3]);
+          parent.list.appendChild(point);
           i++;
         }
-        box.appendChild(list);
         continue;
       }
       var words = [];
