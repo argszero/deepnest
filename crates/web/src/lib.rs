@@ -1505,6 +1505,71 @@ mod tests {
     }
 
     #[test]
+    fn up_in_an_empty_box_brings_back_the_message_just_sent() {
+        // The box is emptied the moment a message goes, and before this the sentence could not be
+        // reached again from it. Measured in Chrome with a real key press, after a message had been
+        // sent and the stub had it: `Up` on the empty box left it empty (`value: ""`). After: the
+        // same key returns `{"value":"now the second one","caret":18}` — the message, with the caret
+        // at its end — and a second `Up` reaches the one before it
+        // (`{"value":"fix the failing tests","caret":21}`).
+        assert!(
+            DIALOG_SCRIPT.contains("var sentByHand = [];"),
+            "the dialog keeps no record of what was sent, so there is nothing to bring back"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("function remember(text)"),
+            "a sent message is never written down"
+        );
+        // Written where the message leaves, not where the answer arrives: a turn that fails still
+        // leaves the person wanting the sentence back to fix and resend.
+        let remembered = DIALOG_SCRIPT
+            .find("remember(text)")
+            .expect("the message is remembered");
+        let answered = DIALOG_SCRIPT
+            .find("if (result.status === 200 && result.body")
+            .expect("the answer path exists");
+        assert!(
+            remembered < answered,
+            "a message is only remembered once its answer arrived, so a failed turn loses it"
+        );
+        assert!(
+            DIALOG_SCRIPT
+                .contains(r#"if (event.key !== "ArrowUp" && event.key !== "ArrowDown") {"#),
+            "the box does not listen for the two keys that walk its own history"
+        );
+        // A half-typed paragraph must survive a stray arrow key. Measured against a box holding
+        // "half a thought": the browser itself kept the text, and this guard is what keeps a walk
+        // from replacing it.
+        assert!(
+            DIALOG_SCRIPT.contains(r#"if (input.value !== "" && !recalled) {"#),
+            "the history walk takes the arrow keys away from a message being written"
+        );
+        // Without the flag the walk stops after one step: the box is no longer empty, so the guard
+        // above would refuse every `Up` after the first. Measured: two presses returned the same
+        // message and never reached the one before it.
+        assert!(
+            DIALOG_SCRIPT.contains("var recalled = false;"),
+            "a recalled message is indistinguishable from one the person typed, so the walk stops"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("recalled = text !== \"\";"),
+            "putting a message back does not record that it may be walked past"
+        );
+        // The person's own edit ends the walk; a recalled message must not reset its own position,
+        // and setting `value` from script does not fire this event.
+        assert!(
+            DIALOG_SCRIPT.contains("input.addEventListener(\"input\""),
+            "an edited box keeps a stale walk position, so the next Up goes somewhere unexpected"
+        );
+        // The caret belongs at the end. Position 0 is what setting `value` leaves behind, and it
+        // puts the next word typed in front of the sentence that was just recalled.
+        assert!(
+            DIALOG_SCRIPT.contains("input.setSelectionRange(end, end)"),
+            "a recalled message leaves the caret at its start"
+        );
+    }
+
+    #[test]
     fn the_drawer_lists_the_conversations_and_says_which_one_the_next_message_would_join() {
         // The gap this closes: an app had one conversation and no way to start a clean second one
         // without deleting the first. The page's part is the list and the choice, and the choice
