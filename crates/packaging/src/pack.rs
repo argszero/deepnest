@@ -436,16 +436,21 @@ mod tests {
         // The unpack adds exactly one thing the packer did not pack: the marker `adopt` writes, so
         // that a later run can tell what it is trusting. Everything else is byte for byte the tree
         // above, mode included.
-        let marker_line = format!("{MARKER} 644 file 0.1.0\n");
-        let unpacked = shape(&dir);
+        //
+        // The marker is found rather than spelled: `shape` prints a mode only where the platform has
+        // one, so an expected line carrying `644` would read as a Windows failure in a test about a
+        // payload. What it must be is a file whose body is the payload id, and that is what is
+        // asserted.
+        let mut rest = shape(&dir);
+        let at = rest
+            .iter()
+            .position(|line| line.split(' ').next() == Some(MARKER))
+            .unwrap_or_else(|| panic!("the unpack published no `{MARKER}`: {rest:?}"));
+        let marker = rest.remove(at);
         assert!(
-            unpacked.contains(&marker_line),
-            "the marker is missing or says something else: {unpacked:?}"
+            marker.ends_with(" file 0.1.0\n"),
+            "the marker does not name the payload it was unpacked for: {marker:?}"
         );
-        let rest: Vec<String> = unpacked
-            .into_iter()
-            .filter(|line| *line != marker_line)
-            .collect();
         assert_eq!(shape(&tree), rest);
         assert_eq!(
             packed.entries,
