@@ -963,6 +963,108 @@ mod tests {
     }
 
     #[test]
+    fn a_code_block_in_an_answer_can_be_taken_out_of_it() {
+        // An answer here is usually code, and code is written to be used somewhere else. Before
+        // this, the only way out of a fenced block was to select it by hand — through a `pre` that
+        // wrapped, so the selection picked up the dialog's own line breaks.
+        assert!(
+            DIALOG_SCRIPT.contains("function fencedBlock(language, source)"),
+            "a fenced block is drawn without the language its fence named"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("line.slice(3).trim()"),
+            "the language on the fence's own line is dropped"
+        );
+        // Two scopes, because they are two different jobs: one block of code, or everything the
+        // answer said.
+        for control in ["deepnest-code-copy", "deepnest-answer-copy"] {
+            assert!(
+                DIALOG_SCRIPT.contains(control),
+                "there is no {control} control"
+            );
+            assert!(DIALOG_STYLE.contains(control), "{control} is unstyled");
+        }
+        // `navigator.clipboard` is absent or rejects outside a secure context, and `127.0.0.1`
+        // is one while a LAN address a future build is served from is not — so the older route is
+        // wired rather than assumed unnecessary.
+        assert!(
+            DIALOG_SCRIPT.contains("navigator.clipboard.writeText"),
+            "the clipboard is written through one route only"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("document.execCommand(\"copy\")"),
+            "a page that is not a secure context has no way to copy"
+        );
+        // The control reports what the press did. A copy button that looks the same whether it
+        // wrote the clipboard or not is a button nobody can trust.
+        assert!(
+            DIALOG_SCRIPT.contains("data-copied"),
+            "the control does not show what the press did"
+        );
+    }
+
+    #[test]
+    fn the_copy_of_an_answer_is_assembled_from_nodes_like_the_answer_itself() {
+        // The words being copied came from a model. Building a copy control out of a template
+        // string would put them back into markup, which is the hole the renderer exists to avoid.
+        let start = DIALOG_SCRIPT
+            .find("// ---- Taking the answer out of the page")
+            .expect("the copy section exists");
+        let section = &DIALOG_SCRIPT[start..];
+        let end = section
+            .find("\n  function renderTurn(")
+            .expect("the section ends where the turn begins");
+        let section = &section[..end];
+        assert!(
+            !section.contains("innerHTML") && !section.contains("insertAdjacentHTML"),
+            "the copy controls assemble markup"
+        );
+        // What is copied is the model's own source, not the drawn nodes: the person pastes it
+        // somewhere that reads Markdown, and re-serialising the DOM would be a second renderer.
+        assert!(
+            section.contains("code.textContent = source"),
+            "the block is not written as text"
+        );
+    }
+
+    #[test]
+    fn the_answer_is_laid_out_as_blocks_and_not_one_run_on_paragraph() {
+        // The renderer built the right nodes and the stylesheet still drew them wrong: the reset at
+        // the top of `dialog.css` sets `display` on every descendant and its initial value is
+        // `inline`. Measured in Chrome against the running binary, `P`, `H4`, `UL`, `OL` and `LI`
+        // all computed to `inline` — the answer's paragraphs ran together, its headings were the
+        // size of the text around them, and its lists lost their bullets while keeping their words.
+        // So every element the renderer creates says what it is, and this pins the ones that were
+        // missing rather than all of them one at a time.
+        for selector in [
+            "#deepnest-dialog-transcript .deepnest-said p",
+            "#deepnest-dialog-transcript .deepnest-said ul",
+            "#deepnest-dialog-transcript .deepnest-said ol",
+            "#deepnest-dialog-transcript .deepnest-said h3",
+            "#deepnest-dialog-transcript .deepnest-said li",
+        ] {
+            assert!(DIALOG_STYLE.contains(selector), "{selector} has no layout");
+        }
+        assert!(
+            DIALOG_STYLE.contains("display: list-item"),
+            "a list item is not a list item, so it draws no marker"
+        );
+        // And the `li` carries its own numbering: the reset gives it `disc` whatever the `ol`
+        // around it says, so a numbered list drew bullets until this rule existed. The selector and
+        // the declaration are asserted separately, and that is not laziness: an assertion written
+        // across the line break between them passed on macOS and Linux and failed on Windows, where
+        // the file is checked out with CRLF and the `{` is followed by `\r\n` rather than `\n`.
+        assert!(
+            DIALOG_STYLE.contains("ol > li {"),
+            "no rule reaches the items of a numbered list"
+        );
+        assert!(
+            DIALOG_STYLE.contains("list-style-type: decimal"),
+            "a numbered list draws bullets"
+        );
+    }
+
+    #[test]
     fn the_drawer_lists_the_conversations_and_says_which_one_the_next_message_would_join() {
         // The gap this closes: an app had one conversation and no way to start a clean second one
         // without deleting the first. The page's part is the list and the choice, and the choice

@@ -1058,6 +1058,9 @@
         continue;
       }
       if (line.indexOf("```") === 0) {
+        // The fence's own line carries the one word a reader uses: `rust` above a block of Rust is
+        // how they know it is not a shell command. It used to be dropped on the floor here.
+        var language = line.slice(3).trim();
         var body = [];
         i++;
         while (i < lines.length && lines[i].indexOf("```") !== 0) {
@@ -1065,11 +1068,7 @@
           i++;
         }
         i++;
-        var pre = document.createElement("pre");
-        var code = document.createElement("code");
-        code.textContent = body.join("\n");
-        pre.appendChild(code);
-        box.appendChild(pre);
+        box.appendChild(fencedBlock(language, body.join("\n")));
         continue;
       }
       var heading = HEADING.exec(line);
@@ -1117,6 +1116,139 @@
     return box;
   }
 
+  // ---- Taking the answer out of the page -----------------------------------------------------
+
+  // An answer here is usually code, and code is written to be used somewhere else. Two scopes: a
+  // fenced block carries its own control, because that is the unit a person actually needs, and an
+  // answer with no fence at all still gets one for the whole of it.
+  var COPY = "Copy";
+  var COPIED = "Copied";
+  var COPY_FAILED = "Copy failed";
+
+  function saidSo(control, took) {
+    control.textContent = took ? COPIED : COPY_FAILED;
+    control.setAttribute("data-copied", took ? "yes" : "no");
+    if (control.deepnestWord) {
+      clearTimeout(control.deepnestWord);
+    }
+    control.deepnestWord = setTimeout(function () {
+      control.textContent = COPY;
+      control.removeAttribute("data-copied");
+      control.deepnestWord = null;
+    }, 1400);
+  }
+
+  // The route that needs no permission. A `textarea` the browser itself selects makes the copy the
+  // platform's own rather than this page's idea of one, and it is removed again in the same turn of
+  // the event loop, so no node of it is left in the app's page.
+  function copyTheOldWay(text) {
+    var holder = document.createElement("textarea");
+    holder.value = text;
+    holder.setAttribute("readonly", "");
+    holder.setAttribute("aria-hidden", "true");
+    holder.style.position = "fixed";
+    holder.style.top = "-1000px";
+    holder.style.opacity = "0";
+    document.body.appendChild(holder);
+    holder.select();
+    var took = false;
+    try {
+      took = document.execCommand("copy");
+    } catch (error) {
+      // A browser that no longer implements it throws rather than returning false.
+      took = false;
+    }
+    document.body.removeChild(holder);
+    return took;
+  }
+
+  // The third case is not a failure message. Handing the job back means the text is selected, so
+  // the key the person already knows finishes it.
+  function selectTheText(node) {
+    try {
+      var range = document.createRange();
+      range.selectNodeContents(node);
+      var pick = window.getSelection();
+      pick.removeAllRanges();
+      pick.addRange(range);
+    } catch (error) {
+      // A page that cannot select has still left the text on screen, which is where it started.
+    }
+  }
+
+  function copyText(text, control, node) {
+    function refused() {
+      saidSo(control, false);
+      if (node) {
+        selectTheText(node);
+      }
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      // `writeText` rejects on a page the browser does not consider secure, and a deepnest reached
+      // at a LAN address is exactly that — so the fallback is reached by rejection, not by absence,
+      // and both have to be wired for the button to work on every page this dialog lands on.
+      navigator.clipboard.writeText(text).then(
+        function () {
+          saidSo(control, true);
+        },
+        function () {
+          if (copyTheOldWay(text)) {
+            saidSo(control, true);
+          } else {
+            refused();
+          }
+        }
+      );
+      return;
+    }
+    if (copyTheOldWay(text)) {
+      saidSo(control, true);
+    } else {
+      refused();
+    }
+  }
+
+  function copyControl(className, what, text, node) {
+    var copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = className;
+    copy.textContent = COPY;
+    copy.setAttribute("aria-label", what);
+    copy.addEventListener("click", function () {
+      copyText(text, copy, node);
+    });
+    return copy;
+  }
+
+  // A fenced block. The head sits above the text and holds the language the fence named and the
+  // copy, so pressing one of them cannot move the code the person is reading — and `pre` is what
+  // scrolls sideways, so a control inside it would scroll out of reach.
+  function fencedBlock(language, source) {
+    var block = document.createElement("div");
+    block.className = "deepnest-code";
+
+    var head = document.createElement("div");
+    head.className = "deepnest-code-head";
+
+    var label = document.createElement("span");
+    label.className = "deepnest-code-language";
+    // An unnamed fence is still a code block, and saying so beats an empty corner.
+    label.textContent = language || "code";
+
+    var pre = document.createElement("pre");
+    var code = document.createElement("code");
+    code.textContent = source;
+    pre.appendChild(code);
+
+    head.appendChild(label);
+    head.appendChild(
+      copyControl("deepnest-code-copy", "Copy this code block", source, code)
+    );
+    block.appendChild(head);
+    block.appendChild(pre);
+    return block;
+  }
+
   function renderTurn(turn, live) {
     var line = document.createElement("div");
     line.className = live ? "deepnest-turn deepnest-running" : "deepnest-turn";
@@ -1162,6 +1294,12 @@
       var said = document.createElement("div");
       said.className = "deepnest-said";
       said.appendChild(renderWords(turn.reply));
+      // The whole answer, as the model wrote it. What a person pastes elsewhere wants the same
+      // Markdown they are reading, and rebuilding it out of the drawn nodes would be a second
+      // renderer to keep in step with the first.
+      said.appendChild(
+        copyControl("deepnest-answer-copy", "Copy this answer", turn.reply)
+      );
       line.appendChild(said);
     }
     // The agent's own notes: why a turn ended early, what it could not run. This is the line the
