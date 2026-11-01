@@ -1058,9 +1058,62 @@
   var BULLET = /^([ \t]*)([-*+]|\d+[.)])\s+(.*)$/;
   var HEADING = /^(#{1,4})\s+(.*)$/;
 
-  function renderWords(text) {
+  // What a control is *called*, which is all a person with a screen reader has to go on.
+  //
+  // The transcript drew twelve controls with two names between them: measured in Chrome's own
+  // accessibility tree against six exchanges, the announced names were "Copy this code block" and
+  // "Copy this answer", each six times over, and nothing anywhere said which exchange a control
+  // belonged to. A person tabbing through could copy the wrong answer twice before noticing.
+  //
+  // So every control names the exchange it sits in, and the exchange is named by what was asked —
+  // the one thing about a turn a person recognizes without reading the turn.
+  var NAME_THE_QUESTION = 60;
+
+  // Both names an exchange's controls use, built once: `where` is the place a block sits in, and
+  // `answer` is the whole-answer control. They read differently — "the answer to X" and "a block in
+  // the answer to X" — because each has to make sense on its own, and a message that carried only a
+  // picture has no question to quote, so both fall back on the position.
+  function copyNames(turn, number) {
+    var question = String(turn.user || "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (question.length > NAME_THE_QUESTION) {
+      question = question.slice(0, NAME_THE_QUESTION - 1).trim() + "…";
+    }
+    if (!question) {
+      var place = number > 0 ? "exchange " + number : "this answer";
+      return { where: place, answer: "Copy the answer in " + place };
+    }
+    return {
+      where: 'the answer to "' + question + '"',
+      answer: 'Copy the answer to "' + question + '"'
+    };
+  }
+
+  // A block's own name: which block, in which answer. The ordinal is only worth saying when there
+  // is more than one, because "1 of 1" is a number that tells nobody anything.
+  function blockLabel(language, what, ordinal, total) {
+    var kind = language ? language + " code block" : "code block";
+    if (total > 1) {
+      return "Copy the " + kind + " " + ordinal + " of " + total + " in " + what;
+    }
+    return "Copy the " + kind + " in " + what;
+  }
+
+  function renderWords(text, what) {
     var box = document.createDocumentFragment();
     var lines = String(text).split("\n");
+    // How many blocks this answer holds, counted before any is drawn, because a block's name says
+    // which one it is and that needs the total as well as the position. A fence with no closing
+    // fence is still a block — the loop below draws it as one — so the odd fence rounds up.
+    var fences = 0;
+    lines.forEach(function (one) {
+      if (one.indexOf("```") === 0) {
+        fences += 1;
+      }
+    });
+    var blocks = Math.ceil(fences / 2);
+    var drawn = 0;
     var i = 0;
     while (i < lines.length) {
       var line = lines[i];
@@ -1079,7 +1132,8 @@
           i++;
         }
         i++;
-        box.appendChild(fencedBlock(language, body.join("\n")));
+        drawn += 1;
+        box.appendChild(fencedBlock(language, body.join("\n"), what, drawn, blocks));
         continue;
       }
       var bullet = BULLET.exec(line);
@@ -1272,7 +1326,7 @@
   // A fenced block. The head sits above the text and holds the language the fence named and the
   // copy, so pressing one of them cannot move the code the person is reading — and `pre` is what
   // scrolls sideways, so a control inside it would scroll out of reach.
-  function fencedBlock(language, source) {
+  function fencedBlock(language, source, what, ordinal, total) {
     var block = document.createElement("div");
     block.className = "deepnest-code";
 
@@ -1291,14 +1345,21 @@
 
     head.appendChild(label);
     head.appendChild(
-      copyControl("deepnest-code-copy", "Copy this code block", source, code)
+      copyControl(
+        "deepnest-code-copy",
+        blockLabel(language, what, ordinal, total),
+        source,
+        code
+      )
     );
     block.appendChild(head);
     block.appendChild(pre);
     return block;
   }
 
-  function renderTurn(turn, live) {
+  // `number` is where this turn sits in the conversation, counting from the first exchange it has:
+  // the fallback name for a message that carried no words, and nothing else.
+  function renderTurn(turn, live, number) {
     var line = document.createElement("div");
     line.className = live ? "deepnest-turn deepnest-running" : "deepnest-turn";
 
@@ -1342,12 +1403,13 @@
     if (turn.reply) {
       var said = document.createElement("div");
       said.className = "deepnest-said";
-      said.appendChild(renderWords(turn.reply));
+      var names = copyNames(turn, number);
+      said.appendChild(renderWords(turn.reply, names.where));
       // The whole answer, as the model wrote it. What a person pastes elsewhere wants the same
       // Markdown they are reading, and rebuilding it out of the drawn nodes would be a second
       // renderer to keep in step with the first.
       said.appendChild(
-        copyControl("deepnest-answer-copy", "Copy this answer", turn.reply)
+        copyControl("deepnest-answer-copy", names.answer, turn.reply)
       );
       line.appendChild(said);
     }
@@ -1425,7 +1487,12 @@
       transcript.appendChild(drawEarlier(older));
     }
     recent.forEach(function (turn, index) {
-      transcript.appendChild(renderTurn(turn, live && index === recent.length - 1));
+      transcript.appendChild(
+        // `older + index + 1` is where this turn stands in the conversation, not in the window:
+        // the drawer says "exchange 12" of the same counting, so a fallback name and the drawer
+        // agree instead of numbering the same turn two ways.
+        renderTurn(turn, live && index === recent.length - 1, older + index + 1)
+      );
     });
     transcript.hidden = false;
     if (atTheEnd) {
