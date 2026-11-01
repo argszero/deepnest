@@ -227,6 +227,14 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # A generated app is a local tool that gets rebuilt while its agent works, not a service fleet.
 # Optimising it as hard as rustc can would spend the user's seconds on every change.
 opt-level = 1
+
+# An empty workspace root of its own. Cargo walks *up* from this package looking for a workspace,
+# and an app is created under the user's home — `~/.deepnest/apps/<slug>` — where any `Cargo.toml`
+# above it (a monorepo the user keeps their own projects in, a stray manifest in the home
+# directory) would otherwise be adopted as this package's workspace and stop the build with
+# "current package believes it's in a workspace when it's not". The empty table ends that search
+# at the app, which is what makes an app buildable no matter what it was created inside.
+[workspace]
 "#;
 
 const GITIGNORE: &str = r#"/target
@@ -666,6 +674,23 @@ mod tests {
 
         let source = fs::read_to_string(created.dir.join("src/main.rs")).unwrap();
         assert!(source.starts_with("//! notes"), "{source}");
+    }
+
+    #[test]
+    fn the_generated_crate_is_its_own_workspace_root() {
+        // Found by running the first-use path for real: an app created under a home that sat
+        // inside a Cargo workspace made cargo walk up to that workspace's manifest, and the build
+        // stopped with "current package believes it's in a workspace when it's not" before a line
+        // of the app was compiled. An app is created under the *user's* home, which is exactly
+        // where an unrelated `Cargo.toml` above it is normal, so the app has to end the search.
+        let scratch = Scratch::new("workspace_root");
+        let created = create(&slug(), &scratch.dir(), "Notes").unwrap();
+
+        let cargo = fs::read_to_string(created.dir.join("Cargo.toml")).unwrap();
+        assert!(cargo.contains("\n[workspace]\n"), "{cargo}");
+        // Empty, and a root: a member entry here would pull the user's own crates into the app.
+        assert!(!cargo.contains("members"), "{cargo}");
+        assert!(!cargo.contains("workspace = "), "{cargo}");
     }
 
     #[test]
