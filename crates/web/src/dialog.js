@@ -110,7 +110,10 @@
 
   // `role="status"` with `aria-live` announces the answer without moving focus out of the box,
   // so a second message can follow the first.
-  var answer = document.createElement("p");
+  //
+  // A `div` rather than a `p`: the answer is Markdown, and since this file renders it (below) the
+  // line holds headings, lists and code blocks — none of which a paragraph may contain.
+  var answer = document.createElement("div");
   answer.id = "deepnest-dialog-answer";
   answer.hidden = true;
   answer.setAttribute("role", "status");
@@ -706,6 +709,7 @@
   // monospace of a progress line, and the mark that says more is coming.
   function startTyping() {
     typing = true;
+    written = "";
     answer.textContent = "";
     answer.hidden = false;
     answer.classList.remove("bad");
@@ -716,11 +720,68 @@
     answer.setAttribute("aria-live", "off");
   }
 
+  // The answer being written, drawn rather than dumped. The model's answer is Markdown and used to
+  // arrive here as its own source: measured in Chrome against the running stream, the line under
+  // the box held `##`, `**` and a pair of fences as literal characters, with zero headings, zero
+  // bold runs and zero code blocks inside it — while the transcript above drew the same text as
+  // blocks. So a person watched Markdown being typed and read it as Markdown only once the turn had
+  // landed in the transcript.
+  //
+  // Redrawing is coalesced to one draw per task rather than one per event: a model's stream arrives
+  // in hundreds of pieces and each redraw rebuilds every block, so drawing per piece would rebuild
+  // the answer a quadratic number of times. A trailing draw is what a reader sees — the last piece
+  // always lands, which is the difference between coalescing and dropping.
+  var written = "";
+  var redrawal = 0;
+
+  function drawAnswer() {
+    redrawal = 0;
+    var said = document.createElement("div");
+    said.className = "deepnest-said";
+    // `null` is "this text is being shown, not copied from": the answer line carries no copy
+    // controls of its own, because the transcript above already offers one per block and a second
+    // set here would double the tab stops this panel spends on copying.
+    said.appendChild(renderWords(written, null));
+    // The box scrolls when the answer outgrows it (`max-height` in the stylesheet), and rebuilding
+    // the blocks is what drops that scroll position back to the top. Appending text never did, so
+    // holding it here is what keeps a redraw from being a change of what the reader is looking at.
+    var kept = answer.scrollTop;
+    answer.textContent = "";
+    answer.appendChild(said);
+    if (kept) {
+      answer.scrollTop = kept;
+    }
+  }
+
+  function scheduleAnswer() {
+    if (!redrawal) {
+      redrawal = setTimeout(drawAnswer, 0);
+    }
+  }
+
   function typeMore(piece) {
     if (!typing) {
       startTyping();
     }
-    answer.textContent += piece;
+    written += piece;
+    scheduleAnswer();
+  }
+
+  // The answer, whole. Same drawing, same renderer as the transcript uses — one renderer for the
+  // agent's words wherever they are shown, so the two can never drift apart.
+  function sayAnswer(text) {
+    written = text;
+    if (redrawal) {
+      // A draw held back for the next task would paint a partial answer over the finished one.
+      clearTimeout(redrawal);
+      redrawal = 0;
+    }
+    answer.hidden = false;
+    answer.classList.remove("bad");
+    answer.classList.remove("live");
+    answer.classList.remove("typing");
+    answer.setAttribute("aria-live", "polite");
+    drawAnswer();
   }
 
   // The question route: one path, one cookie, and nothing about it needs the control token.
@@ -1330,6 +1391,20 @@
     var block = document.createElement("div");
     block.className = "deepnest-code";
 
+    var pre = document.createElement("pre");
+    var code = document.createElement("code");
+    code.textContent = source;
+    pre.appendChild(code);
+
+    // `what` is null where the text is being *shown* rather than copied from — the answer line under
+    // the box, which is a view of the turn the transcript above already holds. A block there gets no
+    // head and no control: the language tag would be the only thing in the row, and a copy button
+    // would be a second set of tab stops for a control the transcript already offers.
+    if (what === null) {
+      block.appendChild(pre);
+      return block;
+    }
+
     var head = document.createElement("div");
     head.className = "deepnest-code-head";
 
@@ -1337,11 +1412,6 @@
     label.className = "deepnest-code-language";
     // An unnamed fence is still a code block, and saying so beats an empty corner.
     label.textContent = language || "code";
-
-    var pre = document.createElement("pre");
-    var code = document.createElement("code");
-    code.textContent = source;
-    pre.appendChild(code);
 
     head.appendChild(label);
     head.appendChild(
@@ -1827,7 +1897,9 @@
           }
           input.value = "";
           forgetAttachments();
-          say(text, false);
+          // The answer, drawn as the same blocks the transcript will draw it as: `say` is for this
+          // page's own lines, and the agent's words are Markdown.
+          sayAnswer(text);
           // The turn is on disk the moment the route answers, so this reads what was actually
           // recorded rather than echoing what came back in the reply.
           readHistory();

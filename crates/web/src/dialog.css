@@ -652,7 +652,15 @@
   color: rgba(244, 244, 246, 0.55);
 }
 
-#deepnest-dialog-transcript .deepnest-said {
+/* The agent's words, laid out. Scoped to the dialog rather than to the transcript because these
+ * words appear in two places: a finished turn in the transcript, and the answer line under the box
+ * while it is still arriving. The line under the box used to hold the same text as plain source —
+ * `##`, `**` and the fences on screen — so the reader watched Markdown being typed and read it as
+ * Markdown only after the turn landed in the transcript above.
+ *
+ * The scope keeps the reset beaten: `#deepnest-dialog *` is one id, and these selectors are one id
+ * plus a class, which is what stops `all: initial` from putting every block back to `inline`. */
+#deepnest-dialog .deepnest-said {
   display: block;
   box-sizing: border-box;
   margin: 0.25rem 0 0;
@@ -663,27 +671,27 @@
 
 /* The answer is Markdown, so its blocks come with their own margins — flattened here so the
  * spacing between them belongs to the transcript rather than to the browser's defaults. */
-#deepnest-dialog-transcript .deepnest-said > * {
+#deepnest-dialog .deepnest-said > * {
   margin: 0.3rem 0 0;
 }
 
-#deepnest-dialog-transcript .deepnest-said > *:first-child {
+#deepnest-dialog .deepnest-said > *:first-child {
   margin-top: 0;
 }
 
-#deepnest-dialog-transcript .deepnest-said ul,
-#deepnest-dialog-transcript .deepnest-said ol {
+#deepnest-dialog .deepnest-said ul,
+#deepnest-dialog .deepnest-said ol {
   padding-left: 1.1rem;
 }
 
-#deepnest-dialog-transcript .deepnest-said li {
+#deepnest-dialog .deepnest-said li {
   margin: 0.1rem 0 0;
 }
 
-#deepnest-dialog-transcript .deepnest-said h3,
-#deepnest-dialog-transcript .deepnest-said h4,
-#deepnest-dialog-transcript .deepnest-said h5,
-#deepnest-dialog-transcript .deepnest-said h6 {
+#deepnest-dialog .deepnest-said h3,
+#deepnest-dialog .deepnest-said h4,
+#deepnest-dialog .deepnest-said h5,
+#deepnest-dialog .deepnest-said h6 {
   font: 600 12px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   color: #ffffff;
 }
@@ -695,25 +703,25 @@
  * were the size of the text around them, and its lists lost both their bullets and their numbers
  * while keeping their content. The fenced block below already had to say `display: block` for this
  * same reason; these are the rest of them. */
-#deepnest-dialog-transcript .deepnest-said p,
-#deepnest-dialog-transcript .deepnest-said ul,
-#deepnest-dialog-transcript .deepnest-said ol,
-#deepnest-dialog-transcript .deepnest-said h3,
-#deepnest-dialog-transcript .deepnest-said h4,
-#deepnest-dialog-transcript .deepnest-said h5,
-#deepnest-dialog-transcript .deepnest-said h6 {
+#deepnest-dialog .deepnest-said p,
+#deepnest-dialog .deepnest-said ul,
+#deepnest-dialog .deepnest-said ol,
+#deepnest-dialog .deepnest-said h3,
+#deepnest-dialog .deepnest-said h4,
+#deepnest-dialog .deepnest-said h5,
+#deepnest-dialog .deepnest-said h6 {
   display: block;
   box-sizing: border-box;
   max-width: 100%;
 }
 
-#deepnest-dialog-transcript .deepnest-said p {
+#deepnest-dialog .deepnest-said p {
   margin: 0.3rem 0 0;
 }
 
 /* Headings shrink as they nest, and none of them reaches the panel's own title: the answer is a
  * reply inside someone's app, not a document that outranks it. */
-#deepnest-dialog-transcript .deepnest-said h3 {
+#deepnest-dialog .deepnest-said h3 {
   margin: 0.5rem 0 0;
   font-size: 13px;
   font-weight: 600;
@@ -721,9 +729,9 @@
   color: #ffffff;
 }
 
-#deepnest-dialog-transcript .deepnest-said h4,
-#deepnest-dialog-transcript .deepnest-said h5,
-#deepnest-dialog-transcript .deepnest-said h6 {
+#deepnest-dialog .deepnest-said h4,
+#deepnest-dialog .deepnest-said h5,
+#deepnest-dialog .deepnest-said h6 {
   margin: 0.45rem 0 0;
   font-size: 12px;
   font-weight: 600;
@@ -734,22 +742,22 @@
 /* A list item is `list-item` rather than `block`: that is the value that draws the marker outside
  * the text, and `outside` is what keeps the wrapped second line of a long point aligned with the
  * first instead of under the bullet. */
-#deepnest-dialog-transcript .deepnest-said ul,
-#deepnest-dialog-transcript .deepnest-said ol {
+#deepnest-dialog .deepnest-said ul,
+#deepnest-dialog .deepnest-said ol {
   margin: 0.3rem 0 0;
   padding-left: 1.15rem;
   list-style-position: outside;
 }
 
-#deepnest-dialog-transcript .deepnest-said ul {
+#deepnest-dialog .deepnest-said ul {
   list-style-type: disc;
 }
 
-#deepnest-dialog-transcript .deepnest-said ol {
+#deepnest-dialog .deepnest-said ol {
   list-style-type: decimal;
 }
 
-#deepnest-dialog-transcript .deepnest-said li {
+#deepnest-dialog .deepnest-said li {
   display: list-item;
   margin: 0.15rem 0 0;
 }
@@ -757,15 +765,15 @@
 /* The reset reaches the `li` too, so its `list-style-type` is the initial `disc` whatever the `ol`
  * around it says — an inherited `decimal` never arrives. Measured: `OL` computed `decimal` while
  * its items computed `disc`, which draws a numbered list as bullets. */
-#deepnest-dialog-transcript .deepnest-said ol > li {
+#deepnest-dialog .deepnest-said ol > li {
   list-style-type: decimal;
 }
 
 /* A list drawn inside an item is set in less than a list drawn in the answer is: the indent
  * compounds, and an indent that repeats the top level's leaves three words to a line in a 19rem
  * column. `display` needs no rule here — the `ul`/`ol` rule above reaches a sub-list too. */
-#deepnest-dialog-transcript .deepnest-said li > ul,
-#deepnest-dialog-transcript .deepnest-said li > ol {
+#deepnest-dialog .deepnest-said li > ul,
+#deepnest-dialog .deepnest-said li > ol {
   margin-top: 0.1rem;
   padding-left: 0.85rem;
 }
@@ -775,7 +783,7 @@
  * inherit the answer's colour — it keeps the reset's black. Measured in Chrome against the running
  * binary, the way a person would have found it: `pre > code` was rgb(0, 0, 0) on a 35%-black block,
  * which is a code block nobody can read. */
-#deepnest-dialog-transcript .deepnest-said code {
+#deepnest-dialog .deepnest-said code {
   font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
   padding: 0 0.2rem;
   border-radius: 3px;
@@ -787,7 +795,7 @@
  * *inline* box: it then sizes itself to its longest line instead of to the panel, and a fenced
  * block in the answer pushes the text 188px past the edge of a 22rem dialog. Measured, not
  * guessed — the browser said `PRE … display=inline … w=493` inside a 305px transcript column. */
-#deepnest-dialog-transcript .deepnest-said pre {
+#deepnest-dialog .deepnest-said pre {
   display: block;
   box-sizing: border-box;
   max-width: 100%;
@@ -800,7 +808,7 @@
 
 /* The line wraps rather than scrolls sideways: the column is 19rem wide, so a code line that
  * keeps its own width is a line nobody can read without dragging. */
-#deepnest-dialog-transcript .deepnest-said pre code {
+#deepnest-dialog .deepnest-said pre code {
   padding: 0;
   background: none;
   white-space: pre-wrap;
@@ -811,7 +819,7 @@
  * must not reach this — but `color` is handed back on the very next line: the reset drops it to
  * canvas text, and a `pre` and `code` inherit from here, so without `inherit` every code block in
  * a dark dialog would be black on black. */
-#deepnest-dialog-transcript .deepnest-code {
+#deepnest-dialog .deepnest-code {
   all: initial;
   display: block;
   box-sizing: border-box;
@@ -823,7 +831,7 @@
 
 /* The `pre` under a head needs no top margin of its own: the head is what separates this block
  * from the paragraph above it. */
-#deepnest-dialog-transcript .deepnest-code pre {
+#deepnest-dialog .deepnest-code pre {
   margin-top: 0;
 }
 
@@ -892,7 +900,7 @@
   margin: 0.35rem 0 0 auto;
 }
 
-#deepnest-dialog-transcript .deepnest-said a {
+#deepnest-dialog .deepnest-said a {
   color: #7aa7ff;
 }
 
