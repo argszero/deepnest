@@ -168,6 +168,42 @@
   margin: 0.55rem 0 0;
 }
 
+/* The stop control that appears while a turn is running. Styled beside Send and deliberately
+ * quieter than it: stopping is the exception, and a button that competes with Send is one the
+ * person presses by mistake. `[hidden]` is spelled out because `all: initial` above resets
+ * `display`, so the attribute on its own would leave it on screen. */
+#deepnest-dialog-stop {
+  display: inline-block;
+  margin-top: 0.45rem;
+  margin-left: 0.4rem;
+  padding: 0.35rem 0.7rem;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(244, 244, 246, 0.78);
+  font: 600 13px/1.2 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  cursor: pointer;
+}
+
+#deepnest-dialog-stop[hidden] {
+  display: none;
+}
+
+#deepnest-dialog-stop:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.5);
+  color: #f4f4f6;
+}
+
+#deepnest-dialog-stop:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+#deepnest-dialog-stop:focus-visible {
+  outline: 2px solid #7aa7ff;
+  outline-offset: 1px;
+}
+
 #deepnest-dialog-pictures[hidden] {
   display: none;
 }

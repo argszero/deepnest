@@ -752,6 +752,52 @@ mod tests {
     }
 
     #[test]
+    fn the_dialog_offers_a_stop_only_while_a_turn_is_running() {
+        // The measured defect: a turn ran 112 seconds and 24 rounds, and the only thing the page
+        // could do about it was wait. The stop reaches the loop on its own cookie, through the
+        // route the server mints beside the four it already hands the page.
+        assert!(
+            DIALOG_SCRIPT.contains("deepnest-dialog-stop"),
+            "the box has no stop control"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#"type = "button""#),
+            "a stop inside the form that submitted it would start a second turn"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#""/cancel""#),
+            "the control does not post to the route that stops a turn"
+        );
+        // It starts hidden and is put away again by `stopWatching`, which every exit from a turn
+        // goes through — so a page never shows a stop for a turn that has already ended.
+        assert!(
+            DIALOG_SCRIPT.contains("stop.hidden = true;"),
+            "the control is never hidden"
+        );
+        let watching = &DIALOG_SCRIPT[DIALOG_SCRIPT
+            .find("function stopWatching()")
+            .expect("the box stops its watcher somewhere")..];
+        let watching = &watching[..watching.find("\n  }").expect("the function ends")];
+        assert!(
+            watching.contains("stop.hidden = true"),
+            "a finished turn leaves its stop button on screen: {watching}"
+        );
+        let started = &DIALOG_SCRIPT[DIALOG_SCRIPT
+            .find("function watchTheTurn()")
+            .expect("the box watches a turn somewhere")..];
+        let started = &started[..started.find("\n  }").expect("the function ends")];
+        assert!(
+            started.contains("stop.hidden = false"),
+            "a running turn offers no way out of it: {started}"
+        );
+        // `all: initial` resets `display`, so the attribute alone would leave it visible.
+        assert!(
+            DIALOG_STYLE.contains("#deepnest-dialog-stop[hidden]"),
+            "the control is unstyled, so hiding it does nothing"
+        );
+    }
+
+    #[test]
     fn the_dialog_says_what_went_wrong_instead_of_failing_silently() {
         // Three failures a user can hit, each with a different next step, and the box has to name
         // the step: the grant expired, the server is gone, and the answer was a refusal.

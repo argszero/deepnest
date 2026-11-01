@@ -52,6 +52,7 @@ use deepnest_gateway::{Answer, ForwardError, Forwarder, HttpTransport, StdForwar
 use deepnest_packaging::{Probe, StdProbe};
 use deepnest_web::Panel;
 
+use crate::cancel;
 use crate::chat;
 use crate::escalation;
 use crate::grant;
@@ -231,6 +232,10 @@ pub struct Router {
     /// same reason `grants` is: the dialog is where an approval is given, and a router that could
     /// not hold a request would answer every one of them with "nobody to ask".
     requests: escalation::Requests,
+    /// The turns this process is running, so a page can stop the one it started. Always present,
+    /// for the same reason `grants` and `requests` are: it needs no file and no lifecycle, and a
+    /// router that could not hold a turn would have to answer every stop with "nothing to stop".
+    turns: cancel::Running,
 }
 
 impl Router {
@@ -245,6 +250,7 @@ impl Router {
             config_path: None,
             grants: grant::Grants::new(),
             requests: escalation::Requests::new(),
+            turns: cancel::Running::new(),
         }
     }
 
@@ -546,6 +552,7 @@ impl Router {
         let mut response = response;
         for action in [
             chat::ACTION,
+            cancel::ACTION,
             escalation::ACTION,
             rebuild::ACTION,
             history::ACTION,
@@ -1121,10 +1128,10 @@ impl Router {
             // `chat` is the one verb here that does not change a process, so it is the one that
             // must not claim to: what a caller needs to know is the method, and the wording only
             // has to be true.
-            let what = if action == Action::Chat {
-                "takes a message"
-            } else {
-                "changes state"
+            let what = match action {
+                Action::Chat => "takes a message",
+                Action::Cancel => "stops a turn",
+                _ => "changes state",
             };
             return Response::json(
                 405,
@@ -1148,6 +1155,11 @@ impl Router {
         // say no to one.
         if action == Action::Escalation {
             return self.escalation_route(request, &slug);
+        }
+        // The same exemption, for the same reason: a turn is the agent loop's, and the page that
+        // wants it stopped is the page it was started from, whether or not the app is running.
+        if action == Action::Cancel {
+            return self.cancel_route(&slug);
         }
 
         let Some(lifecycle) = &self.lifecycle else {
@@ -1219,6 +1231,7 @@ impl Router {
             // Answered above, before the checks they must not be subject to.
             Action::Create => unreachable!("create is answered before this match"),
             Action::Escalation => unreachable!("escalation is answered before this match"),
+            Action::Cancel => unreachable!("cancel is answered before this match"),
             Action::Start => {
                 let log = deepnest_apps::log_path(&lifecycle.home, &slug);
                 started(&slug, lifecycle.supervisor.start(&slug, &dir, log))
@@ -1280,6 +1293,33 @@ impl Router {
                 }
             }
         }
+    }
+
+    /// `POST /api/apps/<slug>/cancel` — stop the turn this app is running.
+    ///
+    /// `POST` and not `DELETE`: there is no resource to delete and nothing to be idempotent about
+    /// beyond the flag itself, and the dialog's stop is a request the person makes rather than an
+    /// object they remove.
+    ///
+    /// The reply counts the turns it *asked* to stop, and that wording is deliberate: the loop reads
+    /// the flag before its next request and before every tool call of a batch, so a turn in the
+    /// middle of a model call ends when that call returns. Zero is an ordinary answer — a second
+    /// press, or a stop that arrives after the answer did — because a stop that finds nothing to
+    /// stop is a true statement about the app, not a failure of the request.
+    fn cancel_route(&self, slug: &Slug) -> Response {
+        let stopping = self.turns.stop(slug.as_str());
+        let note = match stopping {
+            0 => format!("no turn is running for `{slug}`"),
+            1 => "the turn was asked to stop; it ends before its next request or tool call"
+                .to_string(),
+            n => format!(
+                "{n} turns were asked to stop; each ends before its next request or tool call"
+            ),
+        };
+        Response::json(
+            200,
+            json!({ "stopping": stopping, "note": note }).to_string(),
+        )
     }
 
     /// `GET`/`POST /api/apps/<slug>/escalation` — the question a turn is waiting on, and the answer.
@@ -1433,19 +1473,20 @@ impl Router {
             llm.model,
             Arc::new(HttpTransport::new()),
         ));
+        // This turn is registered before it starts, so `POST .../cancel` on another connection has
+        // something to stop. The ticket lives to the end of this call; dropping it is what takes the
+        // turn out of the registry, so a stop after the answer finds nothing — which is the truth.
+        let ticket = self.turns.begin(slug.as_str());
         // The approver comes from this router's own queue, so a request registered inside the
         // turn is the one `GET`/`POST .../escalation` reads and answers on another connection.
-        let reply = chat::answer(
-            model,
-            &lifecycle.home,
-            dir,
-            slug,
-            &ask,
-            Some(self.requests.approver(slug.as_str())),
+        let terms = chat::Terms {
+            approver: Some(self.requests.approver(slug.as_str())),
             // A build that failed last time is part of what the model must know before it writes
             // again: without it the next turn adds code on top of a tree that does not compile.
-            lifecycle.rebuild.note(slug),
-        );
+            build_note: lifecycle.rebuild.note(slug),
+            cancel: ticket.cancellation(),
+        };
+        let reply = chat::answer(model, &lifecycle.home, dir, slug, &ask, &terms);
         starts_a_rebuild_if_the_app_changed(&reply.body, &lifecycle.rebuild, slug);
         Response::json(reply.status, reply.body.to_string())
     }
@@ -1479,6 +1520,14 @@ enum Action {
     /// for a question), `POST` answers it. Not a state change to the app, and it needs no
     /// lifecycle — which is why it is answered before the routes that do.
     Escalation,
+    /// Ask the turn this app is running to stop.
+    ///
+    /// The one app route whose effect is on a turn rather than on the app: it changes no file, starts
+    /// no process and spends no model budget — it ends spending. It is answered before the lifecycle
+    /// is looked for, for the same reason `escalation` is: the turn belongs to the agent loop, not to
+    /// the app's process, and a page whose app was stopped mid-turn may still be the page that wants
+    /// that turn to end.
+    Cancel,
     /// Read the conversation the app's agent has had.
     ///
     /// A `GET` and nothing else, for the same reason `escalation` half is: it changes no state, and
@@ -1498,13 +1547,14 @@ impl Action {
             "restart" => Some(Self::Restart),
             chat::ACTION => Some(Self::Chat),
             escalation::ACTION => Some(Self::Escalation),
+            cancel::ACTION => Some(Self::Cancel),
             history::ACTION => Some(Self::History),
             _ => None,
         }
     }
 
     /// The verbs, for a refusal that tells the caller what would have worked.
-    const VERBS: &str = "create, build, start, stop, restart, chat, escalation or history";
+    const VERBS: &str = "create, build, start, stop, restart, chat, cancel, escalation or history";
 }
 
 /// The value of one query parameter, percent-decoded.
@@ -2692,7 +2742,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_action_is_not_found_and_the_refusal_lists_the_eight_that_exist() {
+    fn an_unknown_action_is_not_found_and_the_refusal_lists_the_nine_that_exist() {
         let scratch = Scratch::new("life-action");
         scratch.built_app("notes", "Notes");
         let router = supervised(&scratch);
@@ -2700,8 +2750,9 @@ mod tests {
         let unknown = router.respond(&post("/api/apps/notes/delete")).complete();
         assert_eq!(unknown.status, 404);
         assert!(
-            body(&unknown)
-                .contains("create, build, start, stop, restart, chat, escalation or history"),
+            body(&unknown).contains(
+                "create, build, start, stop, restart, chat, cancel, escalation or history"
+            ),
             "{:?}",
             unknown
         );
@@ -2711,8 +2762,9 @@ mod tests {
         let bare = router.respond(&post("/api/apps/notes")).complete();
         assert_eq!(bare.status, 404);
         assert!(
-            body(&bare)
-                .contains("create, build, start, stop, restart, chat, escalation or history"),
+            body(&bare).contains(
+                "create, build, start, stop, restart, chat, cancel, escalation or history"
+            ),
             "{:?}",
             bare
         );
@@ -3397,7 +3449,7 @@ mod tests {
     fn app_page_with_grants(
         scratch: &Scratch,
         slug: &str,
-    ) -> (Router, String, String, String, String) {
+    ) -> (Router, String, String, String, String, String) {
         let router = supervised_forwarding(scratch, RecordingForwarder::answering(200)).0;
         let started = router
             .respond(&post(&format!("/api/apps/{slug}/start")))
@@ -3410,7 +3462,7 @@ mod tests {
         let cookies = set_cookies(&page);
         assert_eq!(
             cookies.len(),
-            4,
+            5,
             "a page carries one cookie per route: {cookies:?}"
         );
         let chat = cookies
@@ -3433,6 +3485,11 @@ mod tests {
             .find(|raw| raw.starts_with("deepnest-history="))
             .expect("the transcript cookie")
             .clone();
+        let cancel = cookies
+            .iter()
+            .find(|raw| raw.starts_with("deepnest-cancel="))
+            .expect("the stop cookie")
+            .clone();
         assert_ne!(chat, escalation, "one value must not open both routes");
         assert_ne!(
             build, chat,
@@ -3442,12 +3499,17 @@ mod tests {
         assert_ne!(history, chat, "reading what was said is not saying more");
         assert_ne!(history, escalation, "nor is it approving a question");
         assert_ne!(history, build, "nor is it watching a build");
+        assert_ne!(cancel, chat, "stopping a turn is not sending one");
+        assert_ne!(cancel, history, "nor is it reading what was said");
+        assert_ne!(cancel, escalation, "nor is it approving a question");
+        assert_ne!(cancel, build, "nor is it watching a build");
         (
             router,
             grant_value(&chat),
             grant_value(&escalation),
             grant_value(&build),
             grant_value(&history),
+            grant_value(&cancel),
         )
     }
 
@@ -3585,11 +3647,13 @@ mod tests {
         // second tab is already using.
         let scratch = Scratch::new("grant-reload");
         scratch.built_app("notes", "Notes");
-        let (router, chat, escalation, build, history) = app_page_with_grants(&scratch, "notes");
+        let (router, chat, escalation, build, history, cancel) =
+            app_page_with_grants(&scratch, "notes");
         let again = parse(&format!(
             "GET /app/notes/ HTTP/1.1\r\nHost: 127.0.0.1:4270\r\n\
              Cookie: deepnest-chat={chat}; deepnest-escalation={escalation}; \
-             deepnest-build={build}; deepnest-history={history}\r\n\r\n"
+             deepnest-build={build}; deepnest-history={history}; \
+             deepnest-cancel={cancel}\r\n\r\n"
         ))
         .unwrap();
         let reloaded = router.respond(&again).complete();
@@ -3603,10 +3667,10 @@ mod tests {
 
     #[test]
     fn a_page_holding_one_capability_is_given_the_other_and_keeps_the_one_it_has() {
-        // The values are separate, so a page that has only one is given exactly the other two.
+        // The values are separate, so a page that has only one is given exactly the other four.
         let scratch = Scratch::new("grant-half");
         scratch.built_app("notes", "Notes");
-        let (router, chat, _, _, _) = app_page_with_grants(&scratch, "notes");
+        let (router, chat, _, _, _, _) = app_page_with_grants(&scratch, "notes");
         let again = parse(&format!(
             "GET /app/notes/ HTTP/1.1\r\nHost: 127.0.0.1:4270\r\n\
              Cookie: deepnest-chat={chat}\r\n\r\n"
@@ -3614,7 +3678,7 @@ mod tests {
         .unwrap();
         let reloaded = router.respond(&again).complete();
         let minted = set_cookies(&reloaded);
-        assert_eq!(minted.len(), 3, "{minted:?}");
+        assert_eq!(minted.len(), 4, "{minted:?}");
         assert!(
             minted
                 .iter()
@@ -3629,6 +3693,10 @@ mod tests {
             minted
                 .iter()
                 .any(|raw| raw.starts_with("deepnest-history=")),
+            "{minted:?}"
+        );
+        assert!(
+            minted.iter().any(|raw| raw.starts_with("deepnest-cancel=")),
             "{minted:?}"
         );
         assert!(
@@ -3651,7 +3719,7 @@ mod tests {
             .complete();
 
         let cookies = set_cookies(&page);
-        assert_eq!(cookies.len(), 4, "{cookies:?}");
+        assert_eq!(cookies.len(), 5, "{cookies:?}");
         let chat = cookies
             .iter()
             .find(|raw| raw.starts_with("deepnest-chat="))
@@ -3778,7 +3846,7 @@ mod tests {
         // is handed the ability to read must not thereby get the ability to send.
         let scratch = Scratch::new("grant-history-scope");
         scratch.built_app("notes", "Notes");
-        let (router, _, _, _, history) = app_page_with_grants(&scratch, "notes");
+        let (router, _, _, _, history, _) = app_page_with_grants(&scratch, "notes");
 
         let read = router
             .respond(&with_named_grant(
@@ -3809,6 +3877,113 @@ mod tests {
             ))
             .complete();
         assert_eq!(answered.status, 401, "{}", body(&answered));
+    }
+
+    #[test]
+    fn the_stop_capability_opens_the_stop_route_and_nothing_else() {
+        // A fifth value on the page, and the same rule as the other four: it stops a turn and does
+        // nothing else. The interesting direction is the one that sends — a page handed the ability
+        // to stop must not thereby get the ability to spend.
+        let scratch = Scratch::new("grant-cancel-scope");
+        scratch.built_app("notes", "Notes");
+        let (router, chat, escalation, _, _, cancel) = app_page_with_grants(&scratch, "notes");
+
+        // Nothing is running, and that is an answer rather than an error: the page presses stop on
+        // a turn that ended a moment ago all the time.
+        let stopped = router
+            .respond(&with_named_grant(
+                "POST",
+                "/api/apps/notes/cancel",
+                "deepnest-cancel",
+                &cancel,
+            ))
+            .complete();
+        assert_eq!(stopped.status, 200, "{}", body(&stopped));
+        assert!(
+            body(&stopped).contains(r#""stopping":0"#),
+            "{}",
+            body(&stopped)
+        );
+
+        let sent = router
+            .respond(&with_named_grant(
+                "POST",
+                "/api/apps/notes/chat",
+                "deepnest-cancel",
+                &cancel,
+            ))
+            .complete();
+        assert_eq!(sent.status, 401, "{}", body(&sent));
+
+        let answered = router
+            .respond(&with_named_grant(
+                "POST",
+                "/api/apps/notes/escalation",
+                "deepnest-cancel",
+                &cancel,
+            ))
+            .complete();
+        assert_eq!(answered.status, 401, "{}", body(&answered));
+
+        // And the other way round: the value that sends is not the value that stops.
+        for (name, value) in [
+            ("deepnest-chat", &chat),
+            ("deepnest-escalation", &escalation),
+        ] {
+            let refused = router
+                .respond(&with_named_grant(
+                    "POST",
+                    "/api/apps/notes/cancel",
+                    name,
+                    value,
+                ))
+                .complete();
+            assert_eq!(refused.status, 401, "{name}: {}", body(&refused));
+        }
+    }
+
+    #[test]
+    fn the_stop_route_reaches_the_turn_this_router_is_running() {
+        // The registry is the router's own: the chat handler registers into it, and this route
+        // cancels through it. What this pins is the half a page cannot see from outside — that the
+        // verb does not merely answer 200 but reaches the flag the loop is watching.
+        let scratch = Scratch::new("cancel-running");
+        let router = supervised(&scratch);
+        let turn = router.turns.begin("notes");
+        assert!(!turn.cancellation().is_cancelled());
+
+        let response = router.respond(&post("/api/apps/notes/cancel")).complete();
+        assert_eq!(response.status, 200, "{}", body(&response));
+        assert!(
+            body(&response).contains(r#""stopping":1"#),
+            "{}",
+            body(&response)
+        );
+        assert!(
+            turn.cancellation().is_cancelled(),
+            "the route answered without reaching the turn"
+        );
+
+        // The turn is retired by its own end, not by the stop: a stop that arrives first would
+        // otherwise leave the page unable to tell a finished turn from a missing one.
+        drop(turn);
+        let again = router.respond(&post("/api/apps/notes/cancel")).complete();
+        assert!(body(&again).contains(r#""stopping":0"#), "{}", body(&again));
+    }
+
+    #[test]
+    fn stopping_a_turn_is_a_post_and_says_so() {
+        let scratch = Scratch::new("cancel-method");
+        let router = supervised(&scratch);
+        let response = router
+            .respond(&authorized_get("/api/apps/notes/cancel"))
+            .complete();
+        assert_eq!(response.status, 405, "{}", body(&response));
+        assert!(
+            body(&response).contains("stops a turn"),
+            "{}",
+            body(&response)
+        );
     }
 
     #[test]
@@ -4106,7 +4281,7 @@ mod tests {
     fn the_page_can_watch_a_build_and_cannot_start_one() {
         let scratch = Scratch::new("build-status");
         scratch.built_app("notes", "Notes");
-        let (router, _, _, build, _) = app_page_with_grants(&scratch, "notes");
+        let (router, _, _, build, _, _) = app_page_with_grants(&scratch, "notes");
         let path = "/api/apps/notes/build";
 
         // The route is not open to a page that presents nothing, and it is not open to the
@@ -4153,7 +4328,7 @@ mod tests {
         // not be able to answer its own widening request with the same cookie.
         let scratch = Scratch::new("escalation-scope");
         scratch.built_app("notes", "Notes");
-        let (router, chat, escalation, _, _) = app_page_with_grants(&scratch, "notes");
+        let (router, chat, escalation, _, _, _) = app_page_with_grants(&scratch, "notes");
 
         let path = "/api/apps/notes/escalation";
         let wrong = router
@@ -4193,7 +4368,7 @@ mod tests {
     fn an_answer_with_no_question_waiting_is_a_conflict_and_not_a_success() {
         let scratch = Scratch::new("escalation-idle");
         scratch.built_app("notes", "Notes");
-        let (router, _, escalation, _, _) = app_page_with_grants(&scratch, "notes");
+        let (router, _, escalation, _, _, _) = app_page_with_grants(&scratch, "notes");
         let answered = router
             .respond(&post_named_grant(
                 "/api/apps/notes/escalation",
@@ -4216,7 +4391,7 @@ mod tests {
     fn a_body_that_does_not_name_an_answer_is_refused_rather_than_read_as_a_no() {
         let scratch = Scratch::new("escalation-body");
         scratch.built_app("notes", "Notes");
-        let (router, _, escalation, _, _) = app_page_with_grants(&scratch, "notes");
+        let (router, _, escalation, _, _, _) = app_page_with_grants(&scratch, "notes");
         let post = |body: &str| {
             router
                 .respond(&post_named_grant(
@@ -4249,7 +4424,7 @@ mod tests {
     fn escalation_reads_with_get_and_answers_with_post() {
         let scratch = Scratch::new("escalation-method");
         scratch.built_app("notes", "Notes");
-        let (router, _, escalation, _, _) = app_page_with_grants(&scratch, "notes");
+        let (router, _, escalation, _, _, _) = app_page_with_grants(&scratch, "notes");
         let response = router
             .respond(&with_named_grant(
                 "DELETE",
@@ -4276,7 +4451,7 @@ mod tests {
         // which is blocked inside a turn in the real thing — wakes with the person's answer.
         let scratch = Scratch::new("escalation-roundtrip");
         scratch.built_app("notes", "Notes");
-        let (router, _, escalation, _, _) = app_page_with_grants(&scratch, "notes");
+        let (router, _, escalation, _, _, _) = app_page_with_grants(&scratch, "notes");
         let path = "/api/apps/notes/escalation";
 
         let approver = router.requests.approver("notes");
