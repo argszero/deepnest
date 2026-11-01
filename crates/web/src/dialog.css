@@ -357,6 +357,14 @@
   color: rgba(244, 244, 246, 0.62);
 }
 
+/* An answer still being written. The type is the answer's own — these are the agent's words, not a
+ * reading of the machine — and the bar at the end is the only thing that says more is coming; it
+ * leaves with the class, which `say` takes off when the answer is whole. */
+#deepnest-dialog-answer.typing::after {
+  content: "\258d";
+  color: rgba(244, 244, 246, 0.45);
+}
+
 /* The conversation. Its own scroll box, because it is the one part of this panel that grows
  * without bound: a long session must not push the composer off the screen. */
 

@@ -968,6 +968,78 @@ mod tests {
     }
 
     #[test]
+    fn the_dialog_reads_the_answer_as_it_is_written() {
+        // The measured shape of the defect: a turn spends most of its minutes in tools and then
+        // writes its answer, and the page held nothing until the whole body arrived — so the end of
+        // a long turn and a turn that had hung read the same. The route has answered as an event
+        // stream since it was written; what was missing was the reader.
+        assert!(
+            DIALOG_SCRIPT.contains(r#"Accept: STREAM"#),
+            "the box never asks for the answer as it is written"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#"var STREAM = "text/event-stream""#),
+            "the stream's own type is not named, so nothing can ask for or recognise it"
+        );
+        // Read as it arrives, not collected and then parsed: the reader and the decoder are the two
+        // pieces that make a piece of an answer visible while the rest is still being written.
+        for piece in ["getReader()", "TextDecoder", "decoder.decode("] {
+            assert!(
+                DIALOG_SCRIPT.contains(piece),
+                "the stream is not read as it arrives — {piece} is missing"
+            );
+        }
+        // The three kinds the route writes, and the fact that only `text` is the answer: `done` and
+        // `error` carry the reply the JSON path would have given whole, and both end the turn.
+        for kind in [r#""text""#, r#""done""#, r#""error""#] {
+            assert!(
+                DIALOG_SCRIPT.contains(kind),
+                "the reader does not know the {kind} event"
+            );
+        }
+        // Which reading applies is the *reply's* content type, never the request's: a refusal is
+        // answered with a JSON body even when the page asked for events, and reading that as a
+        // stream would turn the sentence saying what to do into a parse error.
+        assert!(
+            DIALOG_SCRIPT.contains(r#"response.headers.get("content-type")"#),
+            "the box decides how to read the answer by something other than what came back"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("response.json()"),
+            "the refusal path was removed, so a 401 or a 412 has nothing to read it"
+        );
+        // The progress line and the answer share one element, so the guard is what keeps a counter
+        // from overwriting the model's sentence once it has started writing it.
+        let progress = &DIALOG_SCRIPT[DIALOG_SCRIPT
+            .find("function showProgress(")
+            .expect("the box says what a turn is doing somewhere")..];
+        let progress = &progress[..progress.find("\n  }").expect("the function ends")];
+        assert!(
+            progress.contains("if (typing)"),
+            "the progress line overwrites an answer mid-sentence: {progress}"
+        );
+        // Every way out of a turn has to put the line back, or the next turn's progress never
+        // appears: the settle handler, the failed request, and nothing else.
+        let submit = &DIALOG_SCRIPT[DIALOG_SCRIPT
+            .find(r#"form.addEventListener("submit""#)
+            .expect("the box submits somewhere")..];
+        let submit = &submit[..submit.find("\n  });").expect("the listener ends")];
+        assert!(
+            submit.matches("typing = false;").count() >= 2,
+            "a turn that ended leaves the box believing an answer is still being written"
+        );
+        // A line that grows word by word is not announced word by word.
+        assert!(
+            submit.contains(r#"readEvents(response, typeMore)"#),
+            "the deltas are read but never shown"
+        );
+        assert!(
+            DIALOG_STYLE.contains("#deepnest-dialog-answer.typing"),
+            "an answer still being written is unstyled, so nothing says more is coming"
+        );
+    }
+
+    #[test]
     fn the_dialog_says_what_went_wrong_instead_of_failing_silently() {
         // Three failures a user can hit, each with a different next step, and the box has to name
         // the step: the grant expired, the server is gone, and the answer was a refusal.

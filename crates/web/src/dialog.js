@@ -102,6 +102,10 @@
   answer.setAttribute("role", "status");
   answer.setAttribute("aria-live", "polite");
 
+  // Whether that line currently holds an answer still being written. It is what separates "the
+  // model is thinking" from "the model is talking", and the two must not overwrite each other.
+  var typing = false;
+
   // The widening request. It appears only while a turn is waiting for one, which is why it is a
   // block that starts hidden rather than something the user opens: there is nothing to open when
   // nobody is asking, and a permanent button that says "approve" would be a button with no object.
@@ -528,6 +532,9 @@
     answer.textContent = text;
     answer.hidden = false;
     answer.classList.remove("live");
+    // The answer is finished, so the mark that says more is coming leaves with the class that drew
+    // it. Nothing else has to remember to take it off.
+    answer.classList.remove("typing");
     answer.setAttribute("aria-live", "polite");
     if (bad) {
       answer.classList.add("bad");
@@ -542,11 +549,126 @@
   // a screen reader reading a new sentence every second, which is worse than silence. The answer
   // that matters comes through `say` above, at the end.
   function showProgress(text) {
+    if (typing) {
+      // The model has stopped thinking and started writing. Its own words are a better account of
+      // the turn than a counter, and replacing them mid-sentence every second would be this page
+      // choosing its summary over the answer. The transcript beside it still updates, and the stop
+      // control stays where it is: a turn writing its answer is one a person may still end.
+      return;
+    }
     answer.textContent = text;
     answer.hidden = false;
     answer.classList.remove("bad");
     answer.classList.add("live");
     answer.setAttribute("aria-live", "off");
+  }
+
+  // The answer as the model writes it, rather than in one piece when the turn is over.
+  //
+  // A turn can take minutes and most of that is tools, but the last part is the model writing its
+  // answer — and until now the page had nothing to show for it until the whole body arrived, so the
+  // end of a long turn looked exactly like a turn that had hung. The chat route has answered as an
+  // event stream since it was written; this is the reader.
+  //
+  // It answers two ways and both are this page's job: the stream when the page asks for one, and
+  // one JSON body for everything that is not an answer — a refusal, an expired grant, a process
+  // with no model configured. `Accept` is the whole of what asks, and the reply's own content type
+  // is what decides the reading, so a refusal is never mistaken for a stream that ended early.
+  var STREAM = "text/event-stream";
+
+  function wantsEvents(response) {
+    return (response.headers.get("content-type") || "").indexOf(STREAM) !== -1;
+  }
+
+  // One event: `event: <kind>` and `data: <json>`, and a blank line to end it. The kinds this route
+  // writes are `text` for a piece of the answer, then exactly one of `done` or `error` carrying the
+  // reply the JSON path hands over whole.
+  function readEvent(block) {
+    var kind = null;
+    var data = "";
+    block.split("\n").forEach(function (line) {
+      if (line.indexOf("event: ") === 0) {
+        kind = line.slice(7);
+      } else if (line.indexOf("data: ") === 0) {
+        data += line.slice(6);
+      }
+    });
+    if (!kind) {
+      return null;
+    }
+    try {
+      return { kind: kind, body: JSON.parse(data) };
+    } catch (error) {
+      // A frame nobody can parse is not worth a line of its own: the turn's own `done`, or the
+      // connection ending, is what says how this went.
+      return null;
+    }
+  }
+
+  // Read the stream to its end, handing every piece of the answer to `onText` the moment it exists,
+  // and resolve with the reply the closing event carried.
+  function readEvents(response, onText) {
+    var reader = response.body.getReader();
+    var decoder = new TextDecoder();
+    var buffered = "";
+    var reply = null;
+
+    function take(block) {
+      var event = readEvent(block);
+      if (event === null) {
+        return;
+      }
+      if (event.kind === "text" && event.body && typeof event.body.text === "string") {
+        onText(event.body.text);
+      } else if (event.kind === "done" || event.kind === "error") {
+        reply = event.body;
+      }
+    }
+
+    function pump() {
+      return reader.read().then(function (step) {
+        if (step.done) {
+          // What is left is a frame the server never finished writing. It is dropped rather than
+          // half-read: half an answer shown as an answer is worse than none, and the caller has the
+          // missing reply to go on.
+          return reply;
+        }
+        // `stream: true` because a chunk may end in the middle of a multi-byte character, and a
+        // decoder that flushed per chunk would put a replacement character in the answer.
+        buffered += decoder.decode(step.value, { stream: true });
+        var cut = buffered.indexOf("\n\n");
+        while (cut !== -1) {
+          take(buffered.slice(0, cut));
+          buffered = buffered.slice(cut + 2);
+          cut = buffered.indexOf("\n\n");
+        }
+        return pump();
+      });
+    }
+
+    return pump();
+  }
+
+  // The first piece of an answer is the moment the line under the box stops being a reading of the
+  // machine and becomes the agent's own words — so it takes the answer's own type rather than the
+  // monospace of a progress line, and the mark that says more is coming.
+  function startTyping() {
+    typing = true;
+    answer.textContent = "";
+    answer.hidden = false;
+    answer.classList.remove("bad");
+    answer.classList.remove("live");
+    answer.classList.add("typing");
+    // A line that grows word by word is not announced word by word; `say` turns this back on when
+    // the answer is whole, which is the moment there is a sentence worth reading out.
+    answer.setAttribute("aria-live", "off");
+  }
+
+  function typeMore(piece) {
+    if (!typing) {
+      startTyping();
+    }
+    answer.textContent += piece;
   }
 
   // The question route: one path, one cookie, and nothing about it needs the control token.
@@ -912,7 +1034,10 @@
       // spelled out, because the whole mechanism rests on it and a later `credentials: "omit"`
       // would turn the box into a permanent `401`.
       credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
+      // The answer arrives as it is written rather than all at once at the end. This header is the
+      // whole of what asks for that, and it costs nothing when the route has nothing to stream:
+      // a refusal is answered with a JSON body either way, and `wantsEvents` reads the reply.
+      headers: { "Content-Type": "application/json", Accept: STREAM },
       body: JSON.stringify(body)
     });
   }
@@ -943,6 +1068,14 @@
 
     ask(text, picturesReferredTo(text), filesReferredTo(text))
       .then(function (response) {
+        if (wantsEvents(response)) {
+          // Both readings end in the same place: the last event of a stream carries the reply the
+          // JSON path would have handed over whole, so everything below this line is unchanged
+          // whichever way the answer arrived.
+          return readEvents(response, typeMore).then(function (body) {
+            return { status: response.status, body: body, streamed: true };
+          });
+        }
         // A refusal is JSON in every case this server produces; a proxy's error page is not, and
         // the status is then the only thing left to report.
         return response.json().then(
@@ -957,6 +1090,9 @@
       .then(function (result) {
         send.disabled = false;
         stopPolling();
+        // The line under the box is no longer being written to: whether the answer is whole or the
+        // connection died, the next turn's progress line has to be able to use it again.
+        typing = false;
         if (result.status === 200 && result.body && typeof result.body.text === "string") {
           var text = result.body.text;
           if (result.body.changed) {
@@ -982,6 +1118,19 @@
           say("This page's permission to send has expired — reload the page and ask again.", true);
           return;
         }
+        if (result.streamed) {
+          // A stream that ended without its closing event: the connection went away mid-answer, or
+          // the page was closed on the other end. The turn is not necessarily over — the server
+          // keeps running it — so this says what happened to the *reading*, not to the turn, and
+          // points at the transcript, which is where the turn will land either way.
+          readHistory();
+          say(
+            "The answer stopped partway through — the connection to deepnest closed. Reload the " +
+              "page to read what the turn recorded.",
+            true
+          );
+          return;
+        }
         var why =
           result.body && typeof result.body.error === "string"
             ? result.body.error
@@ -991,6 +1140,7 @@
       .catch(function () {
         send.disabled = false;
         stopPolling();
+        typing = false;
         say("The request did not reach deepnest. Is it still running?", true);
       });
   });
