@@ -125,6 +125,26 @@ when it grows, so a fact that exists only in the middle of an old turn will be l
 works.\n",
     );
 
+    out.push_str(
+        "\n## What the page looks like\n\n\
+The page is the product. A feature that works and looks unfinished reads as unfinished, because \
+the user judges this app by the screen in front of them and never by the code behind it.\n\n\
+- **Build on the app's tokens, do not add beside them.** `frontend/index.html` declares the \
+palette, the spacing step, the radius and the shadow as custom properties, with a dark set under \
+`prefers-color-scheme`. A colour or a gap that is not one of those values is a second visual \
+system in a page that can only carry one.\n\
+- **A screen has four states, and three are usually missing.** Nothing yet, loading, failure, and \
+the one with data. A list with no rows is the first screen a new app shows its user, so it gets a \
+shape and a sentence rather than empty space.\n\
+- **One emphasis.** One accent colour, one primary action, three type sizes and a single spacing \
+step. Two things competing to be important read as neither.\n\
+- **Say the state in words.** A failure carries `role=\"alert\"` and an empty list carries a \
+sentence: a screen that only looks right when the data is there is wrong most of the time.\n\
+- **Do not add a component library, a web font or an icon set unless the request names one.** \
+Each is a dependency the user did not ask for, in an app that has to build on their own \
+machine.\n",
+    );
+
     out.push_str("\n## The sandbox you run in\n\n");
     let _ = writeln!(out, "This session's mode is `{}`.", ctx.mode);
     if ctx.writable.is_empty() {
@@ -318,5 +338,21 @@ mod tests {
     fn the_prompt_is_stable_for_the_same_context() {
         // A prompt that changes between identical renders defeats prompt caching.
         assert_eq!(system_prompt(&ctx()), system_prompt(&ctx()));
+    }
+
+    #[test]
+    fn the_prompt_says_what_the_page_should_look_like() {
+        // Found by running deepnest for real and looking at the app: every app the agent wrote was
+        // functional and plain, because nothing in the prompt had an opinion about the screen. The
+        // template can only fix the first render; the agent is what rewrites the page afterwards,
+        // so the standard has to be stated here or it stops existing at the first change.
+        let prompt = system_prompt(&ctx());
+        assert!(prompt.contains("## What the page looks like"), "{prompt}");
+        // The three facts that make the section actionable rather than decorative.
+        assert!(prompt.contains("Build on the app's tokens"), "{prompt}");
+        assert!(prompt.contains("four states"), "{prompt}");
+        assert!(prompt.contains("prefers-color-scheme"), "{prompt}");
+        // The dependency rule: an app has to build on the user's own machine.
+        assert!(prompt.contains("component library"), "{prompt}");
     }
 }
