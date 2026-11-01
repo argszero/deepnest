@@ -10,9 +10,35 @@
  * and not a page full of `style` attributes.
  */
 
-#deepnest-dialog,
+#deepnest-dialog {
+  all: initial;
+}
+
+/* The reset, and the one thing it must not take with it.
+ *
+ * `all: initial` puts every descendant back to the *browser's* defaults, and that is not what this
+ * panel is. Initial `font-family` is a serif at `medium`, initial `font-weight` and `font-style`
+ * are `normal`, and initial `color` is canvas text, which is black. So the reset was stopping the
+ * app's stylesheet exactly as intended — and then also throwing away the dialog's own type, for
+ * every node that relies on inheriting it instead of stating it.
+ *
+ * Measured in Chrome against a turn whose reply used every shape the renderer builds: 22 kinds of
+ * node came out `Times`, 16px, `rgb(0, 0, 0)` — the answer's paragraphs, its list items, its table
+ * cells and its links, the three spans of a tool call, the disclosure above a call's output, and
+ * the form around the composer — inside a panel whose own type is 12–13px sans. The agent's
+ * answer, the one thing on the page a person is actually reading, was the largest and oldest type
+ * in the dialog.
+ *
+ * `inherit` rather than a copied font, and one rule rather than a list of tags: the list this file
+ * has already had to grow twice — `display` for `P`/`H4`/`UL`/`OL`/`LI`, then `TH`/`TD`/`TR` when
+ * tables arrived — goes stale the moment the renderer learns a new tag, and a rule per tag answers
+ * for the tags someone remembered. Every element rule below is one id plus at least one class, so
+ * it still wins wherever a component states its own type: `code`, `pre`, the headings and the
+ * table's head keep their own. */
 #deepnest-dialog * {
   all: initial;
+  font: inherit;
+  color: inherit;
 }
 
 #deepnest-dialog {
@@ -686,6 +712,20 @@
   overflow-wrap: anywhere;
 }
 
+/* The two things a model writes that carry meaning, and the reset takes both: it puts `strong` and
+ * `em` back to the browser's *initial* weight and style rather than leaving the UA's own bold and
+ * italic, and `font: inherit` above then hands them the answer's plain 400/normal. So an
+ * emphasised word drew exactly like the words around it — measured in Chrome, `STRONG` computed
+ * `weight 400` and `EM` computed `style normal`. */
+#deepnest-dialog .deepnest-said strong {
+  font-weight: 600;
+  color: #ffffff;
+}
+
+#deepnest-dialog .deepnest-said em {
+  font-style: italic;
+}
+
 /* The answer is Markdown, so its blocks come with their own margins — flattened here so the
  * spacing between them belongs to the transcript rather than to the browser's defaults. */
 #deepnest-dialog .deepnest-said > * {
@@ -1002,8 +1042,12 @@
   margin: 0.35rem 0 0 auto;
 }
 
+/* `text-decoration` too, for the same reason as `color` above: `all: initial` leaves a link
+ * undecorated, so the only thing separating it from the sentence it sits in was a blue that a
+ * reader who cannot separate blue from white does not get. */
 #deepnest-dialog .deepnest-said a {
   color: #7aa7ff;
+  text-decoration: underline;
 }
 
 /* One row per tool call. A monospace line, because a tool name and a path are what a person scans
