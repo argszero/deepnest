@@ -44,8 +44,13 @@
 //! module decides what a Mach-O is and walks a tree for the ones inside it. It is separate because
 //! the answer matters as much for the payload this bundle carries as for the bundle itself, and
 //! because it has to be checkable on the two platforms that will never run `codesign`.
+//!
+//! [`sign`] is the step that uses that list: it signs each file and verifies each signature, taking
+//! the identity's name from the environment and no secret from anywhere at all. It is a seam, so its
+//! decisions are tested on the platforms that have no `codesign` to run.
 
 pub mod macho;
+pub mod sign;
 
 use std::fs;
 use std::io;

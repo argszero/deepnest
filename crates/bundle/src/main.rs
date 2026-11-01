@@ -11,10 +11,17 @@
 //! breaks the first time a name changes, so the layout that decides them is also the thing that says
 //! where they landed.
 //!
+//! The second action is the signing itself, in the same program because it is the next thing a
+//! release does: `--sign <dir>` walks a tree, signs every Mach-O in it and verifies each signature,
+//! taking the identity's *name* from `DEEPNEST_SIGNING_IDENTITY`. No password is read here and none
+//! can be: the identity's key has to be in a keychain already, put there by the pipeline step that
+//! owns that secret.
+//!
 //! Usage:
 //!
 //! ```text
 //! deepnest-bundle --binary <path> --into <dir> [--version <version>]
+//! deepnest-bundle --sign <dir>
 //! ```
 //!
 //! `--version` defaults to this crate's own version, which is the workspace's. The release pipeline
@@ -24,6 +31,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use deepnest_bundle::sign::{sign_all, StdSigner, IDENTITY_VAR};
 use deepnest_bundle::{write, BUNDLE};
 
 const USAGE: &str = "\
@@ -36,8 +44,11 @@ Usage:
   --into      the directory to write Deepnest.app into; it must not hold one already
   --version   the version the bundle reports (default: this build's)
 
-The bundle is written unsigned. Signing and notarizing it are the release pipeline's, and a `.dmg`
-is `hdiutil`'s.
+  --sign      sign every Mach-O inside <dir> and verify each signature; the identity is named by
+              DEEPNEST_SIGNING_IDENTITY, whose key must already be in a keychain
+
+The bundle is written unsigned; `--sign` is what signs one, and notarizing it and making a `.dmg`
+are the release pipeline's.
 ";
 
 fn main() -> ExitCode {
@@ -54,6 +65,21 @@ fn run() -> Result<(), String> {
     match arguments(std::env::args().skip(1))? {
         Action::Help => {
             print!("{USAGE}");
+            Ok(())
+        }
+        Action::Sign(root) => {
+            let identity = std::env::var(IDENTITY_VAR).map_err(|_| {
+                format!(
+                    "{IDENTITY_VAR} is not set: it names the Developer ID Application identity to \
+                     sign with, and that identity's key must already be in a keychain"
+                )
+            })?;
+            let signer = StdSigner::default();
+            let signed = sign_all(&root, &identity, &signer).map_err(|error| error.to_string())?;
+            println!("signed {} files with {identity}", signed.files.len());
+            for path in signed.files {
+                println!("  {}", path.display());
+            }
             Ok(())
         }
         Action::LayOut(asked) => {
@@ -75,6 +101,7 @@ fn run() -> Result<(), String> {
 enum Action {
     Help,
     LayOut(Layout),
+    Sign(PathBuf),
 }
 
 /// The three inputs, once parsed.
@@ -93,6 +120,7 @@ fn arguments(args: impl Iterator<Item = String>) -> Result<Action, String> {
     let mut binary: Option<PathBuf> = None;
     let mut into: Option<PathBuf> = None;
     let mut version: Option<String> = None;
+    let mut signing: Option<PathBuf> = None;
 
     let mut args = args;
     while let Some(argument) = args.next() {
@@ -112,12 +140,24 @@ fn arguments(args: impl Iterator<Item = String>) -> Result<Action, String> {
             "--binary" => binary = Some(PathBuf::from(value("--binary")?)),
             "--into" => into = Some(PathBuf::from(value("--into")?)),
             "--version" => version = Some(value("--version")?),
+            "--sign" => signing = Some(PathBuf::from(value("--sign")?)),
             other => {
                 return Err(format!(
                     "{other} is not an argument this program takes\n\n{USAGE}"
                 ))
             }
         }
+    }
+
+    // One action per run: a command line that names both is a command line whose author meant one
+    // of them and is about to get the other.
+    if let Some(root) = signing {
+        if binary.is_some() || into.is_some() || version.is_some() {
+            return Err(format!(
+                "--sign is an action of its own, so it takes no --binary, --into or --version\n\n{USAGE}"
+            ));
+        }
+        return Ok(Action::Sign(root));
     }
 
     let binary = binary
@@ -168,7 +208,7 @@ mod tests {
         assert_eq!(joined, spaced);
         match spaced {
             Action::LayOut(layout) => assert_eq!(layout.version, "1.2.3"),
-            Action::Help => panic!("--version asked for help"),
+            other => panic!("--version asked for {other:?}"),
         }
     }
 
@@ -184,6 +224,32 @@ mod tests {
     fn a_flag_without_a_value_is_an_error_rather_than_an_empty_path() {
         let refused = parsed(&["--binary"]).unwrap_err();
         assert!(refused.contains("needs a value"), "{refused}");
+    }
+
+    #[test]
+    fn signing_is_an_action_of_its_own() {
+        let action = parsed(&["--sign", "dist"]).unwrap();
+        assert_eq!(action, Action::Sign(PathBuf::from("dist")));
+        let joined = parsed(&["--sign=dist"]).unwrap();
+        assert_eq!(joined, Action::Sign(PathBuf::from("dist")));
+    }
+
+    #[test]
+    fn signing_beside_a_layout_is_refused_rather_than_doing_one_of_them() {
+        let refused = parsed(&["--sign", "dist", "--binary", "build/deepnest"]).unwrap_err();
+        assert!(refused.contains("action of its own"), "{refused}");
+        let refused = parsed(&["--sign", "dist", "--into", "dist"]).unwrap_err();
+        assert!(refused.contains("action of its own"), "{refused}");
+        // And `--sign` alone still needs its directory.
+        let refused = parsed(&["--sign"]).unwrap_err();
+        assert!(refused.contains("needs a value"), "{refused}");
+    }
+
+    #[test]
+    fn the_usage_names_the_variable_the_signing_step_reads() {
+        // `USAGE` is a plain literal rather than a format string, so the name is spelled there and
+        // this is what stops it drifting from the constant the code actually reads.
+        assert!(USAGE.contains(IDENTITY_VAR), "{USAGE}");
     }
 
     #[test]
