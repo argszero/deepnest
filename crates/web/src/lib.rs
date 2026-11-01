@@ -1121,11 +1121,11 @@ mod tests {
         // So every element the renderer creates says what it is, and this pins the ones that were
         // missing rather than all of them one at a time.
         for selector in [
-            "#deepnest-dialog-transcript .deepnest-said p",
-            "#deepnest-dialog-transcript .deepnest-said ul",
-            "#deepnest-dialog-transcript .deepnest-said ol",
-            "#deepnest-dialog-transcript .deepnest-said h3",
-            "#deepnest-dialog-transcript .deepnest-said li",
+            "#deepnest-dialog .deepnest-said p",
+            "#deepnest-dialog .deepnest-said ul",
+            "#deepnest-dialog .deepnest-said ol",
+            "#deepnest-dialog .deepnest-said h3",
+            "#deepnest-dialog .deepnest-said li",
         ] {
             assert!(DIALOG_STYLE.contains(selector), "{selector} has no layout");
         }
@@ -1146,6 +1146,79 @@ mod tests {
             DIALOG_STYLE.contains("list-style-type: decimal"),
             "a numbered list draws bullets"
         );
+    }
+
+    #[test]
+    fn the_answer_under_the_box_is_drawn_as_blocks_while_it_is_written() {
+        // The line under the box held the answer's own source. Measured in Chrome against a stream
+        // that wrote an answer with a heading, a bold run, a fenced block and a numbered list: the
+        // element held `##`, `**` and both fences as literal characters, and inside it there were
+        // zero headings, zero bold runs, zero code blocks and zero lists — while the transcript
+        // above drew the same text as blocks. So a person watched Markdown being typed and read it
+        // as Markdown only once the turn had landed in the transcript.
+        //
+        // Two moments, one renderer: the pieces as they arrive and the finished answer. The route
+        // that carries an answer and the route that carries a page's own lines are separate, because
+        // "Rebuilding…" is not Markdown and drawing it as such would be a worse sentence.
+        assert!(
+            DIALOG_SCRIPT.contains("function sayAnswer("),
+            "there is no path that draws an answer rather than a line"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("sayAnswer(text);"),
+            "the finished answer still goes through the plain line"
+        );
+        assert!(
+            !DIALOG_SCRIPT.contains("say(text, false)"),
+            "the answer is still being written as text"
+        );
+        // The answer line is drawn by the renderer the transcript uses, with no copy controls: the
+        // transcript above already offers one per block, and a second set here would double the tab
+        // stops this panel spends on copying. `null` is what says so.
+        assert!(
+            DIALOG_SCRIPT.contains("renderWords(written, null)"),
+            "the answer is not drawn by the renderer"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("said.className = \"deepnest-said\""),
+            "the answer's blocks sit outside the stylesheet's markdown scope"
+        );
+        // Redrawing per piece would rebuild every block hundreds of times for one answer; dropping
+        // the last would leave a partial answer on screen for good. Coalescing with a trailing draw
+        // is the only shape that does neither.
+        assert!(
+            DIALOG_SCRIPT.contains("setTimeout(drawAnswer, 0)"),
+            "nothing coalesces the redraws"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("clearTimeout(redrawal)"),
+            "a held-back draw can paint a partial answer over the finished one"
+        );
+        // A paragraph may not hold blocks, so the line itself stops being one.
+        assert!(
+            DIALOG_SCRIPT.contains(r#"var answer = document.createElement("div");"#),
+            "the answer line is still a paragraph, which cannot hold a heading or a list"
+        );
+        // The renderer's own body must not copy the model's answer into a control here: the block
+        // path that draws one is the path that names one.
+        let block = DIALOG_SCRIPT
+            .find("function fencedBlock(language, source, what, ordinal, total)")
+            .expect("the fenced block exists");
+        let body = &DIALOG_SCRIPT[block..];
+        let body = &body[..body.find("\n  }").expect("it ends")];
+        assert!(
+            body.contains("if (what === null)"),
+            "a block shown rather than copied still draws a copy control"
+        );
+        // And the stylesheet has to reach the answer's blocks wherever they are drawn, not only in
+        // the transcript.
+        for selector in [
+            "#deepnest-dialog .deepnest-said p",
+            "#deepnest-dialog .deepnest-said pre",
+            "#deepnest-dialog .deepnest-said code",
+        ] {
+            assert!(DIALOG_STYLE.contains(selector), "{selector} has no layout");
+        }
     }
 
     #[test]
@@ -1187,8 +1260,8 @@ mod tests {
         // Both directions: a bulleted list inside a numbered item, and a numbered list inside a
         // bulleted one.
         for selector in [
-            "#deepnest-dialog-transcript .deepnest-said li > ul",
-            "#deepnest-dialog-transcript .deepnest-said li > ol",
+            "#deepnest-dialog .deepnest-said li > ul",
+            "#deepnest-dialog .deepnest-said li > ol",
         ] {
             assert!(DIALOG_STYLE.contains(selector), "{selector} has no layout");
         }
