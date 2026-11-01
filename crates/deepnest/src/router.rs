@@ -1392,8 +1392,8 @@ impl Router {
     /// endpoint at any moment, and an agent assembled at startup would answer the old one until the
     /// next start.
     fn chat(&self, body: &[u8], dir: &Path, slug: &Slug, lifecycle: &Lifecycle) -> Response {
-        let message = match chat::message_from(body) {
-            Ok(message) => message,
+        let ask = match chat::ask_from(body) {
+            Ok(ask) => ask,
             Err(reason) => return Response::json(400, error_body(&reason)),
         };
         let Some(config_path) = &self.config_path else {
@@ -1440,7 +1440,7 @@ impl Router {
             &lifecycle.home,
             dir,
             slug,
-            &message,
+            &ask,
             Some(self.requests.approver(slug.as_str())),
             // A build that failed last time is part of what the model must know before it writes
             // again: without it the next turn adds code on top of a tree that does not compile.

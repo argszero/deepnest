@@ -606,6 +606,42 @@ mod tests {
     }
 
     #[test]
+    fn the_dialog_takes_a_pasted_picture_and_sends_it_with_the_message() {
+        // The core page could carry words only, and "look at this" is what a screenshot is for.
+        // Three things have to hold at once — the paste is caught, the picture is shown so it can
+        // be taken back, and it travels in the same body as the message — because any one of them
+        // missing is a paste that silently does nothing.
+        assert!(
+            DIALOG_SCRIPT.contains("clipboardData"),
+            "nothing reads the clipboard"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#"addEventListener("paste""#),
+            "the paste event is never bound"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("readAsDataURL"),
+            "a pasted file is never read"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#"indexOf("image/")"#),
+            "everything pasted would be taken for a picture"
+        );
+        // Removable: a picture that cannot be taken back is one the model keeps looking at.
+        assert!(DIALOG_SCRIPT.contains("Remove pasted picture"));
+        // The same body the route already reads, with one more key, and only when it is needed.
+        assert!(DIALOG_SCRIPT.contains("body.images = images"));
+        // And the strip empties once the message is away.
+        assert!(DIALOG_SCRIPT.contains("pasted = [];"));
+        // The token rule from the test above holds here too: a picture does not need a credential.
+        assert!(!DIALOG_SCRIPT.contains("deepnest-token"));
+        // Colours and layout come from the stylesheet, never from an inline style.
+        assert!(DIALOG_STYLE.contains("#deepnest-dialog-pictures"));
+        assert!(DIALOG_STYLE.contains(".deepnest-picture-drop"));
+        assert!(DIALOG_STYLE.contains("#deepnest-dialog-picture-note"));
+    }
+
+    #[test]
     fn the_dialog_reads_the_conversation_back_instead_of_remembering_it() {
         // The defect this route fixes: a turn that rewrites the app reloads the page, and the
         // answer the person was reading was a variable that died with it. So the transcript is

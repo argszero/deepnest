@@ -158,6 +158,77 @@
   cursor: default;
 }
 
+/* Pictures pasted into the box, above the box they will be sent with. A strip rather than a
+   column: a screenshot is wide and short, and stacking them would push the message box off the
+   panel. */
+#deepnest-dialog-pictures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.55rem 0 0;
+}
+
+#deepnest-dialog-pictures[hidden] {
+  display: none;
+}
+
+#deepnest-dialog-pictures .deepnest-picture {
+  position: relative;
+  display: block;
+  width: 3.6rem;
+  height: 3.6rem;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 6px;
+  overflow: hidden;
+  background: #16161a;
+}
+
+#deepnest-dialog-pictures img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+#deepnest-dialog-pictures .deepnest-picture-drop {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  display: block;
+  width: 1.15rem;
+  height: 1.15rem;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.68);
+  color: #f4f4f6;
+  font: 600 11px/1 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  cursor: pointer;
+}
+
+#deepnest-dialog-pictures .deepnest-picture-drop:hover {
+  background: rgba(0, 0, 0, 0.88);
+}
+
+#deepnest-dialog-pictures .deepnest-picture-drop:focus-visible {
+  outline: 2px solid #7aa7ff;
+  outline-offset: 1px;
+}
+
+/* What is waiting to be sent, said in words: the strip is pictures, and a person who cannot see
+   them still has to know the next message carries some. */
+#deepnest-dialog-picture-note {
+  display: block;
+  margin: 0.4rem 0 0;
+  color: rgba(244, 244, 246, 0.62);
+  font: 11px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  text-align: left;
+}
+
+#deepnest-dialog-picture-note[hidden] {
+  display: none;
+}
+
 /* The widening request, which appears only while a turn is waiting for an answer. */
 #deepnest-dialog-asked {
   display: block;

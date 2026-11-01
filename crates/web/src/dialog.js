@@ -137,6 +137,113 @@
     whyNot.value = "";
   }
 
+  // Pictures pasted into the box, waiting for the message they will be sent with.
+  //
+  // Kept here as `data:` URLs rather than as files: the route takes bytes, and a URL is what the
+  // conversation file keeps — so what the model is shown tomorrow is what the user pasted, not
+  // whatever an address serves by then. Nothing is sent until the message is, which is also why a
+  // picture is removable: a screenshot pasted by mistake is a screenshot the model would otherwise
+  // keep looking at for the rest of the app's life.
+  var MAX_PICTURES = 8;
+  var pasted = [];
+
+  var pictures = document.createElement("div");
+  pictures.id = "deepnest-dialog-pictures";
+  pictures.hidden = true;
+
+  // A live region of its own rather than a line in the answer box: the answer box is where the
+  // last turn's words are, and taking a picture arrives before any turn has run.
+  var pictureNote = document.createElement("p");
+  pictureNote.id = "deepnest-dialog-picture-note";
+  pictureNote.setAttribute("role", "status");
+  pictureNote.setAttribute("aria-live", "polite");
+  pictureNote.hidden = true;
+
+  function showPictures() {
+    pictures.textContent = "";
+    pictures.hidden = pasted.length === 0;
+    pictureNote.hidden = pasted.length === 0;
+    if (pasted.length === 1) {
+      pictureNote.textContent = "1 picture will be sent with your message.";
+    } else if (pasted.length > 1) {
+      pictureNote.textContent = pasted.length + " pictures will be sent with your message.";
+    }
+    pasted.forEach(function (url, index) {
+      var frame = document.createElement("div");
+      frame.className = "deepnest-picture";
+
+      var thumb = document.createElement("img");
+      thumb.src = url;
+      // The picture is the message, so it is named as one; `alt` empty would hide it from the
+      // person who cannot see it and leave them with a message box that says nothing about why it
+      // will not send.
+      thumb.alt = "Pasted picture " + (index + 1);
+
+      var drop = document.createElement("button");
+      drop.type = "button";
+      drop.className = "deepnest-picture-drop";
+      drop.textContent = "\u00d7";
+      drop.setAttribute("aria-label", "Remove pasted picture " + (index + 1));
+      drop.addEventListener("click", function () {
+        pasted.splice(index, 1);
+        showPictures();
+      });
+
+      frame.appendChild(thumb);
+      frame.appendChild(drop);
+      pictures.appendChild(frame);
+    });
+  }
+
+  function take(file) {
+    if (pasted.length >= MAX_PICTURES) {
+      say("A message carries at most " + MAX_PICTURES + " pictures.", true);
+      return;
+    }
+    var reader = new FileReader();
+    reader.onload = function () {
+      if (typeof reader.result !== "string") {
+        return;
+      }
+      pasted.push(reader.result);
+      showPictures();
+    };
+    reader.onerror = function () {
+      say("That picture could not be read from the clipboard.", true);
+    };
+    reader.readAsDataURL(file);
+  }
+
+  // Pasting into the panel, not into one element: a person who has just clicked somewhere in the
+  // box and presses the paste key should not have to find the exact field first. Text pastes are
+  // left alone — `preventDefault` runs only when the clipboard actually carries a picture.
+  function onPaste(event) {
+    var data = event.clipboardData;
+    if (!data) {
+      return;
+    }
+    var files = [];
+    var items = data.items || [];
+    for (var index = 0; index < items.length; index += 1) {
+      var item = items[index];
+      if (item.kind === "file" && item.type && item.type.indexOf("image/") === 0) {
+        var file = item.getAsFile ? item.getAsFile() : null;
+        if (file) {
+          files.push(file);
+        }
+      }
+    }
+    if (files.length === 0) {
+      return;
+    }
+    // A picture pasted into a textarea would otherwise be dropped by the browser silently, which
+    // reads as the paste having failed.
+    event.preventDefault();
+    files.forEach(take);
+  }
+
+  panel.addEventListener("paste", onPaste);
+
   form.appendChild(input);
   form.appendChild(send);
 
@@ -156,6 +263,8 @@
   panel.appendChild(title);
   panel.appendChild(note);
   panel.appendChild(transcript);
+  panel.appendChild(pictures);
+  panel.appendChild(pictureNote);
   panel.appendChild(form);
   panel.appendChild(asked);
   panel.appendChild(answer);
@@ -498,7 +607,13 @@
       });
   }
 
-  function ask(text) {
+  function ask(text, images) {
+    // The pictures key is added only when there are pictures: a typed message keeps the exact body
+    // it had before the box could paste anything, which is one fewer shape a server has to accept.
+    var body = { message: text };
+    if (images.length > 0) {
+      body.images = images;
+    }
     return fetch("/api/apps/" + encodeURIComponent(slug) + "/chat", {
       method: "POST",
       // Same-origin is what attaches the cookie this page was given, and it is the default — but
@@ -506,14 +621,16 @@
       // would turn the box into a permanent `401`.
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text })
+      body: JSON.stringify(body)
     });
   }
 
   form.addEventListener("submit", function (event) {
     event.preventDefault();
     var text = input.value.trim();
-    if (!text) {
+    // A screenshot with no words is a question — "what is this?" is what the person means, and
+    // making them type it is asking them to say it twice.
+    if (!text && pasted.length === 0) {
       return;
     }
     if (!slug) {
@@ -532,7 +649,7 @@
     // question already possible rather than after the first answer.
     startPolling();
 
-    ask(text)
+    ask(text, pasted.slice())
       .then(function (response) {
         // A refusal is JSON in every case this server produces; a proxy's error page is not, and
         // the status is then the only thing left to report.
@@ -557,6 +674,11 @@
             text += "\n\nThis changed the app — rebuilding it now.";
           }
           input.value = "";
+          // Sent, so the strip empties: a picture left behind would ride along with the next
+          // message too, and a conversation that accumulates screenshots nobody chose to resend is
+          // a conversation that costs the user tokens for the rest of the app's life.
+          pasted = [];
+          showPictures();
           say(text, false);
           // The turn is on disk the moment the route answers, so this reads what was actually
           // recorded rather than echoing what came back in the reply.
