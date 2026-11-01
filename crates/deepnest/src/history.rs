@@ -55,6 +55,14 @@ pub struct Turn {
     /// to draw a thumbnail. The pictures stay in the conversation file for the model's own replay;
     /// what a reader of the transcript needs is that there was one.
     pub pictures: usize,
+    /// How many files the question named, counted the same way and for the same reason.
+    ///
+    /// The message the model was shown carries the files' contents, because a replay has to hand
+    /// the model the same thing twice; the page is showing a person what they said, and what they
+    /// said is the sentence with `[file report.csv]` in it. So the contents are cut off at
+    /// [`crate::chat::FILE_SECTION`] and counted here instead — one line of chat rather than a csv
+    /// poured into it.
+    pub files: usize,
     /// How many times the model was asked in this turn.
     ///
     /// One more than a tool call count is not the same thing, and it is the number that says a
@@ -93,6 +101,39 @@ pub fn read(app_dir: &Path) -> Vec<Turn> {
     turns
 }
 
+/// The person's own words, with the file contents the model was given cut away.
+///
+/// The cut is at [`crate::chat::FILE_SECTION`], the line that assembles the two halves in the first
+/// place, so the two cannot drift: a message with no files has no section and is returned whole.
+fn words_of(content: &str) -> String {
+    match content.find(crate::chat::FILE_SECTION) {
+        Some(at) => content[..at].to_string(),
+        None => content.to_string(),
+    }
+}
+
+/// How many distinct files the words name, read out of the markers exactly as the dialog reads them.
+///
+/// A marker repeated is still one file, and a marker the person cut out is a file that was not sent
+/// — both because that is what the request carried.
+fn files_named(content: &str) -> usize {
+    let words = words_of(content);
+    let mut names: Vec<&str> = Vec::new();
+    let mut rest = words.as_str();
+    while let Some(start) = rest.find("[file ") {
+        let after = &rest[start + "[file ".len()..];
+        let Some(end) = after.find(']') else {
+            break;
+        };
+        let name = &after[..end];
+        if !names.contains(&name) {
+            names.push(name);
+        }
+        rest = &after[end + 1..];
+    }
+    names.len()
+}
+
 /// Where one record belongs in the transcript.
 fn push(turns: &mut Vec<Turn>, record: &Record) {
     match record.role.as_str() {
@@ -102,8 +143,9 @@ fn push(turns: &mut Vec<Turn>, record: &Record) {
             // A message that was only pictures has no content at all — `Message::with_images`
             // filters blank text to `None` — so this is empty rather than missing, and `pictures`
             // below is what says the message was not nothing.
-            user: record.content.clone().unwrap_or_default(),
+            user: words_of(&record.content.clone().unwrap_or_default()),
             pictures: record.images.as_ref().map_or(0, Vec::len),
+            files: files_named(&record.content.clone().unwrap_or_default()),
             reply: String::new(),
             tools: 0,
             rounds: 0,
@@ -188,6 +230,45 @@ mod tests {
         let _ = fs::remove_file(scratch.base.join(HISTORY));
         assert!(read(&scratch.base).is_empty());
         assert_eq!(body(&scratch.base), r#"{"turns":[]}"#);
+    }
+
+    #[test]
+    fn a_question_that_named_files_is_read_back_as_words_and_a_count() {
+        // The record holds what the model was given — the words and the files' contents — because a
+        // replay has to hand it the same thing twice. The page is showing a person their own
+        // sentence, so the contents are cut at the line `chat::with_files` put them behind, and
+        // what is left is the count.
+        let scratch = Scratch::new("files");
+        let words = "the total in [file report.csv] looks wrong, see [file totals.csv] too";
+        // Spelled here rather than by calling `chat::with_files`: this file reads what is on disk,
+        // and a test that built its input with the function under test would agree with itself.
+        let content = format!(
+            "{words}{}",
+            crate::chat::FILE_SECTION.to_string()
+                + "\n[file report.csv] — 12 bytes\n```\nid,total\n1,2\n```\n"
+        );
+        let line = serde_json::json!({
+            "type": "message",
+            "role": "user",
+            "content": content,
+            "at": "2026-11-01T02:00:00Z",
+        })
+        .to_string();
+        scratch.write(&[&line]);
+
+        let turns = read(&scratch.base);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            turns[0].user, words,
+            "the file's contents are in the chat line"
+        );
+        assert_eq!(turns[0].files, 2, "both markers count, and one each");
+        assert!(turns[0].pictures == 0);
+
+        // A repeated marker is one file, because one file pointed at twice is still one file.
+        assert_eq!(files_named("[file a.csv] and again [file a.csv]"), 1);
+        // And a message with no files is returned whole, section or no section.
+        assert_eq!(words_of("just words"), "just words");
     }
 
     #[test]

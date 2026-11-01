@@ -137,6 +137,34 @@
   outline-offset: 1px;
 }
 
+#deepnest-dialog-attach {
+  display: inline-block;
+  margin-top: 0.45rem;
+  margin-right: 0.35rem;
+  padding: 0.35rem 0.7rem;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(244, 244, 246, 0.82);
+  font: 500 13px/1.2 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  cursor: pointer;
+}
+
+#deepnest-dialog-attach:hover {
+  border-color: rgba(255, 255, 255, 0.5);
+}
+
+#deepnest-dialog-attach:focus-visible {
+  outline: 2px solid #7aa7ff;
+  outline-offset: 1px;
+}
+
+/* The input the button drives: the dialog keeps its shape, and `all: initial` means a hidden one
+ * is only hidden if this sheet says so. */
+#deepnest-dialog-picker[hidden] {
+  display: none;
+}
+
 #deepnest-dialog-send {
   display: inline-block;
   margin-top: 0.45rem;

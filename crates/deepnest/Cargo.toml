@@ -12,6 +12,11 @@ name = "deepnest"
 path = "src/main.rs"
 
 [dependencies]
+# The bytes a message carries a file as. base64 rather than a hex or a raw string because the
+# request body is JSON: a file's bytes are not text, and every JSON-safe spelling of them is an
+# encoding. This is the one the dialog already produces (`btoa`'s alphabet), and the one already in
+# the lockfile for the WebSocket handshake the end-to-end test drives.
+base64 = "0.22"
 # A stop request, on all three platforms: one call installs SIGINT/SIGTERM/SIGHUP on unix and a
 # console control handler on Windows. `termination` is the feature that adds the last two signals —
 # without it a `kill` would still end the process with its apps running.
@@ -32,8 +37,8 @@ socket2 = "0.5"
 toml = "0.8"
 
 # Test-only, for the end-to-end run in `tests/through_the_binary.rs` and the stand-in app it
-# drives: a WebSocket handshake needs a SHA-1 and a base64, and writing either by hand in a
-# stand-in would be a second implementation of the very thing the test is checking.
+# drives: a WebSocket handshake needs a SHA-1, and writing it by hand in a stand-in would be a
+# second implementation of the very thing the test is checking. (The base64 half of that handshake
+# is a real dependency now — a message carries its files as base64.)
 [dev-dependencies]
-base64 = "0.22"
 sha1 = "0.10"
