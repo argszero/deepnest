@@ -1454,4 +1454,66 @@ mod tests {
         // And the one route the markup names is the one the server answers.
         assert_eq!(SCRIPT_PATH, "/panel.js");
     }
+
+    #[test]
+    fn a_long_conversation_can_be_read_back_to_its_first_exchange() {
+        // The server sends every turn the app has, and the transcript draws a window of them. The
+        // window is what a long session needs; a window nothing can move is the first exchange —
+        // the one that says what the app was asked to be — drawn nowhere and said to be nowhere.
+        assert!(
+            DIALOG_SCRIPT.contains("turns.slice(-shownTurns)"),
+            "the transcript draws a fixed slice, so nothing can reach past it"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("shownTurns += TURNS_SHOWN;"),
+            "the window has no way to grow, so the oldest turns stay unreachable"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("deepnest-dialog-earlier"),
+            "the turns the window has not reached are offered by no control"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("earlier message"),
+            "the control does not say how much of the conversation is behind it"
+        );
+        assert!(
+            !DIALOG_SCRIPT.contains("turns.slice(-TURNS_SHOWN)"),
+            "one call site still draws the fixed window the control cannot move"
+        );
+
+        // Reaching them adds turns above the ones on screen, and the reader is looking at one of
+        // those: the box grows under them, so the place is held against what was added.
+        assert!(
+            DIALOG_SCRIPT.contains("holdingPlace = true;"),
+            "revealing earlier turns redraws without marking where they were added"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("wasTop + (transcript.scrollHeight - wasTall)"),
+            "a prepend restores the offset from the top, which scrolls the reader up"
+        );
+
+        // And a conversation left for another one starts at the window, not at whatever the last
+        // one had been opened out to.
+        assert!(
+            DIALOG_SCRIPT.matches("shownTurns = TURNS_SHOWN;").count() >= 2,
+            "switching conversations keeps the previous one's window"
+        );
+
+        // The control is a button inside a box whose every element starts at `all: initial`, which
+        // resets `display` along with everything else: without a `display` of its own it is an
+        // inline button that cannot fill the line it sits on.
+        let rule = DIALOG_STYLE
+            .split("#deepnest-dialog-earlier {")
+            .nth(1)
+            .expect("the earlier-turns control has no rule of its own");
+        let rule = &rule[..rule.find('}').expect("the rule never closes")];
+        assert!(
+            rule.contains("display: block"),
+            "the control declares no display, so `all: initial` leaves it inline"
+        );
+        assert!(
+            DIALOG_STYLE.contains(".deepnest-turn:first-of-type"),
+            "the first turn drawn still matches `:first-child`, which the control broke"
+        );
+    }
 }

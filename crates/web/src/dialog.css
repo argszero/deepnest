@@ -595,7 +595,35 @@
   border-top: 1px solid rgba(255, 255, 255, 0.1);
 }
 
-#deepnest-dialog-transcript .deepnest-turn:first-child {
+/* The oldest turns the window has not reached. It sits inside the scrolling box, above the first
+ * turn drawn, because that is where the turns it reveals are going to appear. */
+#deepnest-dialog-earlier {
+  /* `all: initial` first, then what this rule means: it resets every property, `display` among
+   * them, so a button without a `display` of its own is an inline one inside a box it cannot fill. */
+  all: initial;
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0 0 0.35rem;
+  padding: 0.3rem 0.45rem;
+  border: 1px dashed rgba(255, 255, 255, 0.22);
+  border-radius: 4px;
+  background: transparent;
+  font: 11px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: rgba(244, 244, 246, 0.7);
+  text-align: center;
+  cursor: pointer;
+}
+
+#deepnest-dialog-earlier:hover,
+#deepnest-dialog-earlier:focus-visible {
+  border-color: rgba(110, 168, 254, 0.5);
+  color: #cfe0ff;
+}
+
+/* The first turn drawn carries no top border, and the control above it is a button rather than a
+ * turn — `:first-child` stopped matching it the moment the control was inserted. */
+#deepnest-dialog-transcript .deepnest-turn:first-of-type {
   border-top: 0;
 }
 
