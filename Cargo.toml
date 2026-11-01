@@ -11,6 +11,7 @@ members = [
     "crates/gateway",
     "crates/web",
     "crates/packaging",
+    "crates/bundle",
     "crates/deepnest",
 ]
 
