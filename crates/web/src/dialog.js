@@ -65,6 +65,20 @@
   title.id = "deepnest-dialog-title";
   title.textContent = slug || "this app";
 
+  // The way into the conversations, beside the app's name. A button rather than a link: it opens a
+  // panel inside this one, and a link would navigate away from the app the person is talking about.
+  var toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.id = "deepnest-dialog-sessions-toggle";
+  toggle.textContent = "Conversations";
+  toggle.setAttribute("aria-expanded", "false");
+  toggle.setAttribute("aria-controls", "deepnest-dialog-sessions");
+
+  var head = document.createElement("div");
+  head.id = "deepnest-dialog-head";
+  head.appendChild(title);
+  head.appendChild(toggle);
+
   var note = document.createElement("p");
   note.id = "deepnest-dialog-note";
   note.textContent = "Made by deepnest and running on this machine.";
@@ -509,8 +523,28 @@
   jump.textContent = "Jump to the latest";
   jump.hidden = true;
 
-  panel.appendChild(title);
+  // The drawer: every conversation this app has, and the way to start another one. It sits above
+  // the transcript rather than replacing it, so a person can see what they are leaving before they
+  // leave it — the row they are on is marked, and the row they are going to is one line above it.
+  var drawer = document.createElement("section");
+  drawer.id = "deepnest-dialog-sessions";
+  drawer.hidden = true;
+  drawer.setAttribute("aria-label", "This app's conversations");
+
+  var drawerList = document.createElement("div");
+  drawerList.id = "deepnest-dialog-sessions-list";
+
+  var startOne = document.createElement("button");
+  startOne.type = "button";
+  startOne.id = "deepnest-dialog-sessions-new";
+  startOne.textContent = "Start a new conversation";
+
+  drawer.appendChild(drawerList);
+  drawer.appendChild(startOne);
+
+  panel.appendChild(head);
   panel.appendChild(note);
+  panel.appendChild(drawer);
   panel.appendChild(transcript);
   panel.appendChild(jump);
   panel.appendChild(pictureNote);
@@ -697,6 +731,156 @@
   function historyRoute() {
     return "/api/apps/" + encodeURIComponent(slug) + "/history";
   }
+
+  function sessionsRoute() {
+    return "/api/apps/" + encodeURIComponent(slug) + "/sessions";
+  }
+
+  // When a conversation was last used, as a row in a list can show it: the day and the minute, and
+  // nothing finer. The server sends the file's own clock, so this prints rather than decides.
+  function whenOf(at) {
+    if (!at || at.length < 16) {
+      return "";
+    }
+    return at.slice(0, 10) + " " + at.slice(11, 16);
+  }
+
+  // One row per conversation. Built as nodes, never as markup: a conversation's title is the
+  // person's own first sentence, and this page does not put anybody's words into `innerHTML`.
+  function showSessions(body) {
+    var sessions = (body && body.sessions) || [];
+    var current = (body && body.current) || "";
+    drawerList.textContent = "";
+    sessions.forEach(function (session) {
+      var row = document.createElement("button");
+      row.type = "button";
+      row.className = session.current
+        ? "deepnest-session deepnest-session-current"
+        : "deepnest-session";
+      // Told, not only drawn: a reader who cannot see the mark still has to know which
+      // conversation their next message would land in.
+      row.setAttribute("aria-current", session.current ? "true" : "false");
+      var said = document.createElement("span");
+      said.className = "deepnest-session-title";
+      said.textContent = session.title || "Nothing asked yet";
+      var meta = document.createElement("span");
+      meta.className = "deepnest-session-meta";
+      var when = whenOf(session.at);
+      meta.textContent =
+        counted(session.turns, "exchange") + (when ? " · " + when : "");
+      row.appendChild(said);
+      row.appendChild(meta);
+      row.addEventListener("click", function () {
+        if (session.current) {
+          setDrawer(false);
+          return;
+        }
+        chooseSession(session.id);
+      });
+      drawerList.appendChild(row);
+    });
+    if (sessions.length === 0) {
+      var nothing = document.createElement("p");
+      nothing.className = "deepnest-session-none";
+      nothing.textContent = "No conversations yet.";
+      drawerList.appendChild(nothing);
+    }
+  }
+
+  function setDrawer(open) {
+    drawer.hidden = !open;
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) {
+      readSessions();
+    }
+  }
+
+  function readSessions() {
+    return fetch(sessionsRoute(), { credentials: "same-origin" })
+      .then(function (response) {
+        return response.ok ? response.json() : null;
+      })
+      .then(function (body) {
+        if (body) {
+          showSessions(body);
+        }
+      })
+      .catch(function () {
+        say("The conversations could not be listed — reload the page.", true);
+      });
+  }
+
+  // One call for both choices: "open this one" and "start another" differ by the body alone, and
+  // the answer to either is the list the drawer draws, so the two cannot render differently.
+  function choose(body, onDone) {
+    return fetch(sessionsRoute(), {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    })
+      .then(function (response) {
+        return response
+          .json()
+          .catch(function () {
+            return null;
+          })
+          .then(function (answer) {
+            if (!response.ok) {
+              // A `409` is the interesting one: a turn is running, and the answer says so in the
+              // words the server wrote rather than in a status code the page would have to explain.
+              say(
+                (answer && answer.error) ||
+                  "That conversation could not be opened — reload the page.",
+                true
+              );
+              return null;
+            }
+            return answer;
+          });
+      })
+      .catch(function () {
+        say("That conversation could not be opened — reload the page.", true);
+        return null;
+      });
+  }
+
+  function chooseSession(id) {
+    return choose({ open: id }).then(function (body) {
+      if (body) {
+        adopt(body);
+      }
+    });
+  }
+
+  function startSession() {
+    return choose({ new: true }).then(function (body) {
+      if (body) {
+        adopt(body);
+      }
+    });
+  }
+
+  // Moving the page onto another conversation. The transcript is emptied and read again rather
+  // than edited: what is drawn there belongs to the session being left, and a transcript that
+  // grew a second conversation's lines under the first is a page telling two stories at once.
+  function adopt(body) {
+    showSessions(body);
+    setDrawer(false);
+    drawn = "";
+    transcript.textContent = "";
+    transcript.hidden = true;
+    transcript.scrollTop = 0;
+    say("This is now the conversation the agent writes to.");
+    readHistory();
+    input.focus();
+  }
+
+  toggle.addEventListener("click", function () {
+    setDrawer(drawer.hidden);
+  });
+
+  startOne.addEventListener("click", startSession);
 
   // One turn is: what was asked, what the agent did about it, and what it said back. Rendered with
   // `textContent` throughout — every string here is either the person's words or the model's.

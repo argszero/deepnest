@@ -963,6 +963,96 @@ mod tests {
     }
 
     #[test]
+    fn the_drawer_lists_the_conversations_and_says_which_one_the_next_message_would_join() {
+        // The gap this closes: an app had one conversation and no way to start a clean second one
+        // without deleting the first. The page's part is the list and the choice, and the choice
+        // has to be visible — a drawer that draws rows without marking the open one leaves the
+        // person guessing where their next sentence lands.
+        assert!(
+            DIALOG_SCRIPT.contains("deepnest-dialog-sessions-toggle"),
+            "there is no way into the conversations"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("deepnest-dialog-sessions-list"),
+            "the drawer has no list"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#"setAttribute("aria-current""#),
+            "the open conversation is drawn but not announced"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("deepnest-dialog-sessions-new"),
+            "there is no way to start a conversation"
+        );
+        // One route, two verbs, and the body is what differs — the answer to both is the list, so
+        // the two choices cannot end up rendering two different things.
+        assert!(
+            DIALOG_SCRIPT.contains("function sessionsRoute()"),
+            "the drawer does not name its route"
+        );
+        for asked in [r#"{ open: id }"#, r#"{ new: true }"#] {
+            assert!(
+                DIALOG_SCRIPT.contains(asked),
+                "the page never asks for {asked}"
+            );
+        }
+        // The transcript belongs to the conversation it was read from: switching empties it and
+        // asks again rather than appending a second conversation under the first.
+        let adopt = DIALOG_SCRIPT
+            .find("function adopt(body)")
+            .expect("the switch is not written");
+        let body = &DIALOG_SCRIPT[adopt..];
+        let body = &body[..body
+            .find(
+                "
+  }",
+            )
+            .expect("adopt ends")];
+        assert!(
+            body.contains("transcript.textContent = \"\""),
+            "the transcript of the session being left stays on screen: {body}"
+        );
+        assert!(
+            body.contains("readHistory()"),
+            "the new conversation is never read: {body}"
+        );
+        // And built as nodes: a title is the person's own first sentence. The assignment forms and
+        // not the bare word, because this file's headers name `innerHTML` while forbidding it.
+        assert!(
+            !DIALOG_SCRIPT.contains(".innerHTML") && !DIALOG_SCRIPT.contains("innerHTML ="),
+            "the drawer puts somebody's words into markup"
+        );
+    }
+
+    #[test]
+    fn every_part_of_the_drawer_is_styled() {
+        // The dialog's stylesheet opens with `all: initial`, so an element it forgets is not
+        // "unstyled" but invisible: a `button` loses its border, its padding and its size.
+        for selector in [
+            "#deepnest-dialog-head",
+            "#deepnest-dialog-sessions-toggle",
+            "#deepnest-dialog-sessions",
+            "#deepnest-dialog-sessions[hidden]",
+            "#deepnest-dialog-sessions-list",
+            "#deepnest-dialog-sessions .deepnest-session",
+            "#deepnest-dialog-sessions .deepnest-session-current",
+            "#deepnest-dialog-sessions .deepnest-session-title",
+            "#deepnest-dialog-sessions .deepnest-session-meta",
+            "#deepnest-dialog-sessions-new",
+        ] {
+            assert!(
+                DIALOG_STYLE.contains(selector),
+                "{selector} is unstyled, which under `all: initial` means invisible"
+            );
+        }
+        // The hidden attribute has to be spelled out for the same reason.
+        assert!(
+            DIALOG_STYLE.contains("#deepnest-dialog-sessions[hidden]"),
+            "the closed drawer stays on screen"
+        );
+    }
+
+    #[test]
     fn the_dialog_reads_the_conversation_back_instead_of_remembering_it() {
         // The defect this route fixes: a turn that rewrites the app reloads the page, and the
         // answer the person was reading was a variable that died with it. So the transcript is
