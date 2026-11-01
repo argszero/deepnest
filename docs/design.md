@@ -280,10 +280,20 @@ Five decisions came with the wiring:
   `model::Endpoint` serves `Model::turn_with` from `Client::chat_stream_with`, so each fragment of
   the answer reaches whoever is drawing it while the model is still writing; the loop reaches that
   seam only through `Agent::run_turn_watched`, and `run_turn` is the same loop with an observer that
-  discards. `POST …/chat` still takes the discarding path and returns one JSON body, which is why
-  the page shows no difference yet. What is left is two steps — a `chat` route that writes the turn
-  as it arrives, and a page that renders it — and neither is blocked on the transport or on the loop
-  any more.
+  discards. **The two steps that were left have landed.** `POST …/chat` answers as one JSON body
+  unless the request's `Accept` names `text/event-stream`: then the head goes out before the turn
+  starts, each fragment of the answer is one event, and the last event carries the reply the JSON
+  path would have returned whole. A refusal is never a stream — a request the route cannot serve is
+  answered with a body, because a page's first job with an event stream is to parse it, and a failure
+  delivered as a parse error is a failure with no sentence in it. **The page reads both**
+  (`decided in implementation`, 2026-11-01): the dialog asks for the stream and then decides how to
+  read the reply from the reply's own content type rather than from what it asked for, so a `401` or
+  a `412` still arrives as the sentence that says what to do. Each fragment is appended to the line
+  under the box while the turn is still writing, which is the difference between a long turn and a
+  turn that hung — and a mark at the end of that line is the only thing that says more is coming. A
+  line that grows word by word is not announced word by word; the live region comes back on when the
+  answer is whole. A stream that ends without its closing event says the connection closed and points
+  at the transcript, because that is a fact about the reading rather than about the turn.
 - **The endpoint is read per request, not held at startup.** `POST /api/config` can change it, and
   an agent assembled once would keep asking the old one until the next start.
 - **A writing turn says `changed` and does not rebuild.** `bash` and `write`/`edit` set the flag, the
