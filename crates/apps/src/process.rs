@@ -724,21 +724,34 @@ mod tests {
 
     #[test]
     fn an_allocated_port_is_a_real_free_loopback_port() {
-        let port = allocate().unwrap();
-        assert!(port.number() > 0);
-        assert_eq!(port.addr().ip().to_string(), "127.0.0.1");
-        // It was free a moment ago, so it can be taken now — this is what the app will do with it.
-        // Taken by binding only, deliberately *without* listening: `TcpListener::bind` would bind
-        // and listen in one step, and a listening socket here would answer connections on a port
-        // this test never chose. That port comes from the same ephemeral pool the tests around it
-        // draw from, so it can be the port another test has just closed while it was checking that
-        // a closed port reads as closed — and the kernel is free to hand a just-freed number out
-        // again. Binding alone already proves the port is free: a port someone else holds fails
-        // this call with `EADDRINUSE`. The socket is closed at the end of the test either way.
-        let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
-        socket.bind(&port.addr().into()).unwrap();
-        let bound = socket.local_addr().unwrap().as_socket().unwrap();
-        assert_eq!(bound.port(), port.number());
+        // A number this process is holding is the one number an allocation may never hand out.
+        let held = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let taken = held.local_addr().unwrap().port();
+
+        let mut seen: Vec<u16> = Vec::new();
+        for _ in 0..8 {
+            let port = allocate().unwrap();
+            assert!(port.number() > 0, "a port, not 0");
+            assert_eq!(port.addr().ip().to_string(), "127.0.0.1");
+            assert_ne!(
+                port.number(),
+                taken,
+                "a port this process holds is not free"
+            );
+            assert!(
+                !seen.contains(&port.number()),
+                "two allocations, two numbers: {} again",
+                port.number()
+            );
+            seen.push(port.number());
+        }
+
+        // Not asserted here: that the number can be bound this instant. `allocate` closes the
+        // socket it picked the number with — the window its own documentation accepts — and until
+        // this kernel has finished releasing it a `bind` is refused with `EADDRINUSE` although the
+        // number was never handed to anyone else. Binding a just-released number therefore tests
+        // the kernel's teardown timing, not `allocate`, and failed about one whole-library run in
+        // twenty. What an app gets for it is the supervisor's readiness probe, not this test.
     }
 
     #[test]
@@ -958,14 +971,32 @@ mod tests {
     }
 
     #[test]
-    fn the_real_prober_says_yes_to_a_listener_and_no_to_a_closed_port() {
+    fn the_real_prober_says_yes_to_a_listener_and_no_to_a_port_nothing_listens_on() {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let port = Port(listener.local_addr().unwrap().port());
-        assert!(TcpProber.ready(port), "a listening socket is ready");
+        let live = Port(listener.local_addr().unwrap().port());
+        assert!(TcpProber.ready(live), "a listening socket is ready");
 
-        drop(listener);
-        // The port is now closed. `ready` must answer, not hang and not panic.
-        assert!(!TcpProber.ready(port), "a closed port is not ready");
+        // The number the probe must refuse is one this test holds for the whole probe: bound here
+        // and deliberately never listened on, so nothing else in the process or on the machine can
+        // take it, and no handshake can be completed on it. That is what an app that never came up
+        // looks like from the probe's side, and the probe's own timeout is what turns the silence
+        // into `false`.
+        //
+        // Probing the number that was listening a line ago is a different test, and a racy one:
+        // closing a listening socket does not release its port in the same instant. Measured on
+        // this kernel, the closed number still completes a handshake for a few milliseconds, and
+        // still refuses a `bind` for about one — the socket on its way out, not an app answering.
+        // A single-threaded run never lands in that window; a whole-library run failed here about
+        // one time in four, which is the flake this test used to be.
+        let silent = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+        silent
+            .bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into())
+            .unwrap();
+        let dead = Port(silent.local_addr().unwrap().as_socket().unwrap().port());
+        assert!(
+            !TcpProber.ready(dead),
+            "nothing listens there, so the app is not up"
+        );
     }
 
     /// A program that certainly exists on this platform, used to exercise the real spawner.
