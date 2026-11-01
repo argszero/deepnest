@@ -462,3 +462,40 @@ fn a_body_past_the_bound_is_refused_before_it_is_buffered() {
 
     running.shutdown();
 }
+
+#[test]
+fn a_message_carrying_a_screenshot_sized_picture_is_read_rather_than_refused() {
+    // The other half of the bound, and the half that was missing: a body the chat route says it
+    // takes has to be a body this server reads. A screenshot pasted into the dialog is about a
+    // megabyte of `data:` URL, and it used to be answered `413` — the route's own allowance
+    // (8,000,000 characters of pictures per message) sat above a body bound of 16 KiB, so the
+    // picture feature worked for pictures too small for anyone to paste.
+    let scratch = Scratch::new("picture-body");
+    let (running, token) = start(&scratch, Some("deepseek-flash"));
+    let addr = running.addr();
+
+    let picture = format!("data:image/png;base64,{}", "A".repeat(1_000_000));
+    let body = format!("{{\"message\": \"what is this?\", \"images\": [\"{picture}\"]}}");
+    let answer = request(
+        addr,
+        &format!(
+            "POST /api/apps/no-such-app/chat HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\
+             Authorization: Bearer {}\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\n\r\n{body}",
+            addr.port(),
+            token.as_str(),
+            body.len()
+        ),
+    );
+
+    // A route was reached, which is the whole claim: `read` either has the body whole or refuses the
+    // request outright (`413` past the bound, `400` when the declared bytes never all arrive), so
+    // the router's own answer is proof that a megabyte of picture was read and handed on. This
+    // harness starts the server without a lifecycle, so what the router says about an app is that
+    // it cannot serve one — its answer, about the body it was asked with, and not the transport's.
+    assert!(!answer.starts_with("HTTP/1.1 413"), "{answer}");
+    assert!(answer.starts_with("HTTP/1.1 503"), "{answer}");
+    assert!(answer.contains("started without a lifecycle"), "{answer}");
+
+    running.shutdown();
+}
