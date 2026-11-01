@@ -1599,6 +1599,29 @@
     return copy;
   }
 
+  // How much of a long block is drawn before the rest is folded away, and the block has to be at
+  // least twice this to be worth folding at all.
+  //
+  // Measured in Chrome against two answers that each wrote a 60-line module: the panel is 512 px
+  // tall, the transcript's own scroll box is 280 px, a row of code is 16 px (11 px monospace on
+  // 15.95 px leading) so that window holds seventeen rows, and one block was 969 px — 3.5 windows
+  // — which made one exchange 1076 px. With the transcript at its newest end, which is where it
+  // lands after every turn, the exchange before that one sat at -1874 px: an answer that wrote a
+  // file had pushed the whole conversation out of reach, and the code itself was still mostly
+  // below the fold.
+  //
+  // Fourteen rows is 224 px, four fifths of the window, so a folded block and the sentence above
+  // it are one exchange tall. Folding only starts at 28 rows (448 px, one and a half windows):
+  // under that, a control that reveals fifteen lines costs more attention than the scrolling it
+  // saves. Measured after: the exchange went from 1076 px to 365 px, and both of them from 2154 px
+  // to 731 px.
+  var BLOCK_LINES_SHOWN = 14;
+
+  // Blocks a person has opened, keyed by the answer they sit in and their position in it. The
+  // transcript is rebuilt whenever the record grew, which while a turn runs is every round, and a
+  // block that folded itself back up under the reader would be a block nobody could read past.
+  var openedBlocks = {};
+
   // A fenced block. The head sits above the text and holds the language the fence named and the
   // copy, so pressing one of them cannot move the code the person is reading — and `pre` is what
   // scrolls sideways, so a control inside it would scroll out of reach.
@@ -1617,9 +1640,8 @@
     //
     // A span per line is what lets the stylesheet pull the first row of a line back to the margin and
     // push the wrapped rows in, which is the difference between a continuation and a new line.
-    String(source)
-      .split("\n")
-      .forEach(function (one) {
+    function draw(rows) {
+      rows.forEach(function (one) {
         var line = document.createElement("span");
         line.className = "deepnest-code-line";
         // An empty line is still a line: an empty block generates no line box at all, so the blank
@@ -1627,6 +1649,20 @@
         line.textContent = one === "" ? "\u200b" : one;
         code.appendChild(line);
       });
+    }
+
+    var rows = String(source).split("\n");
+    // Only a block in the transcript folds. The one under the box is the answer being written, and
+    // what it must do is show its newest line; hiding the end of it behind a control would take
+    // away the one thing a reader watching a turn needs.
+    var key = what === null ? null : what + "\u0000" + ordinal;
+    var folded = false;
+    if (key !== null && !openedBlocks[key] && rows.length > BLOCK_LINES_SHOWN * 2) {
+      draw(rows.slice(0, BLOCK_LINES_SHOWN));
+      folded = true;
+    } else {
+      draw(rows);
+    }
     pre.appendChild(code);
 
     // `what` is null where the text is being *shown* rather than copied from — the answer line under
@@ -1657,6 +1693,40 @@
     );
     block.appendChild(head);
     block.appendChild(pre);
+
+    if (folded) {
+      var hidden = rows.length - BLOCK_LINES_SHOWN;
+      var more = document.createElement("button");
+      more.type = "button";
+      more.className = "deepnest-code-more";
+      // The code's own words, not just a count: "Show 17 more lines" beside two blocks leaves a
+      // person guessing which one it belongs to, and a screen reader with no block at all.
+      more.textContent =
+        "Show the other " +
+        hidden +
+        (hidden === 1 ? " line" : " lines") +
+        " of this block";
+      more.setAttribute(
+        "aria-label",
+        "Show the other " +
+          hidden +
+          (hidden === 1 ? " line" : " lines") +
+          " of the " +
+          (language ? language + " code block" : "code block") +
+          (total > 1 ? " " + ordinal + " of " + total : "") +
+          " in " +
+          what
+      );
+      more.addEventListener("click", function () {
+        // Opened stays opened: the transcript is redrawn from the record on the next poll, and the
+        // key is what carries the press across that redraw. The redraw itself is done here rather
+        // than fetched, because the lines are already in this page and the record has not changed.
+        openedBlocks[key] = true;
+        draw(rows.slice(BLOCK_LINES_SHOWN));
+        more.remove();
+      });
+      block.appendChild(more);
+    }
     return block;
   }
 
