@@ -990,6 +990,32 @@
   padding: 0 0.1rem 0.15rem;
 }
 
+/* The way past a folded block, in the row under it rather than inside the `pre`: `pre` is what
+ * scrolls, and a control placed in it would scroll out of reach of the person reading a long line.
+ *
+ * `all: initial` first, then what this rule means — it resets `display` back to `inline` and `font`
+ * and `color` back to the page's own, which inside this panel is 16 px black on a dark box. */
+#deepnest-dialog-transcript .deepnest-code-more {
+  all: initial;
+  display: block;
+  box-sizing: border-box;
+  margin: 0.15rem 0 0;
+  padding: 0.1rem 0.35rem;
+  border: 1px solid rgba(110, 168, 254, 0.45);
+  border-radius: 4px;
+  background: rgba(110, 168, 254, 0.12);
+  font: 10px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #cddaf5;
+  cursor: pointer;
+}
+
+#deepnest-dialog-transcript .deepnest-code-more:hover,
+#deepnest-dialog-transcript .deepnest-code-more:focus-visible {
+  border-color: rgba(110, 168, 254, 0.8);
+  background: rgba(110, 168, 254, 0.22);
+  color: #ffffff;
+}
+
 #deepnest-dialog-transcript .deepnest-code-language {
   all: initial;
   display: block;

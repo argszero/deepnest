@@ -1269,6 +1269,83 @@ mod tests {
     }
 
     #[test]
+    fn a_very_long_block_in_the_transcript_is_folded_until_it_is_asked_for() {
+        // A tool call is already capped (`max-height: 12rem` behind a disclosure), and the answer's
+        // own block was capped by nothing. Measured in Chrome against two answers that each wrote a
+        // sixty-line module: one exchange came to 1076 px inside a 280 px transcript window, the two
+        // of them to 2154 px — 7.7 windows — and with the transcript at its newest end, where every
+        // turn leaves it, the exchange before the last sat at -1874 px. An answer that wrote a file
+        // buried the conversation it was part of.
+        assert!(
+            DIALOG_SCRIPT.contains("var BLOCK_LINES_SHOWN = 14;"),
+            "there is no measure for how much of a long block is drawn"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("rows.length > BLOCK_LINES_SHOWN * 2"),
+            "a block is folded without being long enough to be worth folding"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("draw(rows.slice(0, BLOCK_LINES_SHOWN));"),
+            "the fold draws the whole block anyway"
+        );
+        // The transcript is rebuilt whenever the record grew, which while a turn runs is every
+        // round. A block that folded itself back up under the reader is a block nobody can read
+        // past, so what was opened is remembered by the answer's own name and the block's position
+        // in it — the DOM those turn into is replaced on every redraw.
+        assert!(
+            DIALOG_SCRIPT
+                .contains(r#"var key = what === null ? null : what + "\u0000" + ordinal;"#),
+            "the fold does not know which answer and which block it belongs to"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("openedBlocks[key] = true;"),
+            "a block folded back up at the next redraw"
+        );
+        // The answer being written is drawn by the same renderer with `what` null, and it must not
+        // fold: the one thing a reader watching a turn needs is its newest line.
+        assert!(
+            DIALOG_SCRIPT.contains("if (key !== null && !openedBlocks[key]"),
+            "a block being written can be folded away while it is being written"
+        );
+        // The press puts the rest of the block back without asking the server for anything: the
+        // lines are already in this page and the record has not changed.
+        assert!(
+            DIALOG_SCRIPT.contains("draw(rows.slice(BLOCK_LINES_SHOWN));"),
+            "the press redraws the block from the server instead of from what it already has"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("more.remove();"),
+            "the control stays after the whole block has been drawn"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#"more.className = "deepnest-code-more";"#),
+            "the fold control has no class for the stylesheet or a test to find it by"
+        );
+        // A control with no name is a control a screen reader reads as "button", beside however many
+        // other buttons this panel holds.
+        assert!(
+            DIALOG_SCRIPT.contains(r#""aria-label","#),
+            "the fold control carries no name"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#"of the " +"#),
+            "the fold control's name does not say which block it opens"
+        );
+        // `all: initial` resets `display` to `inline` and the font and colour to the page's own,
+        // which inside this panel is black on a dark box — so each of those is written back.
+        for needed in [
+            "#deepnest-dialog-transcript .deepnest-code-more {",
+            "all: initial",
+            "display: block",
+            "cursor: pointer",
+            "background: rgba(110, 168, 254, 0.12)",
+            ":focus-visible",
+        ] {
+            assert!(DIALOG_STYLE.contains(needed), "{needed} is missing");
+        }
+    }
+
+    #[test]
     fn the_answer_being_written_keeps_its_newest_line_in_view() {
         // The answer line is its own scroll window (`max-height: 9rem`, `overflow: auto`), and it did
         // not follow what it was writing. Measured in Chrome against a twenty-piece stream: the box
