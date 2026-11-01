@@ -61,11 +61,12 @@ by name what it does not answer:
   configured and its model name, never the key. `POST` is the first-run form and **the one route
   that reads a request body**: a key in a URL is written into the browser's history and into
   whatever logs the URL, which is the same reason the token travels in a header rather than in the
-  path. The body is bounded (`MAX_BODY`, 16 KiB) and accepted only with a declared
-  `Content-Length`. The file is written through `config::save` — `0600`, atomically, and after the
-  same checks the binary applies at startup — so a value it would refuse to boot on is refused by
-  the form instead. The running process picks the change up immediately: nothing else caches the
-  config, so there is no restart to ask for.
+  path. The body is bounded (`MAX_BODY`, 16 MiB — sized so that the chat route's own picture
+  allowance fits inside it) and accepted only with a declared `Content-Length`. The file is
+  written through `config::save` — `0600`, atomically, and after the same checks the binary
+  applies at startup — so a value it would refuse to boot on is refused by the form instead. The
+  running process picks the change up immediately: nothing else caches the config, so there is no
+  restart to ask for.
 - `GET /api/apps` — the apps under `~/.deepnest/apps`, and every entry there that is not one, with
   the reason. Behind the token, because it names the user's apps and the paths they live at. It
   reads the directory per request, so an app that appeared a second ago is in the next answer

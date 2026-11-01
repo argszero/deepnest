@@ -37,10 +37,23 @@ pub const MAX_HEADERS: usize = 64;
 
 /// The largest request body accepted, in bytes.
 ///
-/// Every route that takes a body takes a handful of short strings: three config values, a name.
-/// 16 KiB is generous for that and small enough that a body cannot be how this process is made to
-/// spend memory — the same reasoning as [`MAX_HEAD`], applied to the other half of the request.
-pub const MAX_BODY: usize = 16 * 1024;
+/// **Sized by the largest body a route says it takes, not by the smallest.** Most routes that take
+/// one carry a handful of short strings — three config values, a name — and 16 KiB was that bound
+/// for as long as they were the only ones. The chat route is not that kind of route: a message
+/// carries its pictures as `data:` URLs, up to 8,000,000 characters between them
+/// (`deepnest::chat::MAX_IMAGE_CHARS`), which is a screenshot-sized budget the dialog fills and the
+/// route promises to accept. A bound below it is not caution, it is a route refusing what its own
+/// refusals say it takes: a pasted screenshot arrived as `413` with no way to send it smaller, and
+/// that was the whole of the picture feature, unreachable.
+///
+/// 16 MiB carries that budget and the words around it. It is still the bound on how much memory one
+/// request can make this process spend, and the arithmetic is worth naming: the binary serves at
+/// most `MAX_CONNECTIONS` connections at once, and a body is held only while its own request is
+/// being answered — the product of the two is the ceiling this number sets. That is a real ceiling
+/// and it is this one deliberately: a picture the person meant to send is worth more than the
+/// megabytes a bug or a hostile local client could ask for, and the alternative is a feature that
+/// exists only for pictures small enough for nobody to paste.
+pub const MAX_BODY: usize = 16 * 1024 * 1024;
 
 /// The methods this binary serves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

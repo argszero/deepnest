@@ -859,4 +859,27 @@ mod tests {
         assert!(system.contains("workspace-write"), "{system}");
         assert!(system.contains("/app/notes/"), "{system}");
     }
+
+    #[test]
+    fn the_body_bound_admits_the_pictures_this_route_accepts() {
+        // Two numbers in two crates that have to agree, and did not. Neither is wrong on its own —
+        // a screenshot-sized budget for pictures, a bound on what one request can make the process
+        // hold — and only the pair was, which is why the pair is what is asserted here. Nothing did,
+        // and the disagreement surfaced as a `413` on a pasted screenshot: this route advertising
+        // 8,000,000 characters of pictures that the HTTP layer underneath would not read.
+        let envelope = deepnest_gateway::http::MAX_BODY;
+        assert!(
+            envelope > MAX_IMAGE_CHARS,
+            "the body bound ({envelope}) cannot carry a message of nothing but pictures \
+             ({MAX_IMAGE_CHARS} characters), so the route refuses what it says it takes"
+        );
+        // Not merely by a byte, either: the words and the JSON around the pictures travel in the
+        // same body, and a bound that fits the pictures alone still refuses a real message.
+        assert!(
+            envelope - MAX_IMAGE_CHARS >= 1024 * 1024,
+            "the body bound ({envelope}) leaves {} bytes for the words and the JSON around the \
+             pictures",
+            envelope - MAX_IMAGE_CHARS
+        );
+    }
 }
