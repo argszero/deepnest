@@ -652,7 +652,7 @@ mod tests {
             "the pictures are not read out of the message"
         );
         assert!(
-            DIALOG_SCRIPT.contains("ask(text, picturesReferredTo(text))"),
+            DIALOG_SCRIPT.contains("ask(text, picturesReferredTo(text)"),
             "the request does not carry the pictures the words mention"
         );
         // The same body the route already reads, with one more key, and only when it is needed.
@@ -660,7 +660,7 @@ mod tests {
         // Nothing left behind once the message is away, because a picture nobody chose to resend
         // is tokens spent on every later turn of the app's life.
         assert!(
-            DIALOG_SCRIPT.contains("forgetPictures();"),
+            DIALOG_SCRIPT.contains("forgetAttachments();"),
             "the pictures are still in the box after the message was sent"
         );
         // The strip is gone: a picture beside the box is the shape this change exists to remove.
@@ -707,6 +707,87 @@ mod tests {
     }
 
     #[test]
+    fn the_dialog_takes_a_file_the_same_way_it_takes_a_picture() {
+        // A file is the picture case with one difference that decides the whole design: it has a
+        // name. `[file report.csv]` is the marker, so what the person's sentence points at and what
+        // the model matches the contents to are the same string. The three ways a file arrives —
+        // pasted, dropped, chosen — all have to reach that one insertion point, because a feature
+        // that works from the clipboard and does nothing from the file picker reads as broken.
+        assert!(
+            DIALOG_SCRIPT.contains(r#"return "[file " + name + "]""#),
+            "a file's marker does not carry its name"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("filesReferredTo("),
+            "the files are not read back out of the message"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("ask(text, picturesReferredTo(text), filesReferredTo(text))"),
+            "the request does not carry the files the words name"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("body.files = files.map("),
+            "the files key is added whether or not there are files"
+        );
+        // Markers have to be tellable apart, and by the same reading that resolves them: the words
+        // in front of the bracket.
+        assert!(
+            DIALOG_SCRIPT.contains("var pattern = /\\[file ([^\\]\\n]+)\\]/g"),
+            "the file marker is not parsed, or is parsed the same shape as a picture's"
+        );
+        // Dropping: without `preventDefault` the browser navigates to the file instead.
+        assert!(
+            DIALOG_SCRIPT.contains(r#"addEventListener("dragover""#),
+            "a dropped file would open in the browser"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#"addEventListener("drop""#),
+            "nothing takes a dropped file"
+        );
+        // Choosing: a hidden input a button drives, so the dialog keeps its shape and a keyboard
+        // still reaches it.
+        assert!(
+            DIALOG_SCRIPT.contains(r#""deepnest-dialog-picker""#)
+                && DIALOG_SCRIPT.contains(r#""deepnest-dialog-attach""#),
+            "there is no way to choose a file that is not on the clipboard"
+        );
+        assert!(
+            DIALOG_STYLE.contains("#deepnest-dialog-picker[hidden]"),
+            "`all: initial` resets `[hidden]`, so the picker would be drawn"
+        );
+        assert!(
+            DIALOG_STYLE.contains("#deepnest-dialog-attach"),
+            "the button is styled nowhere"
+        );
+        // The paste path no longer insists on `image/*`: a spreadsheet copied out of a file manager
+        // arrives the same way, and dropping it was a paste that silently did nothing.
+        assert!(
+            DIALOG_SCRIPT.contains(r#"if (item.kind === "file") {"#),
+            "only pictures survive a paste"
+        );
+        // The bytes go in the body, not a path: nothing here names a file on disk for the server to
+        // open, and the base64 prefix the data URL carries is dropped before it travels.
+        assert!(
+            DIALOG_SCRIPT.contains("readAsDataURL"),
+            "a file's bytes are never read"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("reader.result.slice(comma + 1)"),
+            "the data: prefix travels to the server instead of being dropped here"
+        );
+        assert!(
+            !DIALOG_SCRIPT.contains("file_path"),
+            "the dialog names a path for the server to read"
+        );
+        // The name is cleaned where the person can see the marker that results, because the server
+        // refuses a name a marker cannot hold.
+        assert!(
+            DIALOG_SCRIPT.contains("function fileNameOf("),
+            "a name is used without the characters a marker cannot hold being taken out"
+        );
+    }
+
+    #[test]
     fn the_dialog_draws_a_message_that_was_only_a_picture() {
         // The read-back half of the paste: a message sent as a screenshot alone has no text in the
         // record, so a transcript that drew `turn.user` drew an empty row and the answer hung
@@ -719,16 +800,40 @@ mod tests {
             DIALOG_SCRIPT.contains("picturesIn("),
             "there is no phrase for a number of pictures"
         );
-        // The words are used when they are there — the file has no text only sometimes.
+        // The words are used when they are there — the file has no text only sometimes. A message
+        // that was a picture, or a file, and nothing else still gets a line saying what it was.
         assert!(
-            DIALOG_SCRIPT.contains("turn.user || (pictures > 0"),
+            DIALOG_SCRIPT.contains("turn.user || (pictures + files > 0"),
             "an empty question is drawn as an empty line"
         );
         // And a question that had both says what came with it.
-        assert!(DIALOG_SCRIPT.contains("\"with \" + picturesIn(pictures)"));
+        assert!(DIALOG_SCRIPT.contains("\"with \" + withWhat(pictures, files)"));
         assert!(DIALOG_SCRIPT.contains("deepnest-pictures"));
         // `all: initial` means an unstyled line inherits nothing, so it has to be in the sheet.
         assert!(DIALOG_STYLE.contains("#deepnest-dialog-transcript .deepnest-pictures"));
+    }
+
+    #[test]
+    fn the_transcript_counts_files_instead_of_pouring_them_into_the_chat() {
+        // The record holds what the model was shown: the words, then the files' contents. The page
+        // is showing a person what they said. A csv inside a chat line is a screen of data where a
+        // sentence used to be, so the count is what is drawn — the same trade `pictures` makes.
+        assert!(
+            DIALOG_SCRIPT.contains("turn.files || 0"),
+            "the transcript never reads the file count"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("function filesIn("),
+            "there is no phrase for a number of files"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("function withWhat(pictures, files)"),
+            "a message with both kinds says only one of them"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("\"with \" + withWhat(pictures, files)"),
+            "a question that named files does not say so"
+        );
     }
 
     #[test]

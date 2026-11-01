@@ -164,6 +164,14 @@
   var attached = [];
   var nextPicture = 1;
 
+  // Files, the same mechanism with the name in place of the number. `[file report.csv]` is the
+  // marker because a picture has no name and a file does: the name is what the person is pointing
+  // at, and it is what the model matches the contents below the message to. The bytes stay here in
+  // `carried` and travel as base64 in the request; the marker is the only way to reach them, so a
+  // marker cut out of the words is a file that is not sent.
+  var MAX_FILES = 8;
+  var carried = [];
+
   // A live region of its own rather than a line in the answer box: the answer box is where the
   // last turn's words are, and taking a picture arrives before any turn has run. It says what is
   // in the message rather than showing it, because the markers are the picture's place and a
@@ -176,6 +184,10 @@
 
   function markerFor(id) {
     return "[image " + id + "]";
+  }
+
+  function fileMarkerFor(name) {
+    return "[file " + name + "]";
   }
 
   // The pictures the message still refers to, in the order the words mention them.
@@ -205,23 +217,66 @@
     return found;
   }
 
+  // The files the words still name, in the order they name them — the same reading as the
+  // pictures, and for the same reason: what the person kept in the text is what they meant to send.
+  // A name is only sent once however often it is mentioned, because pointing at one file twice does
+  // not make it two files.
+  function filesReferredTo(text) {
+    var pattern = /\[file ([^\]\n]+)\]/g;
+    var found = [];
+    var taken = {};
+    var match = pattern.exec(text);
+    while (match !== null) {
+      var name = match[1];
+      if (!taken[name]) {
+        for (var index = 0; index < carried.length; index += 1) {
+          if (carried[index].name === name) {
+            taken[name] = true;
+            found.push(carried[index]);
+            break;
+          }
+        }
+      }
+      match = pattern.exec(text);
+    }
+    return found;
+  }
+
   // Sent, so the pictures go with it: one left behind would ride along with the next message too,
   // and a conversation that accumulates screenshots nobody chose to resend is a conversation that
   // costs the user tokens for the rest of the app's life. The numbering does not restart, because a
   // marker that outlived its picture would then name the wrong one.
-  function forgetPictures() {
+  function forgetAttachments() {
     attached = [];
+    carried = [];
     refreshNote();
   }
 
+  function counted(count, noun) {
+    return count + " " + noun + (count === 1 ? "" : "s");
+  }
+
+  // One sentence over both kinds, because they travel in one message: "1 picture and 2 files in the
+  // message, each where its marker is."
   function refreshNote() {
-    var count = picturesReferredTo(input.value).length;
-    pictureNote.hidden = count === 0;
-    if (count === 1) {
-      pictureNote.textContent = "1 picture in the message, where its marker is.";
-    } else if (count > 1) {
-      pictureNote.textContent = count + " pictures in the message, each where its marker is.";
+    var pictures = picturesReferredTo(input.value).length;
+    var files = filesReferredTo(input.value).length;
+    if (pictures === 0 && files === 0) {
+      pictureNote.hidden = true;
+      return;
     }
+    var parts = [];
+    if (pictures > 0) {
+      parts.push(counted(pictures, "picture"));
+    }
+    if (files > 0) {
+      parts.push(counted(files, "file"));
+    }
+    pictureNote.hidden = false;
+    pictureNote.textContent =
+      parts.join(" and ") +
+      " in the message, " +
+      (pictures + files === 1 ? "where its marker is." : "each where its marker is.");
   }
 
   // Insert at the caret, because that is where the person was typing when they reached for the
@@ -244,7 +299,19 @@
     });
   }
 
+  function isPicture(file) {
+    return !!(file && file.type && file.type.indexOf("image/") === 0);
+  }
+
   function take(file, next) {
+    if (isPicture(file)) {
+      takePicture(file, next);
+      return;
+    }
+    takeFile(file, next);
+  }
+
+  function takePicture(file, next) {
     if (picturesReferredTo(input.value).length >= MAX_PICTURES) {
       say("A message carries at most " + MAX_PICTURES + " pictures.", true);
       next();
@@ -262,7 +329,61 @@
       next();
     };
     reader.onerror = function () {
-      say("That picture could not be read from the clipboard.", true);
+      say("That picture could not be read.", true);
+      next();
+    };
+    reader.readAsDataURL(file);
+  }
+
+  // The name as the person's own file system spells it, minus the characters a marker cannot hold:
+  // a `]` would end the marker early, and a path separator names something that is not one file.
+  // The server refuses both, so they are taken out here — where the person sees the marker that
+  // results — rather than left to fail the whole message after it was typed.
+  function fileNameOf(file) {
+    var name = (file && file.name ? String(file.name) : "")
+      .replace(/[\[\]\\/\u0000-\u001f]/g, "")
+      .trim();
+    if (name.length > 120) {
+      name = name.slice(0, 120);
+    }
+    return name || "unnamed file";
+  }
+
+  function takeFile(file, next) {
+    if (filesReferredTo(input.value).length >= MAX_FILES) {
+      say("A message carries at most " + MAX_FILES + " files.", true);
+      next();
+      return;
+    }
+    var name = fileNameOf(file);
+    for (var index = 0; index < carried.length; index += 1) {
+      if (carried[index].name === name) {
+        // The marker is the name, so a name can only be used once: two files sharing one would
+        // send whichever was read last and silently drop the other.
+        say(
+          "A file named " + name + " is already in this message — rename one before sending both.",
+          true
+        );
+        next();
+        return;
+      }
+    }
+    var reader = new FileReader();
+    reader.onload = function () {
+      if (typeof reader.result === "string") {
+        // `readAsDataURL` gives `data:<type>;base64,<bytes>`, and the request wants the bytes: the
+        // prefix is dropped here rather than carried across the wire to be dropped at the far end.
+        var comma = reader.result.indexOf(",");
+        if (comma > 0) {
+          carried.push({ name: name, data: reader.result.slice(comma + 1) });
+          putAtCaret(fileMarkerFor(name));
+          refreshNote();
+        }
+      }
+      next();
+    };
+    reader.onerror = function () {
+      say(name + " could not be read.", true);
       next();
     };
     reader.readAsDataURL(file);
@@ -270,7 +391,10 @@
 
   // Pasting into the panel, not into one element: a person who has just clicked somewhere in the
   // box and presses the paste key should not have to find the exact field first. Text pastes are
-  // left alone — `preventDefault` runs only when the clipboard actually carries a picture.
+  // left alone — `preventDefault` runs only when the clipboard actually carries a file. Any file,
+  // not only a picture: a spreadsheet copied out of a file manager arrives the same way, and the
+  // version that took `image/*` and dropped the rest is the version that made a pasted csv do
+  // nothing at all.
   function onPaste(event) {
     var data = event.clipboardData;
     if (!data) {
@@ -280,7 +404,7 @@
     var items = data.items || [];
     for (var index = 0; index < items.length; index += 1) {
       var item = items[index];
-      if (item.kind === "file" && item.type && item.type.indexOf("image/") === 0) {
+      if (item.kind === "file") {
         var file = item.getAsFile ? item.getAsFile() : null;
         if (file) {
           files.push(file);
@@ -305,7 +429,57 @@
 
   panel.addEventListener("paste", onPaste);
 
+  // Dropping, the second way in: the clipboard is not where a downloaded file lives. The marker
+  // goes in at the caret, which is where the person was typing when they reached for the file.
+  panel.addEventListener("dragover", function (event) {
+    if (!event.dataTransfer) {
+      return;
+    }
+    // Without this the browser opens the dropped file instead, which loses the page the person was
+    // in the middle of asking a question about.
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  });
+  panel.addEventListener("drop", function (event) {
+    var data = event.dataTransfer;
+    if (!data || !data.files || data.files.length === 0) {
+      return;
+    }
+    event.preventDefault();
+    input.focus();
+    takeAll(Array.prototype.slice.call(data.files));
+  });
+
+  // Choosing one, the third way in: a file that is neither on the clipboard nor being dragged
+  // needs a button. The input is hidden and the button drives it so the dialog keeps its shape, and
+  // the button is a real focusable one because a keyboard has to be able to reach it.
+  var picker = document.createElement("input");
+  picker.type = "file";
+  picker.multiple = true;
+  picker.id = "deepnest-dialog-picker";
+  picker.hidden = true;
+
+  var attach = document.createElement("button");
+  attach.type = "button";
+  attach.id = "deepnest-dialog-attach";
+  attach.textContent = "Attach a file";
+  attach.addEventListener("click", function () {
+    picker.click();
+  });
+  picker.addEventListener("change", function () {
+    var chosen = Array.prototype.slice.call(picker.files || []);
+    // Cleared before reading: choosing the same file twice in a row fires no change event on an
+    // input whose value is still that file, and the person would see the second attach do nothing.
+    picker.value = "";
+    if (chosen.length > 0) {
+      input.focus();
+      takeAll(chosen);
+    }
+  });
+
   form.appendChild(input);
+  form.appendChild(attach);
+  form.appendChild(picker);
   form.appendChild(send);
   form.appendChild(stop);
 
@@ -399,6 +573,22 @@
     return count + (count === 1 ? " picture" : " pictures");
   }
 
+  function filesIn(count) {
+    return count + (count === 1 ? " file" : " files");
+  }
+
+  // What came with the words, in the words a person uses: "with 1 picture and 2 files".
+  function withWhat(pictures, files) {
+    var parts = [];
+    if (pictures > 0) {
+      parts.push(picturesIn(pictures));
+    }
+    if (files > 0) {
+      parts.push(filesIn(files));
+    }
+    return parts.join(" and ");
+  }
+
   function renderTurn(turn, live) {
     var line = document.createElement("div");
     line.className = live ? "deepnest-turn deepnest-running" : "deepnest-turn";
@@ -409,7 +599,11 @@
     // an empty line left the turn with no question at all — the reply hung under a blank row and
     // the picture itself, which the model had been looking at, appeared nowhere.
     var pictures = turn.pictures || 0;
-    asked.textContent = turn.user || (pictures > 0 ? picturesIn(pictures) : "");
+    var files = turn.files || 0;
+    // The file's contents are in the record because the model was given them; they are not what
+    // the person typed, and the route reads them back as a count for exactly that reason.
+    asked.textContent =
+      turn.user || (pictures + files > 0 ? withWhat(pictures, files) : "");
 
     var did = document.createElement("p");
     did.className = "deepnest-did";
@@ -419,11 +613,12 @@
     }
 
     line.appendChild(asked);
-    // Words and a picture together: the words are the question, and this says what came with it.
-    if (turn.user && pictures > 0) {
+    // Words and something pasted with them: the words are the question, and this says what came
+    // with it. One line for both kinds, because one message carried them.
+    if (turn.user && pictures + files > 0) {
       var sent = document.createElement("p");
       sent.className = "deepnest-pictures";
-      sent.textContent = "with " + picturesIn(pictures);
+      sent.textContent = "with " + withWhat(pictures, files);
       line.appendChild(sent);
     }
     if (did.textContent) {
@@ -697,12 +892,19 @@
       });
   }
 
-  function ask(text, images) {
-    // The pictures key is added only when there are pictures: a typed message keeps the exact body
-    // it had before the box could paste anything, which is one fewer shape a server has to accept.
+  function ask(text, images, files) {
+    // Each key is added only when there is something in it: a typed message keeps the exact body it
+    // had before the box could paste anything, which is one fewer shape a server has to accept.
     var body = { message: text };
     if (images.length > 0) {
       body.images = images;
+    }
+    if (files.length > 0) {
+      // Name and bytes, and nothing else: a file's type is what this browser guessed from the
+      // extension, and the server would only be reading the guess back.
+      body.files = files.map(function (entry) {
+        return { name: entry.name, data: entry.data };
+      });
     }
     return fetch("/api/apps/" + encodeURIComponent(slug) + "/chat", {
       method: "POST",
@@ -739,7 +941,7 @@
     // question already possible rather than after the first answer.
     startPolling();
 
-    ask(text, picturesReferredTo(text))
+    ask(text, picturesReferredTo(text), filesReferredTo(text))
       .then(function (response) {
         // A refusal is JSON in every case this server produces; a proxy's error page is not, and
         // the status is then the only thing left to report.
@@ -764,7 +966,7 @@
             text += "\n\nThis changed the app — rebuilding it now.";
           }
           input.value = "";
-          forgetPictures();
+          forgetAttachments();
           say(text, false);
           // The turn is on disk the moment the route answers, so this reads what was actually
           // recorded rather than echoing what came back in the reply.

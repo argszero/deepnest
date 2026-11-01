@@ -50,6 +50,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use base64::Engine as _;
 use deepnest_agent::{
     prompt::system_prompt, Agent, AgentError, AgentPaths, Approver, Cancellation, LoopRunner,
     MemoryStore, Model, PromptContext, Session, TurnOutcome,
@@ -99,12 +100,60 @@ pub const MAX_IMAGES: usize = 8;
 /// with room for several of them, and a ceiling on what one request can make this process hold.
 pub const MAX_IMAGE_CHARS: usize = 8_000_000;
 
-/// One message as the dialog sends it: the words, and any pictures pasted with them.
+/// The most files one message may carry.
+///
+/// The same reasoning as [`MAX_IMAGES`], and the same number: one message is one question, and a
+/// question that arrives with nine files is an upload that has not decided what it is about.
+pub const MAX_FILES: usize = 8;
+
+/// The largest the files of one message may be together, in bytes of content.
+///
+/// A quarter of `deepnest_gateway::http::MAX_BODY`, on purpose: base64 makes the content a third
+/// larger again on the wire, and the pictures of the same message may be using most of the rest.
+/// [`MAX_FILES`] files of this size would not fit in one request, which is why one message's files
+/// share this budget rather than each getting it.
+pub const MAX_FILE_BYTES: usize = 4 * 1024 * 1024;
+
+/// How much of one file's text is written into the message the model reads.
+///
+/// A file may be [`MAX_FILE_BYTES`] long, which is far past any model's context. The alternatives
+/// to a cut are worse: refusing the message hides why, and sending the lot spends the provider's
+/// whole window on one attachment and fails the turn with nothing to point at. The cut says where
+/// it is, so the model can ask for the rest rather than answer from half a file it believes whole.
+pub const MAX_INLINE_CHARS: usize = 100_000;
+
+/// The line [`with_files`] puts between the person's words and the files those words point at.
+///
+/// **Public because the transcript cuts here.** The conversation file records the message the model
+/// was shown — the words and the contents — because that is what a replay has to hand the model
+/// again. The page, though, is showing a person their own sentence, and a csv pasted into that
+/// sentence turns one line of chat into a screen of data. So `crate::history` cuts at this line and
+/// reports a count instead, which is the same trade `pictures` already makes for a screenshot's
+/// megabytes. One constant rather than two spellings of the same literal: a cut that misses is a
+/// transcript that silently grows a file dump.
+pub const FILE_SECTION: &str =
+    "\n\nThe message names these files. Each heading is the marker exactly as it appears in the \
+     words above, and the file's contents follow it.\n";
+
+/// One file the message points at: the name the person's own file system spells, and its bytes.
+///
+/// The bytes rather than a path, because a path is a promise about a disk that outlives the
+/// conversation: the file it names can be moved, edited, or never exist. What was pasted is what
+/// travels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Carried {
+    pub name: String,
+    pub bytes: Vec<u8>,
+}
+
+/// One message as the dialog sends it: the words, and any pictures and files pasted with them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Ask {
     pub text: String,
     /// `data:` URLs, in the order they were pasted.
     pub images: Vec<String>,
+    /// Files the words point at, in the order the words mention them.
+    pub files: Vec<Carried>,
 }
 
 /// Read `{"message": "...", "images": ["data:image/png;base64,..."]}` out of a request body.
@@ -124,9 +173,10 @@ pub fn ask_from(body: &[u8]) -> Result<Ask, String> {
     let value: Value =
         serde_json::from_str(text).map_err(|error| format!("the body is not JSON: {error}"))?;
     let images = images_from(&value)?;
+    let files = files_from(&value)?;
     let message = value.get("message").and_then(Value::as_str);
     let words = message.map(str::trim).unwrap_or_default();
-    if words.is_empty() && images.is_empty() {
+    if words.is_empty() && images.is_empty() && files.is_empty() {
         return Err(if message.is_none() {
             "the body must carry a string field named `message`".to_string()
         } else {
@@ -136,6 +186,7 @@ pub fn ask_from(body: &[u8]) -> Result<Ask, String> {
     Ok(Ask {
         text: message.unwrap_or_default().to_string(),
         images,
+        files,
     })
 }
 
@@ -185,6 +236,153 @@ fn images_from(value: &Value) -> Result<Vec<String>, String> {
         ));
     }
     Ok(images)
+}
+
+/// Read the `files` field, if the body has one: `[{"name": "report.csv", "data": "<base64>"}]`.
+///
+/// **Base64 of the bytes, not a path and not a URL.** A path would name a file this process has to
+/// open on the strength of a string a page chose, and the page is an app's page — the thing the
+/// agent's policy exists to fence off. The bytes the person pasted are the thing they meant; they
+/// travel in the request that carries their words, and nothing is read off a disk because of them.
+///
+/// A name is what the marker in the words holds, so the rules on it are the marker's rules: a `]`
+/// would end the marker early, a newline would end the line it sits on, and a path separator names
+/// something other than a single file. Everything else is the person's own filename, kept as it is.
+fn files_from(value: &Value) -> Result<Vec<Carried>, String> {
+    let Some(field) = value.get("files") else {
+        return Ok(Vec::new());
+    };
+    if field.is_null() {
+        return Ok(Vec::new());
+    }
+    let array = field.as_array().ok_or_else(|| {
+        "`files` must be a list of `{\"name\": \"...\", \"data\": \"<base64>\"}` objects"
+            .to_string()
+    })?;
+    if array.len() > MAX_FILES {
+        return Err(format!(
+            "one message carries at most {MAX_FILES} files; this one has {}",
+            array.len()
+        ));
+    }
+    let mut files = Vec::with_capacity(array.len());
+    let mut total = 0usize;
+    for (index, entry) in array.iter().enumerate() {
+        let name = entry
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("`files[{index}].name` must be a string"))?;
+        let name = checked_name(index, name)?;
+        let data = entry
+            .get("data")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("`files[{index}].data` must be a base64 string"))?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .map_err(|error| format!("`files[{index}].data` is not base64: {error}"))?;
+        total += bytes.len();
+        if total > MAX_FILE_BYTES {
+            return Err(format!(
+                "the files in one message come to at most {MAX_FILE_BYTES} bytes; this one has \
+                 {total}"
+            ));
+        }
+        files.push(Carried { name, bytes });
+    }
+    Ok(files)
+}
+
+/// A file's name as the marker and the model will both carry it, or the reason it may not.
+fn checked_name(index: usize, name: &str) -> Result<String, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(format!(
+            "`files[{index}].name` is empty — a file needs a name to be pointed at"
+        ));
+    }
+    if trimmed.chars().count() > 120 {
+        return Err(format!(
+            "`files[{index}].name` is longer than 120 characters, which no marker in a sentence \
+             survives"
+        ));
+    }
+    if let Some(bad) = trimmed
+        .chars()
+        .find(|character| matches!(character, ']' | '/' | '\\') || character.is_control())
+    {
+        return Err(format!(
+            "`files[{index}].name` contains {bad:?}, which cannot appear in the marker the message \
+             names the file by"
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// The person's words, followed by the contents of the files those words point at.
+///
+/// **Why the contents are here rather than at a path.** The marker is the position — `[file
+/// report.csv]` sits where the sentence mentions the file — so the name the model matches is the
+/// name in the words above it, and what it needs next is the file itself. Writing the bytes into
+/// the app's directory and naming the path instead would leave a copy that nothing ever deletes:
+/// every pasted file would outlive its message, and one deleted from the message would still be
+/// sitting in the app it was pasted into.
+///
+/// A message with no files returns its text unchanged — the exact string this route sent before
+/// files existed, which is what keeps the typed-message path byte-identical.
+fn with_files(text: &str, files: &[Carried]) -> String {
+    if files.is_empty() {
+        return text.to_string();
+    }
+    let mut assembled = String::from(text);
+    assembled.push_str(FILE_SECTION);
+    for file in files {
+        assembled.push_str(&format!(
+            "\n[file {}] — {} bytes\n",
+            file.name,
+            file.bytes.len()
+        ));
+        let Ok(contents) = std::str::from_utf8(&file.bytes) else {
+            // Named and counted rather than decoded lossily: half a zip file is worth less than a
+            // line saying what was left out.
+            assembled.push_str("(not shown: this file is not text)\n");
+            continue;
+        };
+        let shown: String = contents.chars().take(MAX_INLINE_CHARS).collect();
+        let fence = fence_around(&shown);
+        assembled.push_str(&fence);
+        assembled.push('\n');
+        assembled.push_str(&shown);
+        if !shown.ends_with('\n') {
+            assembled.push('\n');
+        }
+        assembled.push_str(&fence);
+        assembled.push('\n');
+        if shown.chars().count() < contents.chars().count() {
+            assembled.push_str(&format!(
+                "(the rest of this file is not shown: it is longer than {MAX_INLINE_CHARS} \
+                 characters)\n"
+            ));
+        }
+    }
+    assembled
+}
+
+/// A fence no line of `contents` can end early.
+///
+/// A file of markdown or source is exactly the kind of file a person pastes, and it may contain
+/// three backticks of its own. The fence is then one longer than the longest run inside.
+fn fence_around(contents: &str) -> String {
+    let mut longest = 0;
+    let mut run = 0;
+    for byte in contents.bytes() {
+        if byte == b'`' {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    "`".repeat(longest.max(2) + 1)
 }
 
 /// Read `{"message": "..."}` out of a request body, words only.
@@ -369,7 +567,12 @@ pub fn watched(
     // The flag the router registered for this turn: a stop pressed in the dialog reaches the loop
     // from another connection, and the loop checks it before the next request and before every
     // tool call of a batch.
-    let outcome = match agent.run_turn_watched(&ask.text, &ask.images, &terms.cancel, on_text) {
+    // What the model is shown: the person's words, and the contents of every file those words
+    // point at, under a heading that repeats the marker. Built here rather than stored in `Ask` so
+    // that a message with no files produces exactly the string this route sent before files
+    // existed — the typed-message path stays byte-identical.
+    let words = with_files(&ask.text, &ask.files);
+    let outcome = match agent.run_turn_watched(&words, &ask.images, &terms.cancel, on_text) {
         Ok(outcome) => outcome,
         // A turn that could not run at all is not a turn that failed: the difference is what the
         // user can do about it, so the status carries it.
@@ -538,6 +741,7 @@ mod tests {
         Ask {
             text: text.to_string(),
             images: Vec::new(),
+            files: Vec::new(),
         }
     }
 
@@ -619,6 +823,216 @@ mod tests {
         assert!(ask_from(br#"{"message":"look","images":[42]}"#)
             .unwrap_err()
             .contains("`images[0]`"));
+    }
+
+    /// One file entry as the dialog sends it: a name, and the base64 of its bytes.
+    fn file_json(name: &str, contents: &str) -> String {
+        format!(
+            r#"{{"name":"{name}","data":"{}"}}"#,
+            base64::engine::general_purpose::STANDARD.encode(contents)
+        )
+    }
+
+    #[test]
+    fn a_body_may_carry_files_beside_its_words() {
+        let ask = ask_from(
+            format!(
+                r#"{{"message":"what is wrong with [file report.csv]?","files":[{}]}}"#,
+                file_json("report.csv", "id,total\n1,2\n")
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(ask.files.len(), 1);
+        assert_eq!(ask.files[0].name, "report.csv");
+        assert_eq!(ask.files[0].bytes, b"id,total\n1,2\n");
+        // Absent is the ordinary case: a client that never heard of files sends the body it always
+        // sent and gets the same message out.
+        let typed = ask_from(br#"{"message":"hello"}"#).unwrap();
+        assert!(typed.files.is_empty());
+        // And a message that is nothing but a file is still something to answer, the same way a
+        // message that is nothing but a picture is.
+        let only_file = ask_from(
+            format!(r#"{{"message":"","files":[{}]}}"#, file_json("a.txt", "x")).as_bytes(),
+        )
+        .unwrap();
+        assert!(only_file.text.is_empty());
+        assert_eq!(only_file.files.len(), 1);
+    }
+
+    #[test]
+    fn a_file_arrives_where_the_words_name_it() {
+        // The shape of the whole feature: the marker is the position, and the contents follow it.
+        // The model is given one string, so what it reads in order is what the person wrote in
+        // order — a file listed apart from its sentence would be a file the question never reaches.
+        let words = "the total in [file report.csv] looks wrong";
+        let ask = ask_from(
+            format!(
+                r#"{{"message":"{words}","files":[{}]}}"#,
+                file_json("report.csv", "id,total\n1,2\n")
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let text = with_files(&ask.text, &ask.files);
+        assert!(text.starts_with(words), "{text}");
+        // The heading repeats the marker verbatim, so the name the model matches is the name in
+        // the words above it.
+        assert!(text.contains("[file report.csv]"), "{text}");
+        assert!(text.contains("id,total\n1,2"), "{text}");
+        // A message with no files is the exact string this route sent before files existed.
+        assert_eq!(with_files("plain words", &[]), "plain words");
+    }
+
+    #[test]
+    fn a_file_that_is_not_text_is_named_and_not_mangled() {
+        // A zip, a picture pasted as a file, a database: naming it and saying so is worth more
+        // than a lossy conversion that the model would read as the file's content.
+        let text = with_files(
+            "what is in [file archive.zip]?",
+            &[Carried {
+                name: "archive.zip".to_string(),
+                bytes: vec![0x50, 0x4b, 0x03, 0x04, 0xff, 0xfe],
+            }],
+        );
+        assert!(text.contains("[file archive.zip] — 6 bytes"), "{text}");
+        assert!(text.contains("not text"), "{text}");
+    }
+
+    #[test]
+    fn a_fence_grows_past_what_the_file_itself_contains() {
+        // A pasted file is exactly as likely to be markdown or source as it is to be a csv, and a
+        // fence the contents can close early is a fence the model reads as the end of the file.
+        let text = with_files(
+            "look at [file readme.md]",
+            &[Carried {
+                name: "readme.md".to_string(),
+                bytes: b"# title\n\n```\ncode\n```\n".to_vec(),
+            }],
+        );
+        assert!(text.contains("````\n# title"), "{text}");
+    }
+
+    #[test]
+    fn a_file_longer_than_a_context_window_is_cut_and_the_cut_is_stated() {
+        let long = "a".repeat(MAX_INLINE_CHARS + 10);
+        let text = with_files(
+            "summarise [file long.txt]",
+            &[Carried {
+                name: "long.txt".to_string(),
+                bytes: long.into_bytes(),
+            }],
+        );
+        assert!(
+            text.contains("the rest of this file is not shown"),
+            "{text}"
+        );
+        // The whole file was not sent: the point of the cut is that it is a cut.
+        assert!(
+            text.chars().count() < MAX_INLINE_CHARS + 500,
+            "{}",
+            text.chars().count()
+        );
+    }
+
+    #[test]
+    fn a_file_must_have_a_name_a_marker_can_hold() {
+        // The name is carried into the words the model reads and into the marker the person's own
+        // text holds, so the two characters that would break either are refused by name.
+        for (name, expected) in [
+            ("", "empty"),
+            ("a]b.csv", "cannot appear"),
+            ("../etc/passwd", "cannot appear"),
+            ("dir/report.csv", "cannot appear"),
+        ] {
+            let body =
+                format!(r#"{{"message":"look","files":[{{"name":"{name}","data":"eA=="}}]}}"#);
+            let error = ask_from(body.as_bytes()).unwrap_err();
+            assert!(error.contains(expected), "{name}: {error}");
+        }
+        // The data has to be base64, and the field has to be an object: each refusal names the
+        // entry it is about rather than the list.
+        assert!(
+            ask_from(br#"{"message":"look","files":[{"name":"a.txt","data":"!!!"}]}"#)
+                .unwrap_err()
+                .contains("not base64")
+        );
+        assert!(ask_from(br#"{"message":"look","files":["a.txt"]}"#)
+            .unwrap_err()
+            .contains("`files[0].name`"));
+        assert!(ask_from(br#"{"message":"look","files":"a.txt"}"#)
+            .unwrap_err()
+            .contains("list"));
+    }
+
+    #[test]
+    fn a_bodys_files_are_refused_when_there_are_too_many_or_they_are_too_large() {
+        let one = file_json("a.txt", "x");
+        let many = [one.as_str(); MAX_FILES + 1].join(",");
+        let too_many = format!(r#"{{"message":"look","files":[{many}]}}"#);
+        assert!(ask_from(too_many.as_bytes())
+            .unwrap_err()
+            .contains("at most"));
+
+        // One file past the budget, and two that are each fine but together are not: the quota is
+        // the message's, not each file's.
+        let huge = format!(
+            r#"{{"message":"look","files":[{{"name":"big.bin","data":"{}"}}]}}"#,
+            base64::engine::general_purpose::STANDARD.encode(vec![b'x'; MAX_FILE_BYTES + 1])
+        );
+        assert!(ask_from(huge.as_bytes()).unwrap_err().contains("bytes"));
+        let half = MAX_FILE_BYTES / 2 + 1;
+        let part = format!(
+            r#"{{"name":"part.bin","data":"{}"}}"#,
+            base64::engine::general_purpose::STANDARD.encode(vec![b'x'; half])
+        );
+        let together = format!(r#"{{"message":"look","files":[{part},{part}]}}"#);
+        assert!(ask_from(together.as_bytes())
+            .unwrap_err()
+            .contains("the files in one message"));
+    }
+
+    #[test]
+    fn a_file_reaches_the_model_with_the_words_that_point_at_it() {
+        // The whole path, in this process: the body becomes one user message whose text holds the
+        // person's words and the file's contents, in that order.
+        let scratch = Scratch::new("file");
+        let model = Arc::new(Scripted::new(vec![Ok(AssistantTurn {
+            content: Some("The totals column is empty.".to_string()),
+            tool_calls: Vec::new(),
+            finish_reason: FinishReason::Stop,
+        })]));
+        let ask = ask_from(
+            format!(
+                r#"{{"message":"what is wrong with [file report.csv]?","files":[{}]}}"#,
+                file_json("report.csv", "id,total\n1,2\n")
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+
+        let reply = answer(
+            Arc::clone(&model) as Arc<dyn Model>,
+            &scratch.home,
+            &scratch.app_dir(),
+            &scratch.slug(),
+            &ask,
+            &Terms::default(),
+        );
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        let seen = model.seen.lock().unwrap();
+        let user = seen[0]
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .unwrap();
+        let text = user.text();
+        assert!(
+            text.starts_with("what is wrong with [file report.csv]?"),
+            "{text}"
+        );
+        assert!(text.contains("id,total\n1,2"), "{text}");
+        assert_eq!(user.image_count(), 0, "a file is not a picture");
     }
 
     #[test]
@@ -880,6 +1294,23 @@ mod tests {
             "the body bound ({envelope}) leaves {} bytes for the words and the JSON around the \
              pictures",
             envelope - MAX_IMAGE_CHARS
+        );
+
+        // And the same pair again, for the other thing one message may carry: files go in as
+        // base64, so a full budget of them costs a third more on the wire than on disk. The worst
+        // case is one message with every picture and every file the quotas allow, which is what
+        // this adds up — a bound below it would refuse the message the route says it takes.
+        let files_on_the_wire = MAX_FILE_BYTES.div_ceil(3) * 4;
+        assert!(
+            envelope > MAX_IMAGE_CHARS + files_on_the_wire,
+            "the body bound ({envelope}) cannot carry the pictures ({MAX_IMAGE_CHARS} characters) \
+             and the files ({MAX_FILE_BYTES} bytes, {files_on_the_wire} as base64) of one message"
+        );
+        assert!(
+            envelope - MAX_IMAGE_CHARS - files_on_the_wire >= 1024 * 1024,
+            "the body bound ({envelope}) leaves {} bytes for the words around a message's \
+             pictures and files",
+            envelope - MAX_IMAGE_CHARS - files_on_the_wire
         );
     }
 }
