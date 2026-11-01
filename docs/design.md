@@ -762,14 +762,16 @@ One module per cycle, each landing with its tests:
    `installer::install` from inside a turn, and gets there the only way a write outside the app can —
    refused at the session's mode, and run only for the one call the person widened. Every part this
    crate was to have has now landed.
-9. `crates/packaging` — payload, first-run unpack, signing. **In progress**: the toolchain
-   directory contract has landed (where a payload unpacks, the marker that makes a directory whole,
-   and the sweep that removes what an interrupted unpack left behind), so has the C toolchain
-   check, wired into the `build` route as a `412` before any step runs, and so has the unpack
-   itself (`crates/packaging/src/unpack.rs`): a tar inside a zstd stream, read entry by entry, with
-   every path and every link target checked against the toolchain root before anything is written.
-   It is not wired into the binary yet, and cannot be: there is no payload in the build for it to
-   read. What remains is that payload and the signing of it.
+9. `crates/packaging` — payload, first-run unpack, signing. **Landed, except the signature**: the
+   toolchain directory contract (where a payload unpacks, the marker that makes a directory whole,
+   and the sweep that removes what an interrupted unpack left behind), the C toolchain check wired
+   into the `build` route as a `412` before any step runs, the unpack itself
+   (`crates/packaging/src/unpack.rs`) — a tar inside a zstd stream, read entry by entry, with every
+   path and every link target checked against the toolchain root before anything is written — and
+   its writer (`pack.rs`). The payload is in the binary: `crates/deepnest/build.rs` embeds it,
+   `crates/deepnest/src/payload.rs` unpacks it on the first build, and `payload::Toolchain` reaches
+   the build as the `Runner` (`crates/deepnest/src/router.rs`). What remains is the signature over
+   that archive, and the notarization it is the precondition for.
 10. `crates/bundle` — the macOS app bundle, and signing it. **Landed**: `Deepnest.app` laid out
     around a binary that has already been built, by `deepnest-bundle`; `src/macho.rs`, which walks a
     tree and says which of its files are Mach-O binaries; and `src/sign.rs`, which signs each of them
