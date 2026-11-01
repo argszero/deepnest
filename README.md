@@ -35,7 +35,7 @@ Measured on an Apple-silicon Mac while designing the packaging, not estimated:
 
 | Measurement | Result |
 |---|---|
-| Payload size (zstd -19, 12 threads) | ~140 MB |
+| Payload size (zstd -19, single-threaded) | ~140 MB |
 | First launch: unpack the bundled toolchain | 937 ms |
 | Building a second app, reusing the shared build cache | 4.25 s |
 | Building a second app with a cold cache | 13.2 s |
