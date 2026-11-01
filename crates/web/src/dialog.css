@@ -80,12 +80,181 @@
   display: none;
 }
 
+/* The app's name and the way into its conversations, on one line: the drawer is a place to go,
+ * not a third heading, and a second row for one button would cost the transcript a line it needs. */
+#deepnest-dialog-head {
+  display: flex;
+  box-sizing: border-box;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: 0 0 0.3rem;
+}
+
 #deepnest-dialog-title {
   display: block;
-  margin: 0 0 0.3rem;
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
   font: 600 14px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   color: #ffffff;
   overflow-wrap: anywhere;
+}
+
+/* `all: initial` leaves a button an inline box with no border and no padding, so every property
+ * this one has is written here. It is deliberately quiet: the sentence people come to this dialog
+ * for is the answer, and a button that competes with it is one pressed by mistake. */
+#deepnest-dialog-sessions-toggle {
+  display: inline-block;
+  flex: none;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0.15rem 0.45rem;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  background: transparent;
+  font: 11px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: rgba(244, 244, 246, 0.72);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+#deepnest-dialog-sessions-toggle:hover,
+#deepnest-dialog-sessions-toggle[aria-expanded="true"] {
+  border-color: rgba(255, 255, 255, 0.42);
+  color: #ffffff;
+}
+
+#deepnest-dialog-sessions-toggle:focus-visible {
+  outline: 2px solid #7aa7ff;
+  outline-offset: 1px;
+}
+
+/* The drawer itself: the conversations this app has, then the way to start one. It takes the
+ * transcript's place in the column and gives its own height back when it closes, so a long list
+ * cannot push the message box off the bottom of the panel. */
+#deepnest-dialog-sessions {
+  display: block;
+  box-sizing: border-box;
+  margin: 0 0 0.6rem;
+  padding: 0.35rem 0.4rem;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.22);
+}
+
+/* `[hidden]` is spelled out because `all: initial` resets `display`: the attribute alone would
+ * leave the drawer on screen. */
+#deepnest-dialog-sessions[hidden] {
+  display: none;
+}
+
+#deepnest-dialog-sessions-list {
+  display: block;
+  max-height: 11rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  color-scheme: dark;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.24) transparent;
+}
+
+#deepnest-dialog-sessions-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+#deepnest-dialog-sessions-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+#deepnest-dialog-sessions-list::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.24);
+}
+
+/* A row is a button: the whole line is the target, because a conversation's title is a sentence
+ * somebody typed and the name of it is that sentence. */
+#deepnest-dialog-sessions .deepnest-session {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0.1rem 0 0;
+  padding: 0.3rem 0.4rem;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+#deepnest-dialog-sessions .deepnest-session:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+#deepnest-dialog-sessions .deepnest-session:focus-visible {
+  outline: 2px solid #7aa7ff;
+  outline-offset: -2px;
+}
+
+/* The one the page is on. A left rule rather than a fill, because a fill on every second row is a
+ * list nobody can scan; this is one row, and it is the one that matters. */
+#deepnest-dialog-sessions .deepnest-session-current {
+  border-left-color: #6ea8fe;
+  background: rgba(110, 168, 254, 0.12);
+}
+
+#deepnest-dialog-sessions .deepnest-session-title {
+  display: block;
+  font: 500 12px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: rgba(244, 244, 246, 0.92);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+#deepnest-dialog-sessions .deepnest-session-current .deepnest-session-title {
+  color: #ffffff;
+}
+
+#deepnest-dialog-sessions .deepnest-session-meta {
+  display: block;
+  margin: 0.1rem 0 0;
+  font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: rgba(244, 244, 246, 0.45);
+}
+
+#deepnest-dialog-sessions .deepnest-session-none {
+  display: block;
+  margin: 0.2rem 0.4rem;
+  font: 11px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: rgba(244, 244, 246, 0.5);
+}
+
+/* Starting one is not one of the rows: it is not a conversation yet, and a list that ends in a
+ * fake row is a list where the last real one is easy to click by mistake. */
+#deepnest-dialog-sessions-new {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0.4rem 0 0;
+  padding: 0.3rem 0.4rem;
+  border: 1px dashed rgba(255, 255, 255, 0.28);
+  border-radius: 5px;
+  background: transparent;
+  font: 500 12px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: rgba(244, 244, 246, 0.82);
+  text-align: left;
+  cursor: pointer;
+}
+
+#deepnest-dialog-sessions-new:hover {
+  border-color: rgba(255, 255, 255, 0.55);
+  color: #ffffff;
+}
+
+#deepnest-dialog-sessions-new:focus-visible {
+  outline: 2px solid #7aa7ff;
+  outline-offset: -2px;
 }
 
 #deepnest-dialog-note {

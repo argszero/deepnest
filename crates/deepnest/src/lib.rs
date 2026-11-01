@@ -42,6 +42,7 @@ pub mod rebuild;
 pub mod refresh;
 pub mod router;
 pub mod server;
+pub mod sessions;
 pub mod stop;
 pub mod token;
 pub mod updates;

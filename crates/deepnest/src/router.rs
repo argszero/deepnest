@@ -64,6 +64,7 @@ use crate::http::{Method, Request, Response};
 use crate::model::Endpoint;
 use crate::rebuild;
 use crate::refresh;
+use crate::sessions;
 use crate::token::Token;
 
 /// What the router needs in order to make an app real: the supervisor that owns its process, the
@@ -559,6 +560,7 @@ impl Router {
             escalation::ACTION,
             rebuild::ACTION,
             history::ACTION,
+            sessions::ACTION,
         ] {
             let name =
                 grant::cookie_name(action).expect("every route the dialog may reach has one");
@@ -1123,10 +1125,14 @@ impl Router {
         let build_status_read = action == Action::Build && request.method == Method::Get;
         // A transcript is read and never written, so it is the second route a `GET` reaches.
         let history_read = action == Action::History && request.method == Method::Get;
+        // The drawer's list is the third. `POST` on the same route is how a person chooses a
+        // conversation, so `GET` here asks without choosing and changes nothing.
+        let sessions_read = action == Action::Sessions && request.method == Method::Get;
         if request.method != Method::Post
             && action != Action::Escalation
             && !build_status_read
             && !history_read
+            && !sessions_read
         {
             // `chat` is the one verb here that does not change a process, so it is the one that
             // must not claim to: what a caller needs to know is the method, and the wording only
@@ -1165,6 +1171,28 @@ impl Router {
         // wants it stopped is the page it was started from, whether or not the app is running.
         if action == Action::Cancel {
             return Answer::Full(self.cancel_route(&slug));
+        }
+
+        // And a conversation is a file rather than a process. An app that is stopped — or that was
+        // never started because its build failed — still has the transcript of what the agent did,
+        // and reading it is exactly what a person wants to do before deciding to start it again.
+        if action == Action::Sessions {
+            let Some(apps_dir) = &self.apps_dir else {
+                return Answer::Full(Response::json(
+                    503,
+                    error_body(
+                        "this process cannot find apps: it was started without an apps directory",
+                    ),
+                ));
+            };
+            let dir = apps_dir.join(slug.as_str());
+            if !dir.is_dir() {
+                return Answer::Full(Response::json(
+                    404,
+                    error_body(&format!("no app named `{slug}` in {}", apps_dir.display())),
+                ));
+            }
+            return Answer::Full(self.sessions_route(request, &slug, &dir));
         }
 
         let Some(lifecycle) = &self.lifecycle else {
@@ -1237,6 +1265,7 @@ impl Router {
             Action::Create => unreachable!("create is answered before this match"),
             Action::Escalation => unreachable!("escalation is answered before this match"),
             Action::Cancel => unreachable!("cancel is answered before this match"),
+            Action::Sessions => unreachable!("sessions is answered before this match"),
             Action::Start => {
                 let log = deepnest_apps::log_path(&lifecycle.home, &slug);
                 Answer::Full(started(&slug, lifecycle.supervisor.start(&slug, &dir, log)))
@@ -1331,6 +1360,76 @@ impl Router {
             200,
             json!({ "stopping": stopping, "note": note }).to_string(),
         )
+    }
+
+    /// `GET`/`POST /api/apps/<slug>/sessions` — the app's conversations, and which one is open.
+    ///
+    /// The `GET` is the drawer: every conversation this app has, the newest first, with the one the
+    /// page is on marked. The `POST` is the choice, and it answers with the same body the `GET` does
+    /// — one shape for the page to render, whether it is opening the drawer or picking a row, so a
+    /// page cannot end up drawing a list it has no current session for.
+    ///
+    /// Two answers the caller can act on and one it cannot: `404` for a name this app does not have
+    /// (it is a mistake worth saying), `400` for a body this route cannot read or a name that is not
+    /// a session name (also a mistake), and `503` when the write failed, which is the only one that
+    /// says something is wrong here rather than there.
+    fn sessions_route(&self, request: &Request, slug: &Slug, dir: &Path) -> Response {
+        if request.method == Method::Get || request.method == Method::Head {
+            return Response::json(200, sessions::body(dir));
+        }
+        #[derive(serde::Deserialize)]
+        struct Choice {
+            /// The conversation to continue.
+            #[serde(default)]
+            open: Option<String>,
+            /// Or a new one, when there is nothing to continue.
+            #[serde(default)]
+            new: Option<bool>,
+        }
+        let choice: Choice = match serde_json::from_slice(&request.body) {
+            Ok(choice) => choice,
+            Err(error) => {
+                return Response::json(
+                    400,
+                    error_body(&format!(
+                        "the body is not the JSON this route reads (open, new): {error}"
+                    )),
+                )
+            }
+        };
+        // A conversation is where a running turn is *writing*, and the file a turn appends to is
+        // fixed when it starts. Letting the pointer move under it would leave that turn's records
+        // landing in a session the page is no longer looking at — a transcript split in two with
+        // nothing on screen saying so. So: wait, or stop it first, and the refusal says which.
+        let running = self.turns.running(slug.as_str());
+        if running > 0 {
+            return Response::json(
+                409,
+                error_body(&format!(
+                    "{running} turn(s) are running in this conversation — stop them with \
+                     POST …/{} or wait, and then open another one",
+                    cancel::ACTION
+                )),
+            );
+        }
+        match (choice.new.unwrap_or(false), choice.open) {
+            // `new` is read first so a body carrying both starts a session rather than silently
+            // ignoring half of what it asked for.
+            (true, _) => match sessions::create(dir) {
+                // The body after the pointer moved, so the answer already says `current` is the
+                // new session and the page has nothing to ask for a second time.
+                Ok(_) => Response::json(201, sessions::body(dir)),
+                Err(error) => Response::json(500, error_body(&error)),
+            },
+            (false, Some(id)) => match sessions::open(dir, &id) {
+                Ok(_) => Response::json(200, sessions::body(dir)),
+                Err(error) => Response::json(404, error_body(&error)),
+            },
+            (false, None) => Response::json(
+                400,
+                error_body("the body says neither which session to open nor to start a new one"),
+            ),
+        }
     }
 
     /// `GET`/`POST /api/apps/<slug>/escalation` — the question a turn is waiting on, and the answer.
@@ -1629,6 +1728,13 @@ enum Action {
     /// able to look. It is the route that makes the dialog able to say what happened instead of
     /// only what is about to.
     History,
+    /// List the app's conversations, and choose which one the page is on.
+    ///
+    /// The third route with two verbs, and for the same reason the other two have them: `GET` is
+    /// the list — what the drawer renders, polled never — and `POST` is the choice, which is a
+    /// state change in the smallest sense there is: one line in a file naming which conversation
+    /// the next turn appends to.
+    Sessions,
 }
 
 impl Action {
@@ -1643,12 +1749,14 @@ impl Action {
             escalation::ACTION => Some(Self::Escalation),
             cancel::ACTION => Some(Self::Cancel),
             history::ACTION => Some(Self::History),
+            sessions::ACTION => Some(Self::Sessions),
             _ => None,
         }
     }
 
     /// The verbs, for a refusal that tells the caller what would have worked.
-    const VERBS: &str = "create, build, start, stop, restart, chat, cancel, escalation or history";
+    const VERBS: &str =
+        "create, build, start, stop, restart, chat, cancel, escalation, history or sessions";
 }
 
 /// The value of one query parameter, percent-decoded.
@@ -1801,7 +1909,9 @@ fn takes_a_body(path: &str) -> bool {
         || path
             .strip_prefix("/api/apps/")
             .and_then(|rest| rest.split_once('/'))
-            .is_some_and(|(_, action)| action == chat::ACTION || action == escalation::ACTION)
+            .is_some_and(|(_, action)| {
+                action == chat::ACTION || action == escalation::ACTION || action == sessions::ACTION
+            })
 }
 
 const CONFIG_PATH: &str = "/api/config";
@@ -2836,7 +2946,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_action_is_not_found_and_the_refusal_lists_the_nine_that_exist() {
+    fn an_unknown_action_is_not_found_and_the_refusal_lists_the_ten_that_exist() {
         let scratch = Scratch::new("life-action");
         scratch.built_app("notes", "Notes");
         let router = supervised(&scratch);
@@ -2845,7 +2955,7 @@ mod tests {
         assert_eq!(unknown.status, 404);
         assert!(
             body(&unknown).contains(
-                "create, build, start, stop, restart, chat, cancel, escalation or history"
+                "create, build, start, stop, restart, chat, cancel, escalation, history or sessions"
             ),
             "{:?}",
             unknown
@@ -2857,7 +2967,7 @@ mod tests {
         assert_eq!(bare.status, 404);
         assert!(
             body(&bare).contains(
-                "create, build, start, stop, restart, chat, cancel, escalation or history"
+                "create, build, start, stop, restart, chat, cancel, escalation, history or sessions"
             ),
             "{:?}",
             bare
@@ -3575,7 +3685,7 @@ mod tests {
     fn app_page_with_grants(
         scratch: &Scratch,
         slug: &str,
-    ) -> (Router, String, String, String, String, String) {
+    ) -> (Router, String, String, String, String, String, String) {
         let router = supervised_forwarding(scratch, RecordingForwarder::answering(200)).0;
         let started = router
             .respond(&post(&format!("/api/apps/{slug}/start")))
@@ -3588,7 +3698,7 @@ mod tests {
         let cookies = set_cookies(&page);
         assert_eq!(
             cookies.len(),
-            5,
+            6,
             "a page carries one cookie per route: {cookies:?}"
         );
         let chat = cookies
@@ -3616,6 +3726,11 @@ mod tests {
             .find(|raw| raw.starts_with("deepnest-cancel="))
             .expect("the stop cookie")
             .clone();
+        let sessions = cookies
+            .iter()
+            .find(|raw| raw.starts_with("deepnest-sessions="))
+            .expect("the drawer cookie")
+            .clone();
         assert_ne!(chat, escalation, "one value must not open both routes");
         assert_ne!(
             build, chat,
@@ -3629,6 +3744,13 @@ mod tests {
         assert_ne!(cancel, history, "nor is it reading what was said");
         assert_ne!(cancel, escalation, "nor is it approving a question");
         assert_ne!(cancel, build, "nor is it watching a build");
+        // Choosing which conversation to *look at* is not choosing what to say in it, which is the
+        // reason this is a sixth value rather than a second use of the chat one.
+        assert_ne!(
+            sessions, chat,
+            "choosing a conversation is not speaking in it"
+        );
+        assert_ne!(sessions, history, "nor is it reading one");
         (
             router,
             grant_value(&chat),
@@ -3636,6 +3758,7 @@ mod tests {
             grant_value(&build),
             grant_value(&history),
             grant_value(&cancel),
+            grant_value(&sessions),
         )
     }
 
@@ -3773,13 +3896,13 @@ mod tests {
         // second tab is already using.
         let scratch = Scratch::new("grant-reload");
         scratch.built_app("notes", "Notes");
-        let (router, chat, escalation, build, history, cancel) =
+        let (router, chat, escalation, build, history, cancel, sessions) =
             app_page_with_grants(&scratch, "notes");
         let again = parse(&format!(
             "GET /app/notes/ HTTP/1.1\r\nHost: 127.0.0.1:4270\r\n\
              Cookie: deepnest-chat={chat}; deepnest-escalation={escalation}; \
              deepnest-build={build}; deepnest-history={history}; \
-             deepnest-cancel={cancel}\r\n\r\n"
+             deepnest-cancel={cancel}; deepnest-sessions={sessions}\r\n\r\n"
         ))
         .unwrap();
         let reloaded = router.respond(&again).complete();
@@ -3793,10 +3916,10 @@ mod tests {
 
     #[test]
     fn a_page_holding_one_capability_is_given_the_other_and_keeps_the_one_it_has() {
-        // The values are separate, so a page that has only one is given exactly the other four.
+        // The values are separate, so a page that has only one is given exactly the other five.
         let scratch = Scratch::new("grant-half");
         scratch.built_app("notes", "Notes");
-        let (router, chat, _, _, _, _) = app_page_with_grants(&scratch, "notes");
+        let (router, chat, _, _, _, _, _) = app_page_with_grants(&scratch, "notes");
         let again = parse(&format!(
             "GET /app/notes/ HTTP/1.1\r\nHost: 127.0.0.1:4270\r\n\
              Cookie: deepnest-chat={chat}\r\n\r\n"
@@ -3804,7 +3927,7 @@ mod tests {
         .unwrap();
         let reloaded = router.respond(&again).complete();
         let minted = set_cookies(&reloaded);
-        assert_eq!(minted.len(), 4, "{minted:?}");
+        assert_eq!(minted.len(), 5, "{minted:?}");
         assert!(
             minted
                 .iter()
@@ -3845,7 +3968,7 @@ mod tests {
             .complete();
 
         let cookies = set_cookies(&page);
-        assert_eq!(cookies.len(), 5, "{cookies:?}");
+        assert_eq!(cookies.len(), 6, "{cookies:?}");
         let chat = cookies
             .iter()
             .find(|raw| raw.starts_with("deepnest-chat="))
@@ -3957,6 +4080,129 @@ mod tests {
     }
 
     #[test]
+    fn the_drawer_lists_the_conversations_and_the_choice_moves_the_page() {
+        // The route's whole job: say what the app's conversations are, and let a person choose one
+        // of them. Both halves on one path, because the answer to either is the list.
+        let scratch = Scratch::new("sessions-route");
+        scratch.built_app("notes", "Notes");
+        let router = supervised_forwarding(&scratch, RecordingForwarder::answering(200)).0;
+
+        let listed = router
+            .respond(&authorized_get("/api/apps/notes/sessions"))
+            .complete();
+        assert_eq!(listed.status, 200, "{}", body(&listed));
+        let first: serde_json::Value = serde_json::from_str(&body(&listed)).unwrap();
+        assert_eq!(
+            first["current"], "main",
+            "an app starts on the conversation it has"
+        );
+        assert_eq!(first["sessions"].as_array().unwrap().len(), 1);
+
+        let started = router
+            .respond(&post_body("/api/apps/notes/sessions", r#"{"new":true}"#))
+            .complete();
+        assert_eq!(started.status, 201, "{}", body(&started));
+        let after: serde_json::Value = serde_json::from_str(&body(&started)).unwrap();
+        let current = after["current"].as_str().expect("a name").to_string();
+        assert_ne!(
+            current, "main",
+            "starting one did not move the page onto it"
+        );
+        assert_eq!(
+            after["sessions"].as_array().unwrap().len(),
+            2,
+            "the conversation that was there is still there: {}",
+            body(&started)
+        );
+        assert!(
+            after["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["id"] == current.as_str() && row["current"] == true),
+            "the answer does not say which one is open: {}",
+            body(&started)
+        );
+
+        // And back, by name, answering the list again rather than a word of success.
+        let reopened = router
+            .respond(&post_body("/api/apps/notes/sessions", r#"{"open":"main"}"#))
+            .complete();
+        assert_eq!(reopened.status, 200, "{}", body(&reopened));
+        let back: serde_json::Value = serde_json::from_str(&body(&reopened)).unwrap();
+        assert_eq!(back["current"], "main");
+    }
+
+    #[test]
+    fn a_conversation_that_is_not_there_is_a_not_found_and_a_body_that_says_nothing_is_a_bad_request(
+    ) {
+        let scratch = Scratch::new("sessions-refusals");
+        scratch.built_app("notes", "Notes");
+        let router = supervised_forwarding(&scratch, RecordingForwarder::answering(200)).0;
+
+        let missing = router
+            .respond(&post_body(
+                "/api/apps/notes/sessions",
+                r#"{"open":"s-20260101-000000"}"#,
+            ))
+            .complete();
+        assert_eq!(missing.status, 404, "{}", body(&missing));
+
+        // A body that names neither choice must not be read as "start a new one": the person would
+        // be moved onto an empty conversation by a request that failed to say what it wanted.
+        let nothing = router
+            .respond(&post_body("/api/apps/notes/sessions", r#"{}"#))
+            .complete();
+        assert_eq!(nothing.status, 400, "{}", body(&nothing));
+
+        let unknown_app = router
+            .respond(&authorized_get("/api/apps/nope/sessions"))
+            .complete();
+        assert_eq!(unknown_app.status, 404, "{}", body(&unknown_app));
+    }
+
+    #[test]
+    fn the_page_may_open_the_drawer_with_its_own_capability_and_not_with_another() {
+        // The sixth value, and why it is a value of its own: choosing which conversation to look
+        // at is not speaking in one, and a page handed the chat capability has not thereby been
+        // handed the ability to move the pointer.
+        let scratch = Scratch::new("grant-sessions-scope");
+        scratch.built_app("notes", "Notes");
+        let (router, chat, _, _, _, _, sessions) = app_page_with_grants(&scratch, "notes");
+
+        let listed = router
+            .respond(&with_named_grant(
+                "GET",
+                "/api/apps/notes/sessions",
+                "deepnest-sessions",
+                &sessions,
+            ))
+            .complete();
+        assert_eq!(listed.status, 200, "{}", body(&listed));
+
+        let chosen = router
+            .respond(&post_named_grant(
+                "/api/apps/notes/sessions",
+                "deepnest-sessions",
+                &sessions,
+                r#"{"new":true}"#,
+            ))
+            .complete();
+        assert_eq!(chosen.status, 201, "{}", body(&chosen));
+
+        // The chat value does not open this route, and this value does not open chat.
+        let with_chat = router
+            .respond(&with_named_grant(
+                "GET",
+                "/api/apps/notes/sessions",
+                "deepnest-chat",
+                &chat,
+            ))
+            .complete();
+        assert_eq!(with_chat.status, 401, "{}", body(&with_chat));
+    }
+
+    #[test]
     fn the_transcript_route_names_no_app_that_is_not_there() {
         let scratch = Scratch::new("history-missing");
         let router = supervised(&scratch);
@@ -3972,7 +4218,7 @@ mod tests {
         // is handed the ability to read must not thereby get the ability to send.
         let scratch = Scratch::new("grant-history-scope");
         scratch.built_app("notes", "Notes");
-        let (router, _, _, _, history, _) = app_page_with_grants(&scratch, "notes");
+        let (router, _, _, _, history, _, _) = app_page_with_grants(&scratch, "notes");
 
         let read = router
             .respond(&with_named_grant(
@@ -4012,7 +4258,7 @@ mod tests {
         // to stop must not thereby get the ability to spend.
         let scratch = Scratch::new("grant-cancel-scope");
         scratch.built_app("notes", "Notes");
-        let (router, chat, escalation, _, _, cancel) = app_page_with_grants(&scratch, "notes");
+        let (router, chat, escalation, _, _, cancel, _) = app_page_with_grants(&scratch, "notes");
 
         // Nothing is running, and that is an answer rather than an error: the page presses stop on
         // a turn that ended a moment ago all the time.
@@ -4407,7 +4653,7 @@ mod tests {
     fn the_page_can_watch_a_build_and_cannot_start_one() {
         let scratch = Scratch::new("build-status");
         scratch.built_app("notes", "Notes");
-        let (router, _, _, build, _, _) = app_page_with_grants(&scratch, "notes");
+        let (router, _, _, build, _, _, _) = app_page_with_grants(&scratch, "notes");
         let path = "/api/apps/notes/build";
 
         // The route is not open to a page that presents nothing, and it is not open to the
@@ -4454,7 +4700,7 @@ mod tests {
         // not be able to answer its own widening request with the same cookie.
         let scratch = Scratch::new("escalation-scope");
         scratch.built_app("notes", "Notes");
-        let (router, chat, escalation, _, _, _) = app_page_with_grants(&scratch, "notes");
+        let (router, chat, escalation, _, _, _, _) = app_page_with_grants(&scratch, "notes");
 
         let path = "/api/apps/notes/escalation";
         let wrong = router
@@ -4494,7 +4740,7 @@ mod tests {
     fn an_answer_with_no_question_waiting_is_a_conflict_and_not_a_success() {
         let scratch = Scratch::new("escalation-idle");
         scratch.built_app("notes", "Notes");
-        let (router, _, escalation, _, _, _) = app_page_with_grants(&scratch, "notes");
+        let (router, _, escalation, _, _, _, _) = app_page_with_grants(&scratch, "notes");
         let answered = router
             .respond(&post_named_grant(
                 "/api/apps/notes/escalation",
@@ -4517,7 +4763,7 @@ mod tests {
     fn a_body_that_does_not_name_an_answer_is_refused_rather_than_read_as_a_no() {
         let scratch = Scratch::new("escalation-body");
         scratch.built_app("notes", "Notes");
-        let (router, _, escalation, _, _, _) = app_page_with_grants(&scratch, "notes");
+        let (router, _, escalation, _, _, _, _) = app_page_with_grants(&scratch, "notes");
         let post = |body: &str| {
             router
                 .respond(&post_named_grant(
@@ -4550,7 +4796,7 @@ mod tests {
     fn escalation_reads_with_get_and_answers_with_post() {
         let scratch = Scratch::new("escalation-method");
         scratch.built_app("notes", "Notes");
-        let (router, _, escalation, _, _, _) = app_page_with_grants(&scratch, "notes");
+        let (router, _, escalation, _, _, _, _) = app_page_with_grants(&scratch, "notes");
         let response = router
             .respond(&with_named_grant(
                 "DELETE",
@@ -4577,7 +4823,7 @@ mod tests {
         // which is blocked inside a turn in the real thing — wakes with the person's answer.
         let scratch = Scratch::new("escalation-roundtrip");
         scratch.built_app("notes", "Notes");
-        let (router, _, escalation, _, _, _) = app_page_with_grants(&scratch, "notes");
+        let (router, _, escalation, _, _, _, _) = app_page_with_grants(&scratch, "notes");
         let path = "/api/apps/notes/escalation";
 
         let approver = router.requests.approver("notes");

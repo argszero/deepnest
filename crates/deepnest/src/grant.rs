@@ -90,6 +90,15 @@ pub const CANCEL_COOKIE: &str = "deepnest-cancel";
 /// when the page is served; a page that only wants to show the transcript needs only this one.
 pub const HISTORY_COOKIE: &str = "deepnest-history";
 
+/// The cookie that opens an app's session drawer.
+///
+/// Outside the "four" above only by the order they were added, not by kind: it is one read and one
+/// write, both of which touch nothing but a line in the app's own `.agent/` directory. Its write is
+/// not a message, so it spends no model budget — which is what keeps it a separate value from the
+/// chat cookie: a page that may choose which conversation to look at is not yet a page that may
+/// speak in it.
+pub const SESSIONS_COOKIE: &str = "deepnest-sessions";
+
 /// How long a minted value stays usable.
 ///
 /// Long enough for a day's work in one tab, short enough that a value lifted out of a browser
@@ -117,6 +126,7 @@ pub fn cookie_name(action: &str) -> Option<&'static str> {
         crate::escalation::ACTION => Some(ESCALATION_COOKIE),
         crate::rebuild::ACTION => Some(BUILD_COOKIE),
         crate::history::ACTION => Some(HISTORY_COOKIE),
+        crate::sessions::ACTION => Some(SESSIONS_COOKIE),
         _ => None,
     }
 }
@@ -350,6 +360,7 @@ mod tests {
         assert_eq!(cookie_name("cancel"), Some(CANCEL_COOKIE));
         assert_eq!(cookie_name("escalation"), Some(ESCALATION_COOKIE));
         assert_eq!(cookie_name("build"), Some(BUILD_COOKIE));
+        assert_eq!(cookie_name("sessions"), Some(SESSIONS_COOKIE));
         // The verbs that change a process stay behind the token, and so does anything added later
         // without a line here.
         assert_eq!(cookie_name("start"), None);

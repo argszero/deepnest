@@ -134,7 +134,16 @@ const WHAT_KEYS: [&str; 7] = ["command", "path", "pattern", "query", "url", "nam
 /// because the agent appends whole lines; a last line that does not parse is dropped rather than
 /// turning the whole transcript into a failure.
 pub fn read(app_dir: &Path) -> Vec<Turn> {
-    let Ok(text) = std::fs::read_to_string(app_dir.join(HISTORY)) else {
+    read_at(&app_dir.join(HISTORY))
+}
+
+/// The same reading, of a file named by the caller.
+///
+/// Split out for the session drawer: an app has more than one conversation now, and reading the one
+/// the page is *not* on — to list it, its title and how much it holds — must be the same parsing as
+/// reading the one it is on, or the drawer and the transcript would disagree about the same file.
+pub fn read_at(path: &Path) -> Vec<Turn> {
+    let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
     let mut turns: Vec<Turn> = Vec::new();
@@ -330,9 +339,12 @@ fn push(turns: &mut Vec<Turn>, record: &Record) {
     }
 }
 
-/// The body of the `history` route: the conversation, oldest first.
+/// The body of the `history` route: the conversation the page is on, oldest first.
+///
+/// The session is asked for rather than assumed: what a turn writes to and what the page reads from
+/// have to be one answer, and [`crate::sessions::history_path`] is where the answer lives.
 pub fn body(app_dir: &Path) -> String {
-    let turns = read(app_dir);
+    let turns = read_at(&crate::sessions::history_path(app_dir));
     serde_json::json!({ "turns": turns }).to_string()
 }
 
