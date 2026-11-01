@@ -837,6 +837,132 @@ mod tests {
     }
 
     #[test]
+    fn the_transcript_shows_each_call_and_not_only_how_many_there_were() {
+        // The defect: the transcript said "ran 12 tools" and nothing else, so which file was read,
+        // what the shell was told to run, and whether a call was denied or attempted were all
+        // unknowable from the page — while the file the route reads had every one of them.
+        assert!(
+            DIALOG_SCRIPT.contains("renderCalls"),
+            "the calls the agent made are not drawn"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("deepnest-call-name"),
+            "a row does not say which tool ran"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("deepnest-call-what"),
+            "a row does not say what the call was about"
+        );
+        // Three endings and a fourth word for an ending the file does not name. `ok` is never the
+        // fallback: a call with no answer is a call with no answer.
+        for word in [r#""failed""#, r#""refused""#, r#""done""#, r#""running""#] {
+            assert!(
+                DIALOG_SCRIPT.contains(&format!("return {word}")) || DIALOG_SCRIPT.contains(word),
+                "a row cannot say {word}"
+            );
+        }
+        assert!(
+            DIALOG_SCRIPT.contains("turn.calls"),
+            "the rows are not read from the turn"
+        );
+        // The output is behind a disclosure, and a poll must not shut it: the transcript is
+        // rebuilt every time the file grows, which while a turn runs is every round.
+        assert!(
+            DIALOG_SCRIPT.contains(r#"createElement("details")"#),
+            "the output is not collapsed"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("openedCalls"),
+            "a disclosure shuts itself on the next poll"
+        );
+        // Every one of those strings came from a model or from a file, so none of them is markup.
+        // The word appears in the file's own comment about the rule; what must not appear is a
+        // line that assigns to it.
+        assert!(
+            !DIALOG_SCRIPT.contains("innerHTML =")
+                && !DIALOG_SCRIPT.contains("insertAdjacentHTML("),
+            "the transcript builds markup instead of nodes"
+        );
+        for selector in [
+            "#deepnest-dialog-transcript .deepnest-call-name",
+            "#deepnest-dialog-transcript .deepnest-call-state",
+            "#deepnest-dialog-transcript .deepnest-call-refused .deepnest-call-state",
+            "#deepnest-dialog-transcript .deepnest-call-out pre",
+        ] {
+            assert!(DIALOG_STYLE.contains(selector), "{selector} is unstyled");
+        }
+    }
+
+    #[test]
+    fn the_answer_is_drawn_as_markdown_without_turning_it_into_markup() {
+        // The model answers in Markdown; the transcript showed the source. Rendering it is the
+        // fix, and rendering it by building HTML from a model's words would be a hole in the page.
+        for part in [
+            "renderWords",
+            "withInline",
+            "createElement(\"li\")",
+            "createElement(\"pre\")",
+        ] {
+            assert!(DIALOG_SCRIPT.contains(part), "{part} is missing");
+        }
+        // Links are the one thing a rendered answer can make the page *do*, so only the two
+        // schemes that are documents are links, and none of them may reach back into this page.
+        assert!(
+            DIALOG_SCRIPT.contains("https?:\\/\\/"),
+            "the link pattern does not restrict the scheme"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#"link.rel = "noopener noreferrer""#),
+            "a link in an answer can reach into this page"
+        );
+        let words = DIALOG_SCRIPT
+            .find("function renderWords(text)")
+            .expect("the renderer exists");
+        let body = &DIALOG_SCRIPT[words..];
+        let body = &body[..body.find("\n  }").expect("it ends")];
+        assert!(
+            !body.contains("innerHTML") && !body.contains("insertAdjacentHTML"),
+            "the renderer assembles markup"
+        );
+    }
+
+    #[test]
+    fn the_transcript_yields_to_a_reader_who_scrolled_up_and_offers_the_way_back() {
+        // A transcript that scrolls itself while it is being written to cannot be read while the
+        // agent works, which is the one moment reading it is worth something.
+        assert!(
+            DIALOG_SCRIPT.contains("function atTheLatest()"),
+            "there is no single answer to where the reader is"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("offerTheLatest"),
+            "nothing decides whether the way back is offered"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("deepnest-dialog-jump"),
+            "the way back has no control"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#"addEventListener("scroll""#),
+            "the control does not follow the reader"
+        );
+        // Offered, not taken: the only thing the button does is move the reader when pressed.
+        let press = DIALOG_SCRIPT
+            .find("jump.addEventListener(\"click\"")
+            .expect("the control is wired");
+        let handler = &DIALOG_SCRIPT[press..];
+        let handler = &handler[..handler.find("\n  });").expect("the handler ends")];
+        assert!(
+            handler.contains("transcript.scrollTop = transcript.scrollHeight"),
+            "the press does not go to the newest line: {handler}"
+        );
+        assert!(
+            DIALOG_STYLE.contains("#deepnest-dialog-jump"),
+            "the control is unstyled"
+        );
+    }
+
+    #[test]
     fn the_dialog_reads_the_conversation_back_instead_of_remembering_it() {
         // The defect this route fixes: a turn that rewrites the app reloads the page, and the
         // answer the person was reading was a variable that died with it. So the transcript is

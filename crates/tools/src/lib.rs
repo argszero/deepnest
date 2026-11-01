@@ -67,6 +67,12 @@ pub struct ToolResult {
     /// `true` when the call failed or was refused. A non-zero exit from a shell command is
     /// **not** an error: the command ran, and the model decides what its status means.
     pub is_error: bool,
+    /// `true` when the call was denied rather than attempted — a policy or a host said no.
+    ///
+    /// Kept beside `is_error` rather than folded into it: to a model the two are the same answer,
+    /// but to a person reading what happened they are not, and the file that records the turn has
+    /// nowhere else to get the difference. Always implies `is_error`.
+    pub refused: bool,
 }
 
 impl ToolResult {
@@ -75,6 +81,7 @@ impl ToolResult {
             name: name.into(),
             content: content.into(),
             is_error: false,
+            refused: false,
         }
     }
 
@@ -84,6 +91,7 @@ impl ToolResult {
             name: name.into(),
             content: content.into(),
             is_error: true,
+            refused: false,
         }
     }
 
@@ -91,7 +99,24 @@ impl ToolResult {
     /// reading `is_error`, and a distinct constructor for the code that produces it, because
     /// "denied by policy" and "failed while trying" need different words in the text.
     pub fn refused(name: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self::error(name, reason)
+        Self {
+            name: name.into(),
+            content: reason.into(),
+            is_error: true,
+            refused: true,
+        }
+    }
+
+    /// How this call ended, in one word, for the record and the transcript: `ok`, `failed` or
+    /// `refused`.
+    pub fn outcome(&self) -> &'static str {
+        if self.refused {
+            "refused"
+        } else if self.is_error {
+            "failed"
+        } else {
+            "ok"
+        }
     }
 
     /// Cut the content to `budget` characters, saying so.
@@ -194,5 +219,23 @@ mod tests {
         let refused = ToolResult::refused("write", "outside the writable set");
         assert!(refused.is_error);
         assert_eq!(refused.content, "outside the writable set");
+    }
+
+    #[test]
+    fn a_result_says_which_of_the_three_endings_it_had() {
+        // The transcript draws one row per call and says how it ended, so the difference between
+        // "denied" and "tried and failed" has to exist somewhere a reader can reach. Both are
+        // errors to a model, which is why `is_error` alone cannot carry it.
+        assert_eq!(ToolResult::ok("read", "fine").outcome(), "ok");
+        assert_eq!(
+            ToolResult::error("build", "the compiler said no").outcome(),
+            "failed"
+        );
+        assert_eq!(
+            ToolResult::refused("write", "outside the writable set").outcome(),
+            "refused"
+        );
+        assert!(ToolResult::refused("write", "no").is_error);
+        assert!(!ToolResult::error("write", "no").refused);
     }
 }
