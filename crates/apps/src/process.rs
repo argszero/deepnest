@@ -584,6 +584,7 @@ impl Supervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use socket2::{Domain, Protocol, Socket, Type};
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
 
@@ -727,8 +728,17 @@ mod tests {
         assert!(port.number() > 0);
         assert_eq!(port.addr().ip().to_string(), "127.0.0.1");
         // It was free a moment ago, so it can be taken now — this is what the app will do with it.
-        let listener = TcpListener::bind(port.addr()).unwrap();
-        assert_eq!(listener.local_addr().unwrap().port(), port.number());
+        // Taken by binding only, deliberately *without* listening: `TcpListener::bind` would bind
+        // and listen in one step, and a listening socket here would answer connections on a port
+        // this test never chose. That port comes from the same ephemeral pool the tests around it
+        // draw from, so it can be the port another test has just closed while it was checking that
+        // a closed port reads as closed — and the kernel is free to hand a just-freed number out
+        // again. Binding alone already proves the port is free: a port someone else holds fails
+        // this call with `EADDRINUSE`. The socket is closed at the end of the test either way.
+        let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+        socket.bind(&port.addr().into()).unwrap();
+        let bound = socket.local_addr().unwrap().as_socket().unwrap();
+        assert_eq!(bound.port(), port.number());
     }
 
     #[test]

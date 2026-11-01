@@ -150,6 +150,7 @@ name = "deepnest-apps"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "socket2",
  "toml",
 ]
 
