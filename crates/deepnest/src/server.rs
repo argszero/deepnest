@@ -541,6 +541,13 @@ fn answer(mut stream: TcpStream, router: &Router, stop: Arc<AtomicBool>) -> io::
         // its framing headers are the framing of everything after — and then the two connections
         // are joined for as long as both sides stay.
         Answer::Stream(through) => through.pump(&mut stream, head_only, stop),
+        // An answer this process writes itself: the head now, the body as it is produced. The
+        // connection closes when the body is done, which is what delimits an answer with no length.
+        Answer::Produced(produced) => {
+            let result = produced.write_to(&mut stream, head_only);
+            let _ = stream.shutdown(Shutdown::Write);
+            result
+        }
     }
 }
 

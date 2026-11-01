@@ -42,13 +42,16 @@
 //! token written there would be a token the app could read and spend.
 
 use std::fmt::{self, Write as _};
+use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use deepnest_apps::{BuildError, Runner, Slug, StartError, State, Supervisor, TemplateError};
 use serde_json::{json, Value};
 
-use deepnest_gateway::{Answer, ForwardError, Forwarder, HttpTransport, StdForwarder, Target};
+use deepnest_gateway::{
+    Answer, ForwardError, Forwarder, HttpTransport, Produced, StdForwarder, Target,
+};
 use deepnest_packaging::{Probe, StdProbe};
 use deepnest_web::Panel;
 
@@ -440,7 +443,7 @@ impl Router {
                 if !self.authorized(request) && !self.grant_admits(request) {
                     return Answer::Full(unauthorized());
                 }
-                Answer::Full(self.app_action(request))
+                self.app_action(request)
             }
             other if other.starts_with("/api/") => Answer::Full(if self.authorized(request) {
                 Response::json(404, error_body("no such endpoint"))
@@ -1084,30 +1087,30 @@ impl Router {
         }
     }
 
-    fn app_action(&self, request: &Request) -> Response {
+    fn app_action(&self, request: &Request) -> Answer {
         let Some(rest) = request.path.strip_prefix("/api/apps/") else {
-            return Response::json(404, error_body("no such endpoint"));
+            return Answer::Full(Response::json(404, error_body("no such endpoint")));
         };
         let Some((slug_text, action_text)) = rest.split_once('/') else {
-            return Response::json(
+            return Answer::Full(Response::json(
                 404,
                 error_body(&format!(
                     "`/api/apps/{rest}` is not an endpoint — the actions are \
                      POST /api/apps/{rest}/<{}>",
                     Action::VERBS
                 )),
-            );
+            ));
         };
         let action = match Action::parse(action_text) {
             Some(action) => action,
             None => {
-                return Response::json(
+                return Answer::Full(Response::json(
                     404,
                     error_body(&format!(
                         "`{action_text}` is not an app action — use {}",
                         Action::VERBS
                     )),
-                )
+                ))
             }
         };
         // `POST` and nothing else, for every verb whose job is to change something — a state
@@ -1133,51 +1136,53 @@ impl Router {
                 Action::Cancel => "stops a turn",
                 _ => "changes state",
             };
-            return Response::json(
-                405,
-                error_body(&format!(
-                    "{action_text} {what}: POST /api/apps/{slug_text}/{action_text}"
-                )),
-            )
-            .header("Allow", "POST");
+            return Answer::Full(
+                Response::json(
+                    405,
+                    error_body(&format!(
+                        "{action_text} {what}: POST /api/apps/{slug_text}/{action_text}"
+                    )),
+                )
+                .header("Allow", "POST"),
+            );
         }
         let slug = match Slug::parse(slug_text) {
             Ok(slug) => slug,
             Err(error) => {
-                return Response::json(
+                return Answer::Full(Response::json(
                     400,
                     error_body(&format!("`{slug_text}` is not an app name: {error}")),
-                )
+                ))
             }
         };
         // Answered before the lifecycle is looked for: a widening request belongs to a turn, not
         // to the app's process, and a page whose app is stopped may still be the page that has to
         // say no to one.
         if action == Action::Escalation {
-            return self.escalation_route(request, &slug);
+            return Answer::Full(self.escalation_route(request, &slug));
         }
         // The same exemption, for the same reason: a turn is the agent loop's, and the page that
         // wants it stopped is the page it was started from, whether or not the app is running.
         if action == Action::Cancel {
-            return self.cancel_route(&slug);
+            return Answer::Full(self.cancel_route(&slug));
         }
 
         let Some(lifecycle) = &self.lifecycle else {
-            return Response::json(
+            return Answer::Full(Response::json(
                 503,
                 error_body(
                     "this process cannot create, build, start, stop or answer an app: it was \
                      started without a lifecycle",
                 ),
-            );
+            ));
         };
         let Some(apps_dir) = &self.apps_dir else {
-            return Response::json(
+            return Answer::Full(Response::json(
                 503,
                 error_body(
                     "this process cannot find apps: it was started without an apps directory",
                 ),
-            );
+            ));
         };
 
         // A directory that is not there is "no such app", which is a different answer from any
@@ -1191,7 +1196,7 @@ impl Router {
         if action == Action::Create {
             let name = query_parameter(&request.query, "name").unwrap_or_default();
             return match deepnest_apps::create(&slug, &dir, &name) {
-                Ok(created) => Response::json(
+                Ok(created) => Answer::Full(Response::json(
                     201,
                     json!({
                         "slug": slug.as_str(),
@@ -1203,28 +1208,28 @@ impl Router {
                             .collect::<Vec<_>>(),
                     })
                     .to_string(),
-                ),
+                )),
                 // Not a fault in deepnest: the name is taken, and taking it would destroy what is
                 // already there.
-                Err(TemplateError::Occupied { .. }) => Response::json(
+                Err(TemplateError::Occupied { .. }) => Answer::Full(Response::json(
                     409,
                     error_body(&format!(
                         "`{slug}` already exists in {} — an app directory is never overwritten",
                         apps_dir.display()
                     )),
-                ),
-                Err(error) => Response::json(
+                )),
+                Err(error) => Answer::Full(Response::json(
                     500,
                     error_body(&format!("`{slug}` could not be created: {error}")),
-                ),
+                )),
             };
         }
 
         if !dir.is_dir() {
-            return Response::json(
+            return Answer::Full(Response::json(
                 404,
                 error_body(&format!("no app named `{slug}` in {}", apps_dir.display())),
-            );
+            ));
         }
 
         match action {
@@ -1234,26 +1239,32 @@ impl Router {
             Action::Cancel => unreachable!("cancel is answered before this match"),
             Action::Start => {
                 let log = deepnest_apps::log_path(&lifecycle.home, &slug);
-                started(&slug, lifecycle.supervisor.start(&slug, &dir, log))
+                Answer::Full(started(&slug, lifecycle.supervisor.start(&slug, &dir, log)))
             }
             Action::Stop => match lifecycle.supervisor.stop(&slug) {
-                Ok(state) => state_body(&slug, &state),
-                Err(error) => Response::json(
+                Ok(state) => Answer::Full(state_body(&slug, &state)),
+                Err(error) => Answer::Full(Response::json(
                     500,
                     error_body(&format!("`{slug}` could not be stopped: {error}")),
-                ),
+                )),
             },
             Action::Restart => {
                 let log = deepnest_apps::log_path(&lifecycle.home, &slug);
-                started(&slug, lifecycle.supervisor.restart(&slug, &dir, log))
+                Answer::Full(started(
+                    &slug,
+                    lifecycle.supervisor.restart(&slug, &dir, log),
+                ))
             }
-            Action::Chat => self.chat(&request.body, &dir, &slug, lifecycle),
-            Action::History => Response::json(200, history::body(&dir)),
+            Action::Chat => self.chat(request, &dir, &slug, lifecycle),
+            Action::History => Answer::Full(Response::json(200, history::body(&dir))),
             Action::Build if request.method == Method::Get => {
                 // The same route read rather than run: what the page polls after a turn reported
                 // `changed`, so it can say "building" and then reload onto the new binary — or show
                 // the compiler's last lines when there is no new binary to reload onto.
-                Response::json(200, lifecycle.rebuild.status(&slug).body(&slug).to_string())
+                Answer::Full(Response::json(
+                    200,
+                    lifecycle.rebuild.status(&slug).body(&slug).to_string(),
+                ))
             }
             Action::Build => {
                 // The README's promise, kept before the first step instead of discovered by a
@@ -1263,14 +1274,14 @@ impl Router {
                 // `Undetermined` refuses too, because "cannot tell" is not "yes".
                 let preflight = deepnest_packaging::check(lifecycle.preflight.as_ref());
                 if !preflight.ready() {
-                    return Response::json(
+                    return Answer::Full(Response::json(
                         412,
                         error_body(&format!("`{slug}` cannot be built yet: {preflight}")),
-                    );
+                    ));
                 }
                 let log = deepnest_apps::build_log_path(&lifecycle.home, &slug);
                 match deepnest_apps::build(&dir, log, lifecycle.builder.as_ref()) {
-                    Ok(built) => Response::json(
+                    Ok(built) => Answer::Full(Response::json(
                         200,
                         json!({
                             "slug": slug.as_str(),
@@ -1278,18 +1289,18 @@ impl Router {
                             "log": built.log.display().to_string(),
                         })
                         .to_string(),
-                    ),
+                    )),
                     // A directory that is not an app is the same reading as an app that is not
                     // there: the manifest is what makes it one.
                     Err(error @ BuildError::NotApp { .. }) => {
-                        Response::json(404, error_body(&error.to_string()))
+                        Answer::Full(Response::json(404, error_body(&error.to_string())))
                     }
                     // A build that failed is a build that failed, however it failed: the report
                     // names the step and the file the step's output is in.
-                    Err(error) => Response::json(
+                    Err(error) => Answer::Full(Response::json(
                         500,
                         json!({ "slug": slug.as_str(), "error": error.to_string() }).to_string(),
-                    ),
+                    )),
                 }
             }
         }
@@ -1431,37 +1442,37 @@ impl Router {
     /// response. The model is built per request rather than held: `POST /api/config` can change the
     /// endpoint at any moment, and an agent assembled at startup would answer the old one until the
     /// next start.
-    fn chat(&self, body: &[u8], dir: &Path, slug: &Slug, lifecycle: &Lifecycle) -> Response {
-        let ask = match chat::ask_from(body) {
+    fn chat(&self, request: &Request, dir: &Path, slug: &Slug, lifecycle: &Lifecycle) -> Answer {
+        let ask = match chat::ask_from(&request.body) {
             Ok(ask) => ask,
-            Err(reason) => return Response::json(400, error_body(&reason)),
+            Err(reason) => return Answer::Full(Response::json(400, error_body(&reason))),
         };
         let Some(config_path) = &self.config_path else {
-            return Response::json(
+            return Answer::Full(Response::json(
                 503,
                 error_body(
                     "this process has no config file to read: it was started without one, so \
                      there is no model endpoint to ask",
                 ),
-            );
+            ));
         };
         let llm = match crate::config::load(config_path) {
             Ok(Some(config)) => config.llm,
             // First run, and the answer is the form rather than a fault.
             Ok(None) => {
-                return Response::json(
+                return Answer::Full(Response::json(
                     412,
                     error_body(&format!(
                         "no model is configured yet — POST {CONFIG_PATH} with base_url, api_key \
                          and model, then send the message again"
                     )),
-                )
+                ))
             }
             Err(error) => {
-                return Response::json(
+                return Answer::Full(Response::json(
                     500,
                     error_body(&format!("the config could not be read: {error}")),
-                )
+                ))
             }
         };
 
@@ -1486,9 +1497,53 @@ impl Router {
             build_note: lifecycle.rebuild.note(slug),
             cancel: ticket.cancellation(),
         };
-        let reply = chat::answer(model, &lifecycle.home, dir, slug, &ask, &terms);
-        starts_a_rebuild_if_the_app_changed(&reply.body, &lifecycle.rebuild, slug);
-        Response::json(reply.status, reply.body.to_string())
+        // A caller that did not ask to watch gets exactly what this route has always answered:
+        // one body, produced by one turn that nobody observes.
+        if !wants_events(request) {
+            let reply = chat::answer(model, &lifecycle.home, dir, slug, &ask, &terms);
+            starts_a_rebuild_if_the_app_changed(&reply.body, &lifecycle.rebuild, slug);
+            return Answer::Full(Response::json(reply.status, reply.body.to_string()));
+        }
+
+        // Everything the body needs is owned rather than borrowed, because that body runs after
+        // this call has returned: the head has to be on the wire before the turn starts, not after
+        // it ends. That ordering is the whole point of the answer — a head written first is a
+        // client that is reading an answer while the answer is still being written.
+        let home = lifecycle.home.clone();
+        let app_dir = dir.to_path_buf();
+        let slug = slug.clone();
+        let rebuild = Arc::clone(&lifecycle.rebuild);
+        Answer::Produced(Produced::new(events_head(), move |out| {
+            // The ticket is held here rather than in the request, because the turn now outlives
+            // the call that started it — and dropping the ticket is what takes the turn out of the
+            // registry a `POST …/cancel` looks in, so it must live exactly as long as the turn.
+            let _ticket = ticket;
+            let mut unwritable: Option<std::io::Error> = None;
+            let reply = {
+                let mut on_text = |text: &str| {
+                    if unwritable.is_some() {
+                        // The page closed the tab. The turn keeps running — reporting it as
+                        // cancelled would put a stop in the transcript that nobody pressed — and
+                        // the writes that follow are skipped rather than retried against a socket
+                        // that is not there.
+                        return;
+                    }
+                    if let Err(error) = write_event(&mut *out, "text", &json!({ "text": text })) {
+                        unwritable = Some(error);
+                    }
+                };
+                chat::watched(model, &home, &app_dir, &slug, &ask, &terms, &mut on_text)
+            };
+            if let Some(error) = unwritable {
+                return Err(error);
+            }
+            // Read from the reply, which is only known now: the JSON path does this one line
+            // earlier only because it already holds the reply. A writing turn rebuilds either way.
+            starts_a_rebuild_if_the_app_changed(&reply.body, &rebuild, &slug);
+            let kind = if reply.status == 200 { "done" } else { "error" };
+            write_event(out, kind, &reply.body)?;
+            out.flush()
+        }))
     }
 
     fn health(&self) -> String {
@@ -1500,6 +1555,45 @@ impl Router {
         })
         .to_string()
     }
+}
+
+/// Whether this request asked for the answer as it is written.
+///
+/// One header decides it, and the absence of that header is the default rather than a second
+/// case: a client that has never heard of a stream must keep receiving the one body this route has
+/// always answered. `Accept` is a list, so the match is on containment rather than equality — a
+/// browser that sends `text/event-stream, */*` is asking for the stream.
+fn wants_events(request: &Request) -> bool {
+    request
+        .header("accept")
+        .is_some_and(|accept| accept.contains("text/event-stream"))
+}
+
+/// The head of a streamed chat answer, framed here rather than by [`Response`].
+///
+/// No `Content-Length`, and `Connection: close`: the length is not known until the turn is over, so
+/// the end of the answer is the end of the connection. That is the one framing that cannot lie
+/// about a body still being produced — a length declared here would be a guess, and a chunked
+/// encoding would be this file re-implementing framing the HTTP layer already owns for every other
+/// answer.
+fn events_head() -> Vec<u8> {
+    b"HTTP/1.1 200 OK\r\n\
+      Content-Type: text/event-stream; charset=utf-8\r\n\
+      Cache-Control: no-store\r\n\
+      X-Content-Type-Options: nosniff\r\n\
+      Connection: close\r\n\
+      \r\n"
+        .to_vec()
+}
+
+/// One server-sent event, flushed as soon as it is written.
+///
+/// The flush is the point rather than a formality: a writer that buffered two events would deliver
+/// the first one only when the second existed, which is the delay this whole answer exists to
+/// remove.
+fn write_event(out: &mut dyn IoWrite, kind: &str, data: &Value) -> std::io::Result<()> {
+    write!(out, "event: {kind}\ndata: {data}\n\n")?;
+    out.flush()
 }
 
 /// The three state changes an app has.
@@ -2809,6 +2903,38 @@ mod tests {
             "{:?}",
             response
         );
+    }
+
+    /// A refusal is never a stream. The page's first job with an event-stream answer is to parse
+    /// events, so answering a request it cannot serve with one would make the failure arrive as a
+    /// parse error instead of the sentence that says what to do.
+    #[test]
+    fn a_chat_that_asks_for_events_is_still_refused_with_a_body_when_there_is_no_model() {
+        let scratch = Scratch::new("chat-events-first-run");
+        scratch.app("notes", "Notes");
+        let router = supervised(&scratch).with_config_path(scratch.base.join("config.toml"));
+
+        let mut request = post_body(
+            "/api/apps/notes/chat",
+            r#"{"message":"what is on my list?"}"#,
+        );
+        request
+            .headers
+            .push(("accept".to_string(), "text/event-stream".to_string()));
+
+        let answer = router.respond(&request);
+        assert!(
+            !matches!(answer, Answer::Produced(_)),
+            "an answer that cannot be an answer was started as a stream"
+        );
+        let response = answer.complete();
+        assert_eq!(response.status, 412, "{:?}", response);
+        assert!(
+            error_text(&response).contains("POST /api/config"),
+            "{:?}",
+            response
+        );
+        assert_eq!(response.content_type, "application/json");
     }
 
     #[test]

@@ -102,13 +102,18 @@ impl std::error::Error for ForwardError {}
 /// What an app answered.
 ///
 /// One variant per kind of answer, and the second one exists because a proxy that can only carry
-/// bodies cannot carry a conversation.
+/// bodies cannot carry a conversation. The third is the one deepnest produces itself, and it is
+/// here rather than anywhere else because *what this connection does next* is one decision: the
+/// server's loop matches on this type and must answer every case, so a kind kept somewhere else
+/// would be a case that loop could forget.
 #[derive(Debug)]
 pub enum Answer {
     /// A complete answer: read whole, adapted to the prefix, written as one response.
     Full(Response),
     /// A head and a live connection to the app, passed on as the bytes arrive.
     Stream(Stream),
+    /// A head now, and this process's own body produced afterwards.
+    Produced(Produced),
 }
 
 impl Answer {
@@ -116,14 +121,83 @@ impl Answer {
     ///
     /// # Panics
     ///
-    /// When this answer is a connection. A caller that can only take a body has to ask first, and
-    /// silently dropping a stream would report success for bytes nobody received.
+    /// When this answer is a connection, or a body that has not been produced yet. A caller that
+    /// can only take a body has to ask first, and silently dropping a stream — or a body nobody
+    /// ever wrote — would report success for bytes nobody received.
     #[track_caller]
     pub fn complete(self) -> Response {
         match self {
             Self::Full(response) => response,
             Self::Stream(_) => panic!("this answer is a connection, not a body"),
+            Self::Produced(_) => panic!("this answer's body has not been produced yet"),
         }
+    }
+}
+
+/// An answer this server writes itself, a piece at a time.
+///
+/// The two kinds above are the app's. This one is deepnest's own: a route that has something to say
+/// before it has finished working out what to say, and a client that should see each piece as it
+/// exists instead of the whole of it at the end. The head goes out first and the body is **called**
+/// afterwards, so the difference between this and [`Answer::Full`] is not the bytes but when they
+/// are produced — which is the only thing that makes "watch the answer being written" possible.
+///
+/// The head is already framed bytes rather than a [`Response`] for the reason [`Stream`] keeps its
+/// head as bytes: a response would write a `Content-Length`, and the whole point here is that the
+/// length is not known until the body has been produced. The answer is delimited by the connection
+/// closing, which is what `Connection: close` in the head states.
+pub struct Produced {
+    head: Vec<u8>,
+    body: ProducedBody,
+}
+
+/// The body of a [`Produced`] answer: written when it is time to write it, and not before.
+///
+/// Named rather than spelled into the field, because a reader who wants to know what a body *is*
+/// here should not have to parse three sigils and a bound to find out.
+type ProducedBody = Box<dyn FnOnce(&mut dyn Write) -> io::Result<()> + Send>;
+
+impl Produced {
+    /// An answer whose head is ready and whose body is produced when it is written.
+    pub fn new(
+        head: Vec<u8>,
+        body: impl FnOnce(&mut dyn Write) -> io::Result<()> + Send + 'static,
+    ) -> Self {
+        Self {
+            head,
+            body: Box::new(body),
+        }
+    }
+
+    /// The bytes the client receives first.
+    pub fn head(&self) -> &[u8] {
+        &self.head
+    }
+
+    /// Write the head, then produce the body.
+    ///
+    /// The head is flushed before the body is called, because a client has to be reading an answer
+    /// while the rest of it is being produced — a head held in a buffer until the body finished
+    /// would be this type behaving exactly like the one it was added beside.
+    pub fn write_to(self, out: &mut dyn Write, head_only: bool) -> io::Result<()> {
+        out.write_all(&self.head)?;
+        out.flush()?;
+        if head_only {
+            // `HEAD` promised no body, so the head is the whole answer — and the body is never
+            // produced, which for a turn means it never runs.
+            return Ok(());
+        }
+        (self.body)(out)
+    }
+}
+
+impl std::fmt::Debug for Produced {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The closure has no name to print, and wrapping the head's bytes in a `Debug` of their
+        // own would fill a log line with a whole response head.
+        f.debug_struct("Produced")
+            .field("head_bytes", &self.head.len())
+            .finish()
     }
 }
 
@@ -1019,6 +1093,8 @@ mod tests {
                 assert_eq!(response.body, b"nope!");
             }
             Answer::Stream(_) => panic!("a 400 was treated as a tunnel"),
+            // Forwarding an app's bytes never yields an answer this process produces itself.
+            Answer::Produced(_) => panic!("a forwarded answer was produced locally"),
         }
     }
 
@@ -1057,6 +1133,7 @@ mod tests {
         let stream = match answer {
             Answer::Stream(stream) => stream,
             Answer::Full(response) => panic!("an event stream was read whole: {response:?}"),
+            Answer::Produced(_) => panic!("a forwarded answer was produced locally"),
         };
         assert_eq!(stream.kind(), StreamKind::Events);
         assert!(stream.head().starts_with(b"HTTP/1.1 200 OK\r\n"));
@@ -1232,5 +1309,46 @@ mod tests {
         browser.read_to_end(&mut received).unwrap();
         assert_eq!(received, b"HTTP/1.1 101 Switching Protocols\r\n\r\n");
         app.join().unwrap();
+    }
+
+    /// A produced answer writes its head before its body exists — which is the whole difference
+    /// between it and a complete response, and the reason it was added.
+    #[test]
+    fn a_produced_answer_writes_the_head_before_the_body_is_produced() {
+        let produced = Produced::new(
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec(),
+            |out| {
+                out.write_all(b"one\n")?;
+                out.write_all(b"two\n")
+            },
+        );
+        let mut written = Vec::new();
+        produced.write_to(&mut written, false).unwrap();
+        assert_eq!(
+            String::from_utf8(written).unwrap(),
+            "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\none\ntwo\n"
+        );
+    }
+
+    /// `HEAD` promised no body, so a body that would have taken a minute is never produced at all.
+    #[test]
+    fn a_head_only_produced_answer_never_produces_the_body() {
+        let produced = Produced::new(b"HTTP/1.1 200 OK\r\n\r\n".to_vec(), |_| {
+            panic!("the body of a HEAD answer was produced")
+        });
+        let mut written = Vec::new();
+        produced.write_to(&mut written, true).unwrap();
+        assert_eq!(written, b"HTTP/1.1 200 OK\r\n\r\n");
+    }
+
+    /// A caller that can only take a body must not silently get none: dropping a body nobody wrote
+    /// would report success for bytes that do not exist.
+    #[test]
+    #[should_panic(expected = "has not been produced yet")]
+    fn a_produced_answer_is_not_a_body() {
+        let _ = Answer::Produced(Produced::new(b"HTTP/1.1 200 OK\r\n\r\n".to_vec(), |_| {
+            Ok(())
+        }))
+        .complete();
     }
 }
