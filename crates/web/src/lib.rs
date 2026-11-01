@@ -2037,6 +2037,49 @@ mod tests {
     }
 
     #[test]
+    fn the_panel_hands_its_own_type_to_every_node_the_reset_touches() {
+        // `#deepnest-dialog *` starts with `all: initial`, which is what stops an app's stylesheet
+        // from reaching in. It also put every descendant that relied on inheriting its type back to
+        // the browser's *default*, which is not what this panel is: measured in Chrome, 22 kinds of
+        // node — the answer's paragraphs, list items, table cells and links, the spans of a tool
+        // call, the disclosure above a call's output, the composer's form — came out Times, 16px,
+        // rgb(0, 0, 0) inside a 12–13px sans panel. The agent's answer was the largest and oldest
+        // type in the dialog.
+        //
+        // One rule, and `inherit` rather than a copied font: a rule per tag answers only for the
+        // tags someone remembered, and this file has already had to grow such a list twice.
+        let reset = DIALOG_STYLE
+            .find("#deepnest-dialog * {")
+            .expect("the reset no longer separates the root from its descendants");
+        let after = &DIALOG_STYLE[reset..];
+        let block = &after[..after.find('}').expect("the reset rule ends")];
+        assert!(
+            block.contains("font: inherit;"),
+            "every descendant is still left at the browser's own family, size and line-height"
+        );
+        assert!(
+            block.contains("color: inherit;"),
+            "every descendant is still left at the browser's initial colour, which is black"
+        );
+        // Neither property is inherited from the parent's *rule*, only from its value — emphasis
+        // and a link marker are therefore two things the reset takes that no `inherit` can give
+        // back, so each states its own.
+        for rule in [
+            "#deepnest-dialog .deepnest-said strong",
+            "#deepnest-dialog .deepnest-said em",
+        ] {
+            assert!(
+                DIALOG_STYLE.contains(rule),
+                "{rule} is unstyled, so emphasis draws like the words around it"
+            );
+        }
+        assert!(
+            DIALOG_STYLE.contains("text-decoration: underline;"),
+            "a link is marked by colour alone, which a reader who cannot see blue does not get"
+        );
+    }
+
+    #[test]
     fn the_dialog_says_what_went_wrong_instead_of_failing_silently() {
         // Three failures a user can hit, each with a different next step, and the box has to name
         // the step: the grant expired, the server is gone, and the answer was a refusal.
