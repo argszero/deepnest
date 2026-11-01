@@ -974,9 +974,9 @@ mod tests {
 
     #[test]
     fn the_conversation_can_be_reached_by_a_keyboard() {
-        // The transcript is the one box in the dialog that scrolls on its own — `max-height:
-        // 18rem` and `overflow-y: auto` — and a box a keyboard cannot focus is a box a keyboard
-        // cannot scroll. Measured in Chrome with real key presses, before this: the tab order ran
+        // The transcript is the one box in the dialog that scrolls on its own — `overflow-y: auto`,
+        // bounded now by the room the panel has left rather than by a cap of its own — and a box a
+        // keyboard cannot focus is a box a keyboard cannot scroll. Measured in Chrome with real key presses, before this: the tab order ran
         // from the ball to "Conversations", then through the twelve copy buttons *inside* the
         // transcript, then on to the jump button and the message box. The transcript itself never
         // took focus, so with a keyboard the answers above the fold could not be read at all.
@@ -1007,6 +1007,47 @@ mod tests {
         assert!(
             DIALOG_STYLE.contains("outline-offset: -2px"),
             "the focus ring is drawn outside the box it belongs to"
+        );
+    }
+
+    #[test]
+    fn the_conversation_takes_the_height_the_panel_has_left() {
+        // The panel and the conversation each carried a ceiling, and the pair of them kept a single
+        // exchange out of sight. Measured in Chrome at 840, 1100 and 1400 px viewports: the panel
+        // was 512 px at all three (61%, 47% and 37% of the screen), the conversation's window was
+        // 280 px of it, and one exchange came to 365 px once its code block folded (#85) — so the
+        // answer that had just been written could not be read whole at any window size.
+        //
+        // Raising only the panel's ceiling was not the fix: the panel is sized by its content, and
+        // the content was capped first. Measured, that bought 280 → 288 px. Both had to move.
+        assert!(
+            DIALOG_STYLE.contains("max-height: min(44rem, 78vh)"),
+            "the panel still refuses the height the viewport has"
+        );
+        // The declaration form, semicolon and all: the comment above the rule records the cap this
+        // replaced, and an assertion that only looked for the words would fail on that record.
+        assert!(
+            !DIALOG_STYLE.contains("max-height: 18rem;"),
+            "the conversation still caps itself, so the panel's room never reaches it"
+        );
+        // What bounds it instead is the room left after the composer: it flexes, and `min-height: 0`
+        // is what lets it shrink below its content when the panel is short.
+        assert!(
+            DIALOG_STYLE.contains("flex: 1 1 auto"),
+            "the conversation does not take the room the panel has left"
+        );
+        assert!(
+            DIALOG_STYLE.contains("min-height: 0"),
+            "the conversation cannot shrink below its content, so a short panel overflows"
+        );
+        // Measured after: window 424 px at an 840 px viewport and 472 px from 1100 up, transcripts
+        // 1.7 and 1.5 windows tall, and the newest exchange visible whole for the first time.
+        //
+        // A ceiling that is only a ceiling must not make an empty conversation taller: measured
+        // with nothing to show, the panel is 232 px — the same as before this change.
+        assert!(
+            !DIALOG_STYLE.contains("min-height: 6rem"),
+            "the conversation holds a floor, so an empty panel is taller than its composer needs"
         );
     }
 

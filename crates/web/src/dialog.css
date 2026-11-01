@@ -83,7 +83,15 @@
 /* Wider than the note-and-one-link panel it started as: a transcript needs a reading measure, and
  * a box that scrolls its own conversation rather than growing past the page it sits on. The column
  * layout and `overflow: hidden` are what keep that promise: a panel that is only `max-height` tall
- * with block children draws the newest lines *outside* its own rounded border. */
+ * with block children draws the newest lines *outside* its own rounded border.
+ *
+ * The ceiling is most of the viewport rather than two thirds of it, and the transcript gives up its
+ * own cap below, because the two together were keeping a single exchange out of sight: measured in
+ * Chrome at 840, 1100 and 1400 px viewports, the panel was 512 px in all three (61%, 47% and 37% of
+ * the screen), the conversation's window was 280 px of it, and one exchange fell to 365 px once its
+ * code block folded (#85) — so the newest exchange could not be read whole at any window size. The
+ * panel is still sized by its content and only capped here, so a short conversation draws a short
+ * panel; the ceiling is what a long one may take. */
 #deepnest-dialog-panel {
   display: flex;
   flex-direction: column;
@@ -92,7 +100,7 @@
   right: 0;
   bottom: 2.9rem;
   width: 22rem;
-  max-height: min(32rem, 70vh);
+  max-height: min(44rem, 78vh);
   padding: 0.85rem 0.95rem;
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 10px;
@@ -582,13 +590,20 @@
 }
 
 /* The conversation. Its own scroll box, because it is the one part of this panel that grows
- * without bound: a long session must not push the composer off the screen. */
+ * without bound: a long session must not push the composer off the screen.
+ *
+ * No cap of its own. It had `max-height: 18rem`, which came to 288 px and was what actually held
+ * the window short: the panel's own ceiling could not give the conversation more, because the panel
+ * is sized by its content and the content was capped here first. Measured in Chrome, raising only
+ * the panel's ceiling moved the window 280 → 288 px — eight pixels, one exchange still unreadable —
+ * while dropping this one and raising that ceiling together gave it 424 px at an 840 px viewport and
+ * 472 px at 1100 and up, and the newest exchange fitted whole for the first time. What bounds it now
+ * is the room the panel has left after the composer, which is the thing that was always meant to. */
 
 #deepnest-dialog-transcript {
   display: block;
   box-sizing: border-box;
   margin: 0 0 0.6rem;
-  max-height: 18rem;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -599,6 +614,8 @@
   flex: none;
 }
 
+/* `min-height: 0` rather than a floor of its own: with nothing to show, the conversation takes no
+ * room and the panel is as small as it was before this change — measured at 232 px both ways. */
 #deepnest-dialog-panel > #deepnest-dialog-transcript {
   flex: 1 1 auto;
   min-height: 0;
