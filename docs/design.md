@@ -623,7 +623,16 @@ zstd-compressed toolchain payload unpacked on first run **atomically** — into 
 - **A link is checked where it is created.** A symlink is how a payload writes through a name, so its target is resolved lexically against its own entry's depth and must stay inside the toolchain root. Because a link that would escape never exists in the tree, no later entry can reach outside by writing through one, and the per-entry check is enough.
 - **A payload makes files, directories and links, and nothing else.** A device node, a fifo or a socket is refused; nothing in a toolchain is one, and creating one needs a privilege the unpack should not hold.
 
-Still to come: **the payload itself** — the archive this code reads, which the release pipeline produces and the build does not yet carry — and **the signature over it**, plus signing every bundled Mach-O before packing.
+**The payload's writer has landed too** (`decided in implementation`, 2026-11-01). `crates/packaging/src/pack.rs` is the other end of `unpack`: a toolchain tree in, the tar-in-zstd it reads out. Nothing new was invented — the reader was written first and its shape was the specification — so what the four decisions are about is what a *writer* owes a reader. Four:
+
+- **A stream out, never a `Vec`.** The payload is the largest thing deepnest carries, and a `pack` returning bytes would hold a second copy of the whole toolchain in memory at the moment the machine is already busy. The caller passes a writer.
+- **The same tree packs to the same bytes.** Entries are sorted and the header's time and ownership fields are zeroed, because a packer that emitted `read_dir` order with each file's own mtime would turn an unchanged tree into a different archive on every build — and this archive is signed and shipped, so "the payload did not change" has to be something two builds can agree on.
+- **What the reader refuses, the writer refuses first** — through the reader's own `checked_link`, not a second copy of the rule. The reader must refuse an escaping link because it cannot see who built the archive; the packer must refuse it because it can, at the one moment the fix is a line in a build script instead of a first run that ends in a sentence about a toolchain the user never asked about. The same holds for a fifo, a socket or a device node.
+- **A tree deepnest already unpacked is refused, by the marker it carries.** `adopt` writes `payload`; an archive carrying one would contradict the id the next unpack is told to publish, and `adopt` would overwrite one of them without a word. Pointing the packer at `~/.deepnest/toolchain/<version>/` is the mistake that produces it, so the refusal names that file.
+
+A hard link is packed as a file: it is a second name for the same bytes, and finding the pairs would mean an inode table this crate has no other use for. What unpacks is the same tree either way.
+
+Still to come: **where the archive lives** — the release pipeline produces it, and the build does not carry it yet — and **the signature over it**, plus signing every bundled Mach-O before packing.
 
 macOS ships signed and notarized (`host 20:48`). Every Mach-O inside the bundled toolchain must be **signed before packing**, because first-run unpacking does not re-sign, and an unsigned child process is refused under hardened runtime. Windows ships unsigned (`host 20:56`) — SmartScreen will warn on first run, and both README and the first-run page say so plainly rather than teaching users to bypass security prompts blindly.
 
