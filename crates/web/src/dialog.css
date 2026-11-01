@@ -404,6 +404,16 @@
   overflow-wrap: anywhere;
 }
 
+/* What came with the question, when the question had words of its own. */
+#deepnest-dialog-transcript .deepnest-pictures {
+  display: block;
+  box-sizing: border-box;
+  margin: 0.1rem 0 0;
+  font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: rgba(122, 167, 255, 0.9);
+  overflow-wrap: anywhere;
+}
+
 /* A note is why something stopped, so it reads as a remark rather than as the answer. */
 #deepnest-dialog-transcript .deepnest-note {
   display: block;

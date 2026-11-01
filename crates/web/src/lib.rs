@@ -642,6 +642,31 @@ mod tests {
     }
 
     #[test]
+    fn the_dialog_draws_a_message_that_was_only_a_picture() {
+        // The read-back half of the paste: a message sent as a screenshot alone has no text in the
+        // record, so a transcript that drew `turn.user` drew an empty row and the answer hung
+        // under nothing. The picture is what the turn was about, and the page has to say so.
+        assert!(
+            DIALOG_SCRIPT.contains("turn.pictures"),
+            "the transcript never reads the picture count"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("picturesIn("),
+            "there is no phrase for a number of pictures"
+        );
+        // The words are used when they are there — the file has no text only sometimes.
+        assert!(
+            DIALOG_SCRIPT.contains("turn.user || (pictures > 0"),
+            "an empty question is drawn as an empty line"
+        );
+        // And a question that had both says what came with it.
+        assert!(DIALOG_SCRIPT.contains("\"with \" + picturesIn(pictures)"));
+        assert!(DIALOG_SCRIPT.contains("deepnest-pictures"));
+        // `all: initial` means an unstyled line inherits nothing, so it has to be in the sheet.
+        assert!(DIALOG_STYLE.contains("#deepnest-dialog-transcript .deepnest-pictures"));
+    }
+
+    #[test]
     fn the_dialog_reads_the_conversation_back_instead_of_remembering_it() {
         // The defect this route fixes: a turn that rewrites the app reloads the page, and the
         // answer the person was reading was a variable that died with it. So the transcript is
