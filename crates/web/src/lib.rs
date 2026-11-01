@@ -1996,6 +1996,47 @@ mod tests {
     }
 
     #[test]
+    fn an_answer_the_transcript_holds_is_not_drawn_twice() {
+        // The box is the answer's *live* drawing — the only surface with text the record does not
+        // have yet — and the transcript is the record. Once the turn is on disk and drawn, the same
+        // answer in both is one copy too many: measured in Chrome, a settled turn showed the same
+        // 88 characters twice, in a 40 px answer box over a 148 px transcript, inside a panel 470 px
+        // wide. The box gives its copy up, and this test holds the three parts that do it.
+        assert!(
+            DIALOG_SCRIPT.contains("function yieldToTranscript()"),
+            "nothing hands the answer over, so it stays in the box as well as in the transcript"
+        );
+        assert!(
+            DIALOG_STYLE.contains("#deepnest-dialog-answer.settled"),
+            "a handed-over box has no rule, so it is drawn exactly as it was before"
+        );
+        // Not `hidden`: `role="status"` is how an answer reaches someone who cannot see it, and a
+        // hidden region announces nothing. Out of the layout, still in the accessibility tree.
+        assert!(
+            DIALOG_STYLE.contains("clip-path: inset(50%)"),
+            "the box is still taking up room, so the duplication is only moved"
+        );
+        // Only once the transcript demonstrably holds the newest answer: a search that filtered that
+        // turn out, or a record whose reply is not written yet, must leave the box as the one copy.
+        assert!(
+            DIALOG_SCRIPT.contains(
+                "var drawsTheAnswer = recent.indexOf(newest) !== -1 && !!newest.turn.reply;"
+            ),
+            "the hand-over does not wait for the transcript to hold the answer"
+        );
+        // And only while nothing newer was put in the box: the rebuild line and the next turn's
+        // progress line both arrive after the answer, and either is a line a person still needs.
+        assert!(
+            DIALOG_SCRIPT.contains("if (drawnTheAnswer && shownAnswer === handed) {"),
+            "a line the person still needs to read can be taken by the hand-over"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#"answer.classList.remove("settled");"#),
+            "a box handed over once never comes back, so the next answer is drawn nowhere"
+        );
+    }
+
+    #[test]
     fn the_dialog_says_what_went_wrong_instead_of_failing_silently() {
         // Three failures a user can hit, each with a different next step, and the box has to name
         // the step: the grant expired, the server is gone, and the answer was a refusal.
