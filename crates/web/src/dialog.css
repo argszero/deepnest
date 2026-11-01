@@ -680,11 +680,90 @@
   color: #ffffff;
 }
 
+/* The reset at the top of this file sets `display` on *every* descendant, and the initial value of
+ * `display` is `inline`. So a renderer that built the right nodes still drew them wrong: measured
+ * in Chrome against the running binary, every one of `P`, `H4`, `UL`, `OL` and `LI` computed to
+ * `display: inline` — the answer's paragraphs ran together into one block of prose, its headings
+ * were the size of the text around them, and its lists lost both their bullets and their numbers
+ * while keeping their content. The fenced block below already had to say `display: block` for this
+ * same reason; these are the rest of them. */
+#deepnest-dialog-transcript .deepnest-said p,
+#deepnest-dialog-transcript .deepnest-said ul,
+#deepnest-dialog-transcript .deepnest-said ol,
+#deepnest-dialog-transcript .deepnest-said h3,
+#deepnest-dialog-transcript .deepnest-said h4,
+#deepnest-dialog-transcript .deepnest-said h5,
+#deepnest-dialog-transcript .deepnest-said h6 {
+  display: block;
+  box-sizing: border-box;
+  max-width: 100%;
+}
+
+#deepnest-dialog-transcript .deepnest-said p {
+  margin: 0.3rem 0 0;
+}
+
+/* Headings shrink as they nest, and none of them reaches the panel's own title: the answer is a
+ * reply inside someone's app, not a document that outranks it. */
+#deepnest-dialog-transcript .deepnest-said h3 {
+  margin: 0.5rem 0 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: #ffffff;
+}
+
+#deepnest-dialog-transcript .deepnest-said h4,
+#deepnest-dialog-transcript .deepnest-said h5,
+#deepnest-dialog-transcript .deepnest-said h6 {
+  margin: 0.45rem 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: #dfe3ea;
+}
+
+/* A list item is `list-item` rather than `block`: that is the value that draws the marker outside
+ * the text, and `outside` is what keeps the wrapped second line of a long point aligned with the
+ * first instead of under the bullet. */
+#deepnest-dialog-transcript .deepnest-said ul,
+#deepnest-dialog-transcript .deepnest-said ol {
+  margin: 0.3rem 0 0;
+  padding-left: 1.15rem;
+  list-style-position: outside;
+}
+
+#deepnest-dialog-transcript .deepnest-said ul {
+  list-style-type: disc;
+}
+
+#deepnest-dialog-transcript .deepnest-said ol {
+  list-style-type: decimal;
+}
+
+#deepnest-dialog-transcript .deepnest-said li {
+  display: list-item;
+  margin: 0.15rem 0 0;
+}
+
+/* The reset reaches the `li` too, so its `list-style-type` is the initial `disc` whatever the `ol`
+ * around it says — an inherited `decimal` never arrives. Measured: `OL` computed `decimal` while
+ * its items computed `disc`, which draws a numbered list as bullets. */
+#deepnest-dialog-transcript .deepnest-said ol > li {
+  list-style-type: decimal;
+}
+
+/* `color` is stated rather than inherited, and that is the whole point of this comment: the reset
+ * at the top of this file sets `color` on *every* descendant, so code inside an answer does not
+ * inherit the answer's colour — it keeps the reset's black. Measured in Chrome against the running
+ * binary, the way a person would have found it: `pre > code` was rgb(0, 0, 0) on a 35%-black block,
+ * which is a code block nobody can read. */
 #deepnest-dialog-transcript .deepnest-said code {
   font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
   padding: 0 0.2rem;
   border-radius: 3px;
   background: rgba(255, 255, 255, 0.1);
+  color: #f4f4f6;
 }
 
 /* `display` and `box-sizing` are spelled out because `all: initial` above leaves a `pre` an
@@ -709,6 +788,91 @@
   background: none;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* A fenced block and the head above it. `all: initial` still comes first — the app's stylesheet
+ * must not reach this — but `color` is handed back on the very next line: the reset drops it to
+ * canvas text, and a `pre` and `code` inherit from here, so without `inherit` every code block in
+ * a dark dialog would be black on black. */
+#deepnest-dialog-transcript .deepnest-code {
+  all: initial;
+  display: block;
+  box-sizing: border-box;
+  max-width: 100%;
+  margin: 0.45rem 0 0;
+  color: inherit;
+  font: inherit;
+}
+
+/* The `pre` under a head needs no top margin of its own: the head is what separates this block
+ * from the paragraph above it. */
+#deepnest-dialog-transcript .deepnest-code pre {
+  margin-top: 0;
+}
+
+/* The head is a row of its own rather than a bar inside the `pre`: `pre` is what scrolls sideways,
+ * and a control placed in it would scroll out of reach of the person reading a long line. */
+#deepnest-dialog-transcript .deepnest-code-head {
+  all: initial;
+  display: flex;
+  box-sizing: border-box;
+  width: 100%;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.4rem;
+  padding: 0 0.1rem 0.15rem;
+}
+
+#deepnest-dialog-transcript .deepnest-code-language {
+  all: initial;
+  display: block;
+  font: 10px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: rgba(244, 244, 246, 0.45);
+}
+
+#deepnest-dialog-transcript .deepnest-code-copy,
+#deepnest-dialog-transcript .deepnest-answer-copy {
+  all: initial;
+  display: inline-block;
+  box-sizing: border-box;
+  padding: 0.1rem 0.35rem;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 3px;
+  background: transparent;
+  font: 10px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: rgba(244, 244, 246, 0.65);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+#deepnest-dialog-transcript .deepnest-code-copy:hover,
+#deepnest-dialog-transcript .deepnest-code-copy:focus-visible,
+#deepnest-dialog-transcript .deepnest-answer-copy:hover,
+#deepnest-dialog-transcript .deepnest-answer-copy:focus-visible {
+  border-color: rgba(110, 168, 254, 0.5);
+  color: #cfe0ff;
+}
+
+/* What the press did, in the control itself: a copy with no answer looks the same whether it
+ * worked or not, and the person has no way to tell a clipboard write from a dead button. */
+#deepnest-dialog-transcript .deepnest-code-copy[data-copied="yes"],
+#deepnest-dialog-transcript .deepnest-answer-copy[data-copied="yes"] {
+  border-color: rgba(122, 199, 145, 0.6);
+  color: #a8e6bd;
+}
+
+#deepnest-dialog-transcript .deepnest-code-copy[data-copied="no"],
+#deepnest-dialog-transcript .deepnest-answer-copy[data-copied="no"] {
+  border-color: rgba(226, 129, 129, 0.6);
+  color: #f0a8a8;
+}
+
+/* The answer's own control sits under the last line and to the right, rather than beside the text:
+ * the column is 19rem wide, and a button sharing a line with a paragraph would reflow that
+ * paragraph every time it changed its word from `Copy` to `Copied`. */
+#deepnest-dialog-transcript .deepnest-answer-copy {
+  display: block;
+  margin: 0.35rem 0 0 auto;
 }
 
 #deepnest-dialog-transcript .deepnest-said a {
