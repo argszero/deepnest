@@ -632,7 +632,14 @@ zstd-compressed toolchain payload unpacked on first run **atomically** — into 
 
 A hard link is packed as a file: it is a second name for the same bytes, and finding the pairs would mean an inode table this crate has no other use for. What unpacks is the same tree either way.
 
-Still to come: **where the archive lives** — the release pipeline produces it, and the build does not carry it yet — and **the signature over it**, plus signing every bundled Mach-O before packing.
+**The archive lives in the binary, and the first build unpacks it** (`decided in implementation`, 2026-11-01). `crates/deepnest/build.rs` embeds the archive the release pipeline produces and `crates/deepnest/src/payload.rs` unpacks it into `~/.deepnest/toolchain/<version>/` through the contract above; the build then resolves its programs there first. Four decisions:
+
+- **A build with no archive embeds an empty one, and the binary says so.** `include_bytes!` needs a file at compile time, so the build script always writes one: the archive when `DEEPNEST_PAYLOAD` names it, zero bytes otherwise. CI and a development build carry nothing, and `payload::embedded()` returning `None` is that reading — the build then uses the machine's `PATH` exactly as before, rather than failing on a corrupt payload it never meant to ship. `DEEPNEST_PAYLOAD` naming an unreadable file **fails the build**, because a packager who meant to carry a toolchain must not find out from a user.
+- **The unpack happens at the first build, not at startup.** Startup is already the moment the port is won and the panel is served; making every launch pay for an unpack the user may never reach would spend it for nothing. It also settles the ordering the packaging crate requires: a build is only started by a request, and a request can only arrive after the bind, so no second instance can contest the staging directory.
+- **The payload's programs are under `bin/`, and that directory is prepended to `PATH`.** Prepending, not merging: a bundled toolchain has to win over one the machine happens to have, or a self-contained binary would build the user's app with whatever version was installed. A payload with no `bin/` leaves `PATH` alone instead of pointing it at a directory that does not exist.
+- **The `Runner` is where the payload meets the build.** `payload::Toolchain` implements the same seam `crates/apps` already had — `StdRunner` gained a `path_prefix` and nothing else changed — so a build that cannot get its toolchain reports that as the step's own outcome, where the user is already reading, instead of as a missing program.
+
+Still to come: **the signature over the archive**, plus signing every bundled Mach-O before packing.
 
 macOS ships signed and notarized (`host 20:48`). Every Mach-O inside the bundled toolchain must be **signed before packing**, because first-run unpacking does not re-sign, and an unsigned child process is refused under hardened runtime. Windows ships unsigned (`host 20:56`) — SmartScreen will warn on first run, and both README and the first-run page say so plainly rather than teaching users to bypass security prompts blindly.
 
