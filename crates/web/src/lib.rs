@@ -1065,6 +1065,52 @@ mod tests {
     }
 
     #[test]
+    fn a_list_drawn_under_an_item_stays_under_it() {
+        // The renderer took every consecutive bullet line into one list, whatever its indent and
+        // whatever its marker. Measured in Chrome against the running binary, on an answer whose
+        // steps carried their own sub-points: six `li` in one `ol`, every one of them `decimal`, and
+        // no list inside a list anywhere in the answer. So "1. read the file, 2. the header row, 3.
+        // the first data row, 4. fix the import" is what a person read back, and the numbering was
+        // this page's invention rather than the model's.
+        assert!(
+            DIALOG_SCRIPT.contains("var BULLET = /^([ \\t]*)([-*+]|\\d+[.)])\\s+(.*)$/;"),
+            "a list line is read without the indent that says what it sits under"
+        );
+        let words = DIALOG_SCRIPT
+            .find("function renderWords(text)")
+            .expect("the renderer exists");
+        let body = &DIALOG_SCRIPT[words..];
+        let body = &body[..body.find("\n  }").expect("it ends")];
+        // The shape is a stack rather than a second renderer: a line either joins the list it is as
+        // far in as, opens a list inside the item above it, or closes the lists it is out of.
+        assert!(
+            body.contains("open.pop()"),
+            "a line further out never closes the list it left"
+        );
+        assert!(
+            body.contains("open[open.length - 1].at > at"),
+            "the indent is read but nothing does anything about it"
+        );
+        assert!(
+            body.contains("parent.list.lastChild.appendChild(list)"),
+            "a sub-list is drawn beside its item rather than inside it"
+        );
+        // The other marker at the same depth is a second list, not a second item.
+        assert!(
+            body.contains("innermost.ordered !== ordered"),
+            "a bullet under a number is drawn as a numbered step"
+        );
+        // Both directions: a bulleted list inside a numbered item, and a numbered list inside a
+        // bulleted one.
+        for selector in [
+            "#deepnest-dialog-transcript .deepnest-said li > ul",
+            "#deepnest-dialog-transcript .deepnest-said li > ol",
+        ] {
+            assert!(DIALOG_STYLE.contains(selector), "{selector} has no layout");
+        }
+    }
+
+    #[test]
     fn the_drawer_lists_the_conversations_and_says_which_one_the_next_message_would_join() {
         // The gap this closes: an app had one conversation and no way to start a clean second one
         // without deleting the first. The page's part is the list and the choice, and the choice
