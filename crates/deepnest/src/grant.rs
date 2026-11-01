@@ -73,6 +73,15 @@ pub const ESCALATION_COOKIE: &str = "deepnest-escalation";
 /// spending a compiler are different capabilities.
 pub const BUILD_COOKIE: &str = "deepnest-build";
 
+/// The cookie that opens an app's cancel route.
+///
+/// Separate from [`COOKIE`] even though both belong to the same turn, because a cookie opens one
+/// path and the two verbs sit on two: the value that sends a message is never sent to the route
+/// that stops one. Stopping spends no model budget of its own — it ends spending — so this is the
+/// weakest of the five, and it is still its own value, because "one route, one app, one verb" is
+/// the whole of what a grant means here.
+pub const CANCEL_COOKIE: &str = "deepnest-cancel";
+
 /// The cookie that opens an app's conversation history.
 ///
 /// A read, and the only one of the four that is. It is separate from [`COOKIE`] because the two
@@ -104,6 +113,7 @@ pub fn path(slug: &str, action: &str) -> String {
 pub fn cookie_name(action: &str) -> Option<&'static str> {
     match action {
         crate::chat::ACTION => Some(COOKIE),
+        crate::cancel::ACTION => Some(CANCEL_COOKIE),
         crate::escalation::ACTION => Some(ESCALATION_COOKIE),
         crate::rebuild::ACTION => Some(BUILD_COOKIE),
         crate::history::ACTION => Some(HISTORY_COOKIE),
@@ -337,6 +347,7 @@ mod tests {
     #[test]
     fn only_the_routes_the_dialog_reaches_are_opened_by_a_cookie() {
         assert_eq!(cookie_name("chat"), Some(COOKIE));
+        assert_eq!(cookie_name("cancel"), Some(CANCEL_COOKIE));
         assert_eq!(cookie_name("escalation"), Some(ESCALATION_COOKIE));
         assert_eq!(cookie_name("build"), Some(BUILD_COOKIE));
         // The verbs that change a process stay behind the token, and so does anything added later

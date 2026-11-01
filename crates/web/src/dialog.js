@@ -9,11 +9,13 @@
 // 1. **It never holds the control token.** The app's own script shares this origin, so a token
 //    written into this page is a token the app can read and spend — and the control token spends
 //    on every route there is.
-// 2. **It calls three routes and brings no credential of its own**: `POST /api/apps/<slug>/chat`,
+// 2. **It calls five routes and brings no credential of its own**: `POST /api/apps/<slug>/chat`,
 //    `GET`/`POST /api/apps/<slug>/escalation` — the second is how a widening request reaches the
-//    person in front of the page — and `GET /api/apps/<slug>/build`, which is what a turn that
-//    changed the app leaves behind to be watched. For each, the browser attaches a cookie the
-//    server minted when it served this page, scoped to that one path, and all three are different
+//    person in front of the page — `GET /api/apps/<slug>/build`, which is what a turn that changed
+//    the app leaves behind to be watched, `GET /api/apps/<slug>/history`, which is what makes the
+//    conversation survive a reload, and `POST /api/apps/<slug>/cancel`, which stops a turn that is
+//    already spending. For each, the browser attaches a cookie the server minted when it served
+//    this page, scoped to that one path, and all five are different
 //    values. So the box works on a page whose app is stopped or mid-rewrite, and a page that
 //    cannot present that cookie gets a `401` and says so instead of failing silently.
 //
@@ -82,6 +84,15 @@
   send.type = "submit";
   send.id = "deepnest-dialog-send";
   send.textContent = "Send";
+
+  // Stop. It appears only while a turn is running, for the same reason the widening block starts
+  // hidden: a permanent button that says "stop" is a button with no object. `type="button"` because
+  // it sits inside the form, and a stop that submitted the form would start a second turn.
+  var stop = document.createElement("button");
+  stop.type = "button";
+  stop.id = "deepnest-dialog-stop";
+  stop.textContent = "Stop";
+  stop.hidden = true;
 
   // `role="status"` with `aria-live` announces the answer without moving focus out of the box,
   // so a second message can follow the first.
@@ -246,6 +257,7 @@
 
   form.appendChild(input);
   form.appendChild(send);
+  form.appendChild(stop);
 
   var link = document.createElement("a");
   link.id = "deepnest-dialog-link";
@@ -317,6 +329,11 @@
   // The question route: one path, one cookie, and nothing about it needs the control token.
   function askingRoute() {
     return "/api/apps/" + encodeURIComponent(slug) + "/escalation";
+  }
+
+  // The stop route: the fourth cookie, and the only one that ends spending instead of starting it.
+  function stoppingRoute() {
+    return "/api/apps/" + encodeURIComponent(slug) + "/cancel";
   }
 
   // The conversation route: a read, and the only thing here that is.
@@ -446,6 +463,10 @@
       clearInterval(watching);
       watching = null;
     }
+    // No turn in flight means nothing to stop, so the control leaves with the progress line it
+    // sits under — every exit from a turn goes through here, whichever way the turn ended.
+    stop.hidden = true;
+    stop.disabled = false;
   }
 
   // "Working — round 3, 9 tool calls, 12s". The count is what separates a turn that is thinking
@@ -472,6 +493,10 @@
   function watchTheTurn() {
     sentAt = Date.now();
     stopWatching();
+    // There is a turn now, and it can take minutes: this is the one moment the page can offer a
+    // way out of it.
+    stop.hidden = false;
+    stop.disabled = false;
     // Read once immediately rather than a second from now: the first thing the person sees after
     // pressing send must not be the word the last 112 seconds were spent on.
     readHistory();
@@ -720,6 +745,48 @@
         send.disabled = false;
         stopPolling();
         say("The request did not reach deepnest. Is it still running?", true);
+      });
+  });
+
+  stop.addEventListener("click", function () {
+    if (!slug) {
+      return;
+    }
+    stop.disabled = true;
+    fetch(stoppingRoute(), {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: "{}"
+    })
+      .then(function (response) {
+        return response.json().then(
+          function (body) {
+            return { status: response.status, body: body };
+          },
+          function () {
+            return { status: response.status, body: null };
+          }
+        );
+      })
+      .then(function (result) {
+        stop.disabled = false;
+        if (result.status === 200 && result.body && typeof result.body.note === "string") {
+          // The turn is not over yet — the loop reads the flag before its next request and before
+          // every tool call of a batch — so this says what was asked rather than what has
+          // happened. The line it replaces is the progress counter, which is still running.
+          showProgress(result.body.note);
+          return;
+        }
+        if (result.status === 401) {
+          say("This page's permission to stop has expired — reload the page and try again.", true);
+          return;
+        }
+        say("The stop did not reach deepnest (" + result.status + ").", true);
+      })
+      .catch(function () {
+        stop.disabled = false;
+        say("The stop did not reach deepnest. Is it still running?", true);
       });
   });
 

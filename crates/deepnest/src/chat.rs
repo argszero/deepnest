@@ -183,6 +183,29 @@ pub fn message_from(body: &[u8]) -> Result<String, String> {
     ask_from(body).map(|ask| ask.text)
 }
 
+/// The conditions one turn runs under, as the router decides them.
+///
+/// Grouped for the same reason [`Ask`] is: they arrive together, they are meaningless apart, and a
+/// call that took the approver of one turn and the cancellation of another would compile. It also
+/// keeps [`answer`] at six parameters, which is where the author of this file already chose to
+/// stop after `Ask` was introduced for exactly that reason.
+#[derive(Default)]
+pub struct Terms {
+    /// Who a call's widening request is put in front of.
+    ///
+    /// `None` is a real answer and not a degraded one: an agent with nobody to ask refuses to widen
+    /// and says so, which is what a test and any caller without a page behind it should get.
+    pub approver: Option<Arc<dyn Approver>>,
+    /// Why the last rebuild failed, when it did: the agent's next turn is told before it writes.
+    pub build_note: Option<String>,
+    /// What another request cancels this turn through.
+    ///
+    /// The default — a flag nobody holds — is a turn nobody can stop, which is what a caller with no
+    /// page behind it is asking for. The router passes one it registered, so the dialog's stop
+    /// button reaches the loop from a different connection.
+    pub cancel: Cancellation,
+}
+
 /// Run one message through the app's agent.
 ///
 /// `home` is the deepnest home (`~/.deepnest`) and `app_dir` the app's own directory; `slug` names
@@ -190,9 +213,7 @@ pub fn message_from(body: &[u8]) -> Result<String, String> {
 /// a directory that is not an app would edit whatever is there, and "no such app" is a better
 /// answer than a turn spent on the wrong directory.
 ///
-/// `approver` is who a call's widening request is put in front of. `None` is a real answer and not a
-/// degraded one: an agent with nobody to ask refuses to widen and says so, which is what a test and
-/// any caller without a page behind it should get.
+/// `terms` is the rest of what the caller decides about this turn — see [`Terms`].
 pub fn answer(
     model: Arc<dyn Model>,
     home: &Path,
@@ -202,9 +223,7 @@ pub fn answer(
     // arrive together and are invalid apart, and a caller that passed words from one message and
     // pictures from another would be a bug no type ever caught.
     ask: &Ask,
-    approver: Option<Arc<dyn Approver>>,
-    // Why the last rebuild failed, when it did: the agent's next turn is told before it writes.
-    build_note: Option<String>,
+    terms: &Terms,
 ) -> Reply {
     if let Err(error) = manifest::load(app_dir) {
         return Reply::error(
@@ -269,7 +288,7 @@ pub fn answer(
     );
     // Appended rather than folded into the prompt template: what a build said is this app's own
     // state, not a rule of the agent's, and the template is `crates/agent`'s to own.
-    let system = match build_note {
+    let system = match &terms.build_note {
         Some(note) => format!("{system}\n\n{note}"),
         None => system,
     };
@@ -294,11 +313,14 @@ pub fn answer(
         session,
         system,
     );
-    if let Some(approver) = approver {
-        agent = agent.with_approver(approver);
+    if let Some(approver) = &terms.approver {
+        agent = agent.with_approver(Arc::clone(approver));
     }
 
-    let outcome = match agent.run_turn_with(&ask.text, &ask.images, &Cancellation::new()) {
+    // The flag the router registered for this turn: a stop pressed in the dialog reaches the loop
+    // from another connection, and the loop checks it before the next request and before every
+    // tool call of a batch.
+    let outcome = match agent.run_turn_with(&ask.text, &ask.images, &terms.cancel) {
         Ok(outcome) => outcome,
         // A turn that could not run at all is not a turn that failed: the difference is what the
         // user can do about it, so the status carries it.
@@ -542,8 +564,7 @@ mod tests {
             &scratch.app_dir(),
             &scratch.slug(),
             &ask,
-            None,
-            None,
+            &Terms::default(),
         );
         assert_eq!(reply.status, 200, "{}", reply.body);
         let seen = model.seen.lock().unwrap();
@@ -576,8 +597,7 @@ mod tests {
             &scratch.app_dir(),
             &scratch.slug(),
             &ask_of("what is on the list?"),
-            None,
-            None,
+            &Terms::default(),
         );
         assert_eq!(reply.status, 200, "{}", reply.body);
         assert_eq!(reply.body["text"], "Bread, milk.");
@@ -626,8 +646,7 @@ mod tests {
             &scratch.app_dir(),
             &scratch.slug(),
             &ask_of("write the list"),
-            None,
-            None,
+            &Terms::default(),
         );
         assert_eq!(reply.status, 200, "{}", reply.body);
         assert_eq!(reply.body["changed"], true, "{}", reply.body);
@@ -651,8 +670,7 @@ mod tests {
             &stray,
             &Scratch::slug_of("stray"),
             &ask_of("hello"),
-            None,
-            None,
+            &Terms::default(),
         );
         assert_eq!(reply.status, 404, "{}", reply.body);
         assert!(
@@ -675,8 +693,7 @@ mod tests {
             &scratch.app_dir(),
             &scratch.slug(),
             &ask_of("something the provider will not answer"),
-            None,
-            None,
+            &Terms::default(),
         );
         // The loop reads a refusal as an answer about the content and stops, and the route reports
         // it as the user's request to change — not as this server failing.
@@ -708,8 +725,7 @@ mod tests {
             &scratch.app_dir(),
             &scratch.slug(),
             &ask_of("hello"),
-            None,
-            None,
+            &Terms::default(),
         );
 
         let seen = model.seen.lock().unwrap();
