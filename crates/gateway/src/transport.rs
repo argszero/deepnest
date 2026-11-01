@@ -41,13 +41,22 @@
 //! - **No redirect is followed.** A 3xx is returned as a 3xx, because a model endpoint that
 //!   redirects is answering from somewhere the user did not configure, and silently going there
 //!   spends their key at a host they never chose.
+//! - **A stream is delivered as it arrives, and that is the whole point of `post_stream`.** The
+//!   body is decoded as it is read — de-chunked, held to its declared length, or read to the
+//!   close — and each complete server-sent event is handed to the caller **before the next byte
+//!   has been asked for**. An adapter that read the body whole and then replayed the events would
+//!   satisfy the same signature and deliver nothing: the answer would appear at the end, exactly
+//!   as the non-streaming path already does. Two smaller consequences follow from the same
+//!   requirement: a character can be split across two reads (so the decoder is fed only complete
+//!   UTF-8 and the rest waits), and a refusal is the one answer read whole (because
+//!   [`LlmError::classify`] needs the document, and a refusal is not a stream).
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
-use deepnest_llm::{HttpRequest, HttpResponse, LlmError, SseEvent, Transport};
-use native_tls::{HandshakeError, TlsConnector};
+use deepnest_llm::{HttpRequest, HttpResponse, LlmError, SseDecoder, SseEvent, Transport};
+use native_tls::{HandshakeError, TlsConnector, TlsStream};
 
 /// How long a connection may take to establish, and how long a read may block.
 ///
@@ -66,18 +75,11 @@ impl PlainHttp {
         Self
     }
 
-    /// One exchange over a plaintext connection, for whichever verb the caller named.
+    /// The target of a call this adapter can carry, or the refusal naming the half that can.
     ///
-    /// The scheme is refused here rather than at each verb, because the two verbs have the same
-    /// reason: sending these bytes in the clear at a TLS port is either a hang the user would blame
-    /// on their key or a key sent in the clear. Neither is a fallback.
-    fn send(
-        &self,
-        verb: &str,
-        url: &str,
-        headers: &[(String, String)],
-        body: Option<&str>,
-    ) -> Result<HttpResponse, LlmError> {
+    /// Shared by both verbs and by both paths — whole answer and stream — so a scheme this adapter
+    /// cannot carry is refused in one place and in one wording, before any socket is opened.
+    fn target(&self, url: &str, headers: &[(String, String)]) -> Result<Target, LlmError> {
         check_headers(headers)?;
         let target = parse(url)?;
         if target.scheme == Scheme::Https {
@@ -86,9 +88,39 @@ impl PlainHttp {
                  picks the half that matches the scheme"
             )));
         }
+        Ok(target)
+    }
+
+    /// One exchange over a plaintext connection, for whichever verb the caller named.
+    ///
+    /// The scheme is refused by [`Self::target`], because the two verbs have the same reason:
+    /// sending these bytes in the clear at a TLS port is either a hang the user would blame on
+    /// their key or a key sent in the clear. Neither is a fallback.
+    fn send(
+        &self,
+        verb: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: Option<&str>,
+    ) -> Result<HttpResponse, LlmError> {
+        let target = self.target(url, headers)?;
         let mut stream = connect(&target, url)?;
         let raw = exchange(&mut stream, verb, &target, headers, body)?;
         read_response(&raw)
+    }
+
+    /// The streaming path over the same connection: the answer is decoded and delivered while it is
+    /// being written. [`stream_answer`] carries the rules.
+    fn stream(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        body: &str,
+        on_event: &mut dyn FnMut(SseEvent) -> Result<(), LlmError>,
+    ) -> Result<(), LlmError> {
+        let target = self.target(url, headers)?;
+        let mut stream = connect(&target, url)?;
+        stream_answer(&mut stream, "POST", &target, headers, Some(body), on_event)
     }
 
     /// A `GET`: the URL and whatever headers the endpoint wants, and no body.
@@ -177,13 +209,10 @@ impl Transport for PlainHttp {
 
     fn post_stream(
         &self,
-        _request: &HttpRequest,
-        _on_event: &mut dyn FnMut(SseEvent) -> Result<(), LlmError>,
+        request: &HttpRequest,
+        on_event: &mut dyn FnMut(SseEvent) -> Result<(), LlmError>,
     ) -> Result<(), LlmError> {
-        // Stated rather than left as a `todo!()`: the loop above this seam asks for a whole answer
-        // (`Client::turn`), and an adapter that pretended to stream would deliver one event at the
-        // end, which is a worse lie than a refusal.
-        Err(no_streaming_path())
+        self.stream(&request.url, &request.headers, &request.body, on_event)
     }
 }
 
@@ -220,14 +249,9 @@ impl TlsHttp {
         })
     }
 
-    /// One exchange over a connection this machine's trust store vouched for, for either verb.
-    fn send(
-        &self,
-        verb: &str,
-        url: &str,
-        headers: &[(String, String)],
-        body: Option<&str>,
-    ) -> Result<HttpResponse, LlmError> {
+    /// The target of a call this adapter can carry, or the refusal naming the half that can — the
+    /// mirror of [`PlainHttp::target`], and shared by both paths for the same reason.
+    fn target(&self, url: &str, headers: &[(String, String)]) -> Result<Target, LlmError> {
         check_headers(headers)?;
         let target = parse(url)?;
         if target.scheme == Scheme::Http {
@@ -236,17 +260,47 @@ impl TlsHttp {
                  the half that matches the scheme"
             )));
         }
+        Ok(target)
+    }
+
+    /// One exchange over a connection this machine's trust store vouched for, for either verb.
+    fn send(
+        &self,
+        verb: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: Option<&str>,
+    ) -> Result<HttpResponse, LlmError> {
+        let target = self.target(url, headers)?;
+        let mut tls = self.handshake(&target, url)?;
+        let raw = exchange(&mut tls, verb, &target, headers, body)?;
+        read_response(&raw)
+    }
+
+    /// The same handshake for the streaming path, which then reads the answer as it is written.
+    fn stream(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        body: &str,
+        on_event: &mut dyn FnMut(SseEvent) -> Result<(), LlmError>,
+    ) -> Result<(), LlmError> {
+        let target = self.target(url, headers)?;
+        let mut tls = self.handshake(&target, url)?;
+        stream_answer(&mut tls, "POST", &target, headers, Some(body), on_event)
+    }
+
+    /// The verified connection both paths send through.
+    fn handshake(&self, target: &Target, url: &str) -> Result<TlsStream<TcpStream>, LlmError> {
         let connector = self.connector(url)?;
         // The socket timeouts are set before the handshake, so a peer that accepts the connection
         // and then says nothing is bounded by the same budget as a stalled read.
-        let stream = connect(&target, url)?;
+        let stream = connect(target, url)?;
         // The domain handed to the handshake is the host from the URL, which is what makes a
         // certificate for another name a refusal rather than a warning.
-        let mut tls = connector
+        connector
             .connect(&target.host, stream)
-            .map_err(|error| handshake_failure(url, &target.host, error))?;
-        let raw = exchange(&mut tls, verb, &target, headers, body)?;
-        read_response(&raw)
+            .map_err(|error| handshake_failure(url, &target.host, error))
     }
 
     /// A `GET` over the same handshake; [`PlainHttp::get`] says why the verb is here rather than in
@@ -263,10 +317,10 @@ impl Transport for TlsHttp {
 
     fn post_stream(
         &self,
-        _request: &HttpRequest,
-        _on_event: &mut dyn FnMut(SseEvent) -> Result<(), LlmError>,
+        request: &HttpRequest,
+        on_event: &mut dyn FnMut(SseEvent) -> Result<(), LlmError>,
     ) -> Result<(), LlmError> {
-        Err(no_streaming_path())
+        self.stream(&request.url, &request.headers, &request.body, on_event)
     }
 }
 
@@ -339,12 +393,6 @@ impl Transport for HttpTransport {
 fn names_https(url: &str) -> bool {
     url.get(..8)
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
-}
-
-fn no_streaming_path() -> LlmError {
-    LlmError::transport(
-        "this build asks for a whole answer, not a stream — the model adapter has no streaming path",
-    )
 }
 
 /// Refuse a header that would inject a second request, before any socket is opened — so that a test
@@ -437,18 +485,19 @@ fn without_trailing_full_stop(detail: &str) -> &str {
     detail.trim_end().trim_end_matches('.')
 }
 
-/// Write one request and read everything the connection answers with.
+/// Write one request, head and whatever body it declares.
 ///
 /// `verb` is the request's method, and it is a parameter because this adapter sends two of them.
 /// `body` is what decides the `Content-Length` line, so a `GET` — which passes `None` — goes out
-/// with no length declared at all.
-fn exchange<C: Read + Write>(
+/// with no length declared at all. Shared by both paths, because a stream is the same request with
+/// a different way of reading the answer.
+fn send_request<C: Write>(
     stream: &mut C,
     verb: &str,
     target: &Target,
     headers: &[(String, String)],
     body: Option<&str>,
-) -> Result<Vec<u8>, LlmError> {
+) -> Result<(), LlmError> {
     let mut head = format!(
         "{verb} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n",
         target.path,
@@ -469,7 +518,18 @@ fn exchange<C: Read + Write>(
             None => Ok(()),
         })
         .and_then(|()| stream.flush())
-        .map_err(|e| LlmError::transport(format!("the request could not be sent: {e}")))?;
+        .map_err(|e| LlmError::transport(format!("the request could not be sent: {e}")))
+}
+
+/// Write one request and read everything the connection answers with.
+fn exchange<C: Read + Write>(
+    stream: &mut C,
+    verb: &str,
+    target: &Target,
+    headers: &[(String, String)],
+    body: Option<&str>,
+) -> Result<Vec<u8>, LlmError> {
+    send_request(stream, verb, target, headers, body)?;
 
     let mut raw = Vec::new();
     stream
@@ -508,15 +568,30 @@ fn connect(target: &Target, url: &str) -> Result<TcpStream, LlmError> {
     )))
 }
 
-/// Read one whole answer out of the bytes the connection gave us.
-fn read_response(raw: &[u8]) -> Result<HttpResponse, LlmError> {
-    let split = raw
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .ok_or_else(|| LlmError::transport("the answer had no head: no blank line ended it"))?;
-    let head = String::from_utf8_lossy(&raw[..split]).to_string();
-    let body = &raw[split + 4..];
+/// How an answer's body is framed, which is what decides when there is nothing more to read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Framing {
+    /// `Transfer-Encoding: chunked` — sizes interleaved with the data.
+    Chunked,
+    /// `Content-Length: n` — a bounded number of bytes.
+    Length(usize),
+    /// Neither, so the body runs until the connection closes.
+    UntilClose,
+}
 
+/// What an answer's head says: the status, and how its body is framed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Head {
+    status: u16,
+    framing: Framing,
+}
+
+/// The status line and the framing headers of one answer head.
+///
+/// One reader for both paths: a stream and a whole answer are told the same things by the same
+/// lines, and two parsers would eventually disagree about which of `Content-Length` and
+/// `Transfer-Encoding` wins.
+fn parse_head(head: &str) -> Result<Head, LlmError> {
     let mut lines = head.split("\r\n");
     let status_line = lines
         .next()
@@ -545,21 +620,71 @@ fn read_response(raw: &[u8]) -> Result<HttpResponse, LlmError> {
         }
     }
 
-    let text = if chunked {
-        dechunk(body)?
+    // Chunked wins, as HTTP/1.1 requires: a message with both declares a length it does not mean.
+    let framing = if chunked {
+        Framing::Chunked
     } else if let Some(length) = length {
-        if body.len() < length {
-            return Err(LlmError::transport(format!(
-                "the answer stopped after {} of {length} bytes — a truncated answer is not an \
-                 answer",
-                body.len()
-            )));
-        }
-        String::from_utf8_lossy(&body[..length]).to_string()
+        Framing::Length(length)
     } else {
-        String::from_utf8_lossy(body).to_string()
+        Framing::UntilClose
     };
-    Ok(HttpResponse { status, body: text })
+    Ok(Head { status, framing })
+}
+
+/// Read the head of an answer without waiting for its body.
+///
+/// The bytes that arrived after the blank line are the beginning of the body — for a stream, that
+/// is usually the first events — so they are handed back rather than dropped. This is where the
+/// streaming path stops being able to peek: everything below reads a bounded amount, so nothing
+/// here has to hold a whole answer.
+fn read_head<C: Read>(stream: &mut C) -> Result<(Head, Vec<u8>), LlmError> {
+    let mut raw = Vec::new();
+    let mut buffer = [0u8; 1024];
+    let split = loop {
+        if let Some(split) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
+            break split;
+        }
+        match stream.read(&mut buffer) {
+            Ok(0) => return Err(LlmError::transport("the answer ended before its head did")),
+            Ok(read) => raw.extend_from_slice(&buffer[..read]),
+            Err(error) => {
+                return Err(LlmError::transport(format!(
+                    "the answer's head could not be read: {error}"
+                )))
+            }
+        }
+    };
+    let head = parse_head(&String::from_utf8_lossy(&raw[..split]))?;
+    Ok((head, raw[split + 4..].to_vec()))
+}
+
+/// Read one whole answer out of the bytes the connection gave us.
+fn read_response(raw: &[u8]) -> Result<HttpResponse, LlmError> {
+    let split = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or_else(|| LlmError::transport("the answer had no head: no blank line ended it"))?;
+    let head = parse_head(&String::from_utf8_lossy(&raw[..split]))?;
+    let body = &raw[split + 4..];
+
+    let text = match head.framing {
+        Framing::Chunked => dechunk(body)?,
+        Framing::Length(length) => {
+            if body.len() < length {
+                return Err(LlmError::transport(format!(
+                    "the answer stopped after {} of {length} bytes — a truncated answer is not an \
+                     answer",
+                    body.len()
+                )));
+            }
+            String::from_utf8_lossy(&body[..length]).to_string()
+        }
+        Framing::UntilClose => String::from_utf8_lossy(body).to_string(),
+    };
+    Ok(HttpResponse {
+        status: head.status,
+        body: text,
+    })
 }
 
 /// Undo chunked transfer encoding.
@@ -591,11 +716,241 @@ fn dechunk(mut body: &[u8]) -> Result<String, LlmError> {
     }
 }
 
+/// Send one request and hand the answer's server-sent events over as they arrive.
+///
+/// This is the whole difference between an answer that appears and an answer that is watched being
+/// written, and it is a property of *when* `on_event` is called rather than of the bytes: every
+/// complete event reaches the caller before the next read is asked for, so a provider that pauses
+/// mid-answer is a pause the caller sees rather than one it waits out.
+///
+/// Three things follow, and each is a decision rather than an accident:
+///
+/// - **A refusal is read whole.** A non-2xx answer is a document, and [`LlmError::classify`] reads
+///   the document to decide what kind of failure it is — the same classification the whole-answer
+///   path produces, which is what the trait's contract asks for.
+/// - **The framing is decoded as it arrives.** Chunked bodies are de-chunked incrementally
+///   ([`Dechunker`]), declared lengths are honoured, and a body with neither is read to the close.
+/// - **Text is fed to the decoder only when it is complete.** A character can be split across two
+///   reads ([`Utf8Tail`]) — for an answer in Chinese that is the ordinary case, not a corner one —
+///   and replacing it with `U+FFFD` would corrupt the very text the user is watching.
+fn stream_answer<C: Read + Write>(
+    stream: &mut C,
+    verb: &str,
+    target: &Target,
+    headers: &[(String, String)],
+    body: Option<&str>,
+    on_event: &mut dyn FnMut(SseEvent) -> Result<(), LlmError>,
+) -> Result<(), LlmError> {
+    send_request(stream, verb, target, headers, body)?;
+    let (head, arrived) = read_head(stream)?;
+
+    if !(200..300).contains(&head.status) {
+        let mut raw = arrived;
+        stream
+            .read_to_end(&mut raw)
+            .map_err(|e| LlmError::transport(format!("the refusal could not be read: {e}")))?;
+        let text = match head.framing {
+            Framing::Chunked => dechunk(&raw)?,
+            Framing::Length(length) => {
+                String::from_utf8_lossy(&raw[..length.min(raw.len())]).to_string()
+            }
+            Framing::UntilClose => String::from_utf8_lossy(&raw).to_string(),
+        };
+        return Err(LlmError::classify(Some(head.status), text));
+    }
+
+    let mut decoder = SseDecoder::new();
+    let mut tail = Utf8Tail::new();
+    let mut dechunker = Dechunker::new();
+    // How many body bytes are still owed, for a body that declared a length. Every other framing
+    // is bounded by the stream itself, so the budget is simply never reached.
+    let mut owed = match head.framing {
+        Framing::Length(length) => length,
+        _ => usize::MAX,
+    };
+
+    let mut arrival = arrived;
+    loop {
+        let take = arrival.len().min(owed);
+        owed -= take;
+        let wire = &arrival[..take];
+        let decoded = match head.framing {
+            Framing::Chunked => dechunker.feed(wire)?,
+            _ => wire.to_vec(),
+        };
+
+        if !decoded.is_empty() {
+            let text = tail.feed(&decoded);
+            if !text.is_empty() {
+                for event in decoder.push(&text) {
+                    // `[DONE]` is the end of the answer, not the end of the connection: a provider
+                    // may hold the socket open afterwards, and waiting for it would turn a finished
+                    // turn into a request that appears to hang.
+                    let last = event.is_done();
+                    on_event(event)?;
+                    if last {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        if dechunker.is_done() || owed == 0 {
+            break;
+        }
+
+        let mut buffer = [0u8; 8192];
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => arrival = buffer[..read].to_vec(),
+            Err(error) => {
+                return Err(LlmError::transport(format!(
+                    "the stream stopped in the middle of the answer: {error}"
+                )))
+            }
+        }
+    }
+
+    // A provider that closes without a blank line after its last event has still sent that event.
+    for event in decoder.finish() {
+        on_event(event)?;
+    }
+    Ok(())
+}
+
+/// Chunked transfer encoding, undone a piece at a time.
+///
+/// [`dechunk`] needs the whole body because it can look for every size line at once; a stream has
+/// no such moment, so the state has to be held: whether a size line or chunk data comes next, and
+/// how much of the current chunk is still owed. Feed it whatever arrived and it returns the body
+/// bytes that are now complete.
+#[derive(Debug, Default)]
+struct Dechunker {
+    /// Wire bytes that have arrived and have not been consumed yet.
+    wire: Vec<u8>,
+    /// `None` when a size line comes next; otherwise the bytes still owed by the current chunk.
+    owed: Option<usize>,
+    done: bool,
+}
+
+impl Dechunker {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn is_done(&self) -> bool {
+        self.done
+    }
+
+    fn feed(&mut self, wire: &[u8]) -> Result<Vec<u8>, LlmError> {
+        if self.done {
+            // Everything after the terminating chunk is a trailer nobody here reads.
+            return Ok(Vec::new());
+        }
+        self.wire.extend_from_slice(wire);
+        let mut body = Vec::new();
+
+        loop {
+            match self.owed {
+                // A size line.
+                None => {
+                    let Some(end) = self.wire.windows(2).position(|w| w == b"\r\n") else {
+                        break;
+                    };
+                    let line = String::from_utf8_lossy(&self.wire[..end]).to_string();
+                    // A chunk's size line may carry `;extension` parameters after the size.
+                    let size_text = line.split(';').next().unwrap_or("").trim().to_string();
+                    let size = usize::from_str_radix(&size_text, 16).map_err(|_| {
+                        LlmError::transport(format!(
+                            "a chunk size was not hexadecimal: `{size_text}`"
+                        ))
+                    })?;
+                    self.wire.drain(..end + 2);
+                    if size == 0 {
+                        self.done = true;
+                        break;
+                    }
+                    self.owed = Some(size);
+                }
+                // The CRLF that closes the data of a chunk.
+                Some(0) => {
+                    match self.wire.first() {
+                        // A server that ends its lines with a bare `\n` is not speaking HTTP/1.1,
+                        // and refusing it here would be a stricter reader than the rest of this
+                        // file; the byte is consumed and the data is what it said it was.
+                        Some(b'\n') => self.wire.drain(..1),
+                        Some(b'\r') if self.wire.len() == 1 => break,
+                        Some(b'\r') if self.wire[1] == b'\n' => self.wire.drain(..2),
+                        Some(_) => {
+                            return Err(LlmError::transport(
+                                "a chunk was not followed by the blank line that ends it",
+                            ))
+                        }
+                        None => break,
+                    };
+                    self.owed = None;
+                }
+                // The data of a chunk, as much of it as has arrived.
+                Some(owed) => {
+                    if self.wire.is_empty() {
+                        break;
+                    }
+                    let take = owed.min(self.wire.len());
+                    body.extend_from_slice(&self.wire[..take]);
+                    self.wire.drain(..take);
+                    self.owed = Some(owed - take);
+                }
+            }
+        }
+        Ok(body)
+    }
+}
+
+/// Bytes that may end in the middle of a character, held until the rest of it arrives.
+///
+/// [`SseDecoder`] takes text and every byte here arrives in whatever pieces the network chose, so
+/// the two have to be joined without the join being visible. Anything that is not merely incomplete
+/// — a byte that can never begin a character — is replaced and stepped over, because one bad byte
+/// must not stall a stream that is otherwise fine.
+#[derive(Debug, Default)]
+struct Utf8Tail {
+    held: Vec<u8>,
+}
+
+impl Utf8Tail {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn feed(&mut self, bytes: &[u8]) -> String {
+        self.held.extend_from_slice(bytes);
+        let (text, used) = match std::str::from_utf8(&self.held) {
+            Ok(text) => (text.to_string(), self.held.len()),
+            Err(error) => {
+                let valid = error.valid_up_to();
+                let mut text = String::from_utf8_lossy(&self.held[..valid]).to_string();
+                match error.error_len() {
+                    // A sequence that can never complete: replace it and carry on.
+                    Some(bad) => {
+                        text.push(char::REPLACEMENT_CHARACTER);
+                        (text, valid + bad)
+                    }
+                    // A sequence that has simply not arrived yet: hold it.
+                    None => (text, valid),
+                }
+            }
+        };
+        self.held.drain(..used);
+        text
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::TcpListener;
     use std::sync::mpsc;
+    use std::time::Instant;
 
     /// A one-shot HTTP server: it answers `response` to whatever arrives, and hands back the
     /// request it read so a test can assert on the bytes sent.
@@ -768,20 +1123,256 @@ mod tests {
         assert!(error.body.contains("line break"), "{}", error.body);
     }
 
+    /// A one-shot server that writes its answer in pieces, waiting after each — which is how a
+    /// test tells delivery-as-it-arrives apart from delivery-at-the-end, and how it produces the
+    /// two separate reads a split character needs.
+    fn serve_in_pieces(pieces: Vec<(Vec<u8>, Duration)>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut seen = Vec::new();
+                let mut buf = [0u8; 1024];
+                loop {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => {
+                            seen.extend_from_slice(&buf[..read]);
+                            if complete(&seen) {
+                                break;
+                            }
+                        }
+                    }
+                }
+                for (piece, pause) in pieces {
+                    let _ = stream.write_all(&piece);
+                    let _ = stream.flush();
+                    std::thread::sleep(pause);
+                }
+            }
+        });
+        format!("http://127.0.0.1:{port}/v1/chat/completions")
+    }
+
+    /// One chunked-encoded frame carrying `body`.
+    fn chunk(body: &str) -> Vec<u8> {
+        format!("{:x}\r\n{body}\r\n", body.len()).into_bytes()
+    }
+
+    /// One event as a provider writes it.
+    fn event(data: &str) -> String {
+        format!("data: {data}\n\n")
+    }
+
+    /// The head of a streamed answer, as an OpenAI-compatible endpoint sends it.
+    fn stream_head() -> Vec<u8> {
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"
+            .to_vec()
+    }
+
+    /// Post to `url` on the streaming path, collecting what arrived and when.
+    fn stream_to(url: &str) -> (Result<(), LlmError>, Vec<SseEvent>, Vec<Instant>) {
+        let mut events = Vec::new();
+        let mut at = Vec::new();
+        let outcome = PlainHttp::new().post_stream(
+            &HttpRequest {
+                url: url.to_string(),
+                headers: vec![("Content-Type".into(), "application/json".into())],
+                body: r#"{"model":"m","stream":true}"#.to_string(),
+            },
+            &mut |event: SseEvent| {
+                at.push(Instant::now());
+                events.push(event);
+                Ok(())
+            },
+        );
+        (outcome, events, at)
+    }
+
+    /// The one property this whole path exists for: an event reaches the caller while the provider
+    /// is still producing the answer.
+    ///
+    /// An adapter that read the body whole and then replayed the events would pass every other
+    /// assertion here and fail this one, which is why the assertion is on *when* rather than on
+    /// *what*.
     #[test]
-    fn streaming_says_it_does_not_stream() {
+    fn a_stream_arrives_while_the_answer_is_still_being_written() {
+        let url = serve_in_pieces(vec![
+            (stream_head(), Duration::ZERO),
+            (
+                chunk(&event(r#"{"choices":[{"delta":{"content":"he"}}]}"#)),
+                Duration::ZERO,
+            ),
+            // The provider thinks between the two halves of one answer.
+            (
+                chunk(&event(r#"{"choices":[{"delta":{"content":"llo"}}]}"#)),
+                Duration::from_millis(600),
+            ),
+            (b"0\r\n\r\n".to_vec(), Duration::ZERO),
+        ]);
+
+        let started = Instant::now();
+        let (outcome, events, at) = stream_to(&url);
+        let ended = started.elapsed();
+        outcome.expect("a streamed answer");
+
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert!(events[0].data.contains("\"he\""), "{events:?}");
+        assert!(events[1].data.contains("\"llo\""), "{events:?}");
+        let first = at[0] - started;
+        assert!(
+            first + Duration::from_millis(300) < ended,
+            "the first event was delivered at {first:?} and the answer ended at {ended:?} — that \
+             is delivery at the end, not as it arrived"
+        );
+    }
+
+    #[test]
+    fn a_stream_ends_at_its_declared_length_without_waiting_for_the_close() {
+        let body = event(r#"{"choices":[{"delta":{"content":"done"}}]}"#);
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        // The server keeps the socket open long after it has said everything, which a provider
+        // that holds the connection for its next request does. Waiting for the close would make
+        // every turn last as long as that hold.
+        let url = serve_in_pieces(vec![
+            (format!("{head}{body}").into_bytes(), Duration::from_secs(3)),
+            (Vec::new(), Duration::ZERO),
+        ]);
+
+        let started = Instant::now();
+        let (outcome, events, _) = stream_to(&url);
+        outcome.expect("a streamed answer");
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the answer waited for the connection to close: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_stream_that_closes_without_a_blank_line_still_delivers_its_last_event() {
+        let body = format!("data: {}", r#"{"choices":[{"delta":{"content":"tail"}}]}"#);
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let url = serve_in_pieces(vec![(format!("{head}{body}").into_bytes(), Duration::ZERO)]);
+
+        let (outcome, events, _) = stream_to(&url);
+        outcome.expect("a streamed answer");
+        assert_eq!(events.len(), 1, "the last event was dropped: {events:?}");
+        assert!(events[0].data.contains("\"tail\""), "{events:?}");
+    }
+
+    /// A character can be split across two reads, and for an answer in Chinese that is ordinary.
+    #[test]
+    fn a_character_split_across_two_reads_arrives_whole() {
+        let sentence = "这是一个中文回答";
+        let body = event(&format!(
+            r#"{{"choices":[{{"delta":{{"content":"{sentence}"}}}}]}}"#
+        ));
+        // Split inside the third character: 这 is three bytes, so two of them go in the first write
+        // and the third arrives with the rest. Sliced as bytes, because a `&str` cannot be cut
+        // where this test needs the cut.
+        let cut = body.find('这').unwrap() + 2;
+        let bytes = body.as_bytes();
+        let (first, second) = bytes.split_at(cut);
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let mut opening = head.into_bytes();
+        opening.extend_from_slice(first);
+        let url = serve_in_pieces(vec![
+            (opening, Duration::from_millis(50)),
+            (second.to_vec(), Duration::ZERO),
+        ]);
+
+        let (outcome, events, _) = stream_to(&url);
+        outcome.expect("a streamed answer");
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(
+            events[0].data.contains(sentence),
+            "a character split across two reads was mangled: {}",
+            events[0].data
+        );
+        assert!(
+            !events[0].data.contains(char::REPLACEMENT_CHARACTER),
+            "a half-arrived character was replaced instead of waited for: {}",
+            events[0].data
+        );
+    }
+
+    #[test]
+    fn a_refusal_on_the_streaming_path_is_classified_from_its_body() {
+        let body = r#"{"error":{"message":"invalid api key"}}"#;
+        let head = format!(
+            "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let url = serve_in_pieces(vec![(format!("{head}{body}").into_bytes(), Duration::ZERO)]);
+
+        let (outcome, events, _) = stream_to(&url);
+        let error = outcome.expect_err("a refusal is not an answer");
+        assert!(events.is_empty(), "a refusal delivered events: {events:?}");
+        assert_eq!(error.status, Some(401));
+        assert!(error.body.contains("invalid api key"), "{}", error.body);
+        // The same class the whole-answer path gives the same status: the trait's contract is that
+        // a refusal is classified identically whichever path asked for it.
+        assert_eq!(error, LlmError::classify(Some(401), body));
+    }
+
+    #[test]
+    fn a_plaintext_stream_refuses_an_https_endpoint_by_name() {
         let mut sink = |_event: SseEvent| Ok(());
         let error = PlainHttp::new()
             .post_stream(
                 &HttpRequest {
-                    url: "http://127.0.0.1:1/v1".to_string(),
+                    url: "https://api.example/v1/chat/completions".to_string(),
                     headers: Vec::new(),
                     body: String::new(),
                 },
                 &mut sink,
             )
             .unwrap_err();
-        assert!(error.body.contains("no streaming path"), "{}", error.body);
+        assert!(
+            error.body.contains("carries plaintext only"),
+            "{}",
+            error.body
+        );
+    }
+
+    #[test]
+    fn the_dispatching_transport_streams_through_the_plaintext_half() {
+        let url = serve_in_pieces(vec![
+            (stream_head(), Duration::ZERO),
+            (
+                chunk(&event(r#"{"choices":[{"delta":{"content":"hi"}}]}"#)),
+                Duration::ZERO,
+            ),
+            (b"0\r\n\r\n".to_vec(), Duration::ZERO),
+        ]);
+
+        let mut events = Vec::new();
+        HttpTransport::new()
+            .post_stream(
+                &HttpRequest {
+                    url,
+                    headers: Vec::new(),
+                    body: r#"{"model":"m","stream":true}"#.to_string(),
+                },
+                &mut |event: SseEvent| {
+                    events.push(event);
+                    Ok(())
+                },
+            )
+            .expect("a streamed answer through the dispatching adapter");
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert!(events[0].data.contains("\"hi\""), "{events:?}");
     }
 
     #[test]
