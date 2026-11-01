@@ -26,9 +26,11 @@
 //! What this does **not** do yet, stated where it is implemented so a later reader does not have to
 //! infer it from an absence:
 //!
-//! - **The answer arrives whole.** `crate::model::Endpoint` says why: the HTTP adapter this build
-//!   ships sends a request and reads a response, and a streaming path would have to be a second
-//!   adapter. The turn is the same turn either way; what is missing is watching it being written.
+//! - **The answer arrives whole.** Not any more because the transport refuses to stream — it does
+//!   stream, and delivers each event as it arrives — but because nothing above it asks: this route
+//!   returns one JSON body, `crate::model::Endpoint` implements one `Model` call per turn, and the
+//!   page waits for the reply. The turn is the same turn either way; what is missing is watching it
+//!   being written.
 //! - **A writing turn starts a rebuild, and does not wait for it.** The reply says `changed` and
 //!   the router enqueues the build ([`crate::rebuild`]); this function returns at once, because a
 //!   build inside the request would hold one HTTP connection for a minute of `bun install`, which

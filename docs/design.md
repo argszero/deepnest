@@ -234,7 +234,7 @@ The system prompt is **written from scratch**. It is where most of the agent's b
 
 Four decisions were made while implementing it and are recorded here rather than in a commit message (`decided in implementation`, 2026-10-31):
 
-- **The model is reached through a `Model` trait, not through `deepnest_llm::Client`.** The loop is then testable with no network and no HTTP adapter, and the adapter (which belongs to `crates/gateway`) is swappable. `Client` implements the trait, so the binary wires the real one in one line — but its impl reads a stream, and a plaintext adapter cannot serve one, which is why the binary calls `Client::turn` instead (see the wiring above).
+- **The model is reached through a `Model` trait, not through `deepnest_llm::Client`.** The loop is then testable with no network and no HTTP adapter, and the adapter (which belongs to `crates/gateway`) is swappable. `Client` implements the trait, so the binary wires the real one in one line — and that impl reads a stream, which the adapter could not serve when this was written and can serve now: `Client::turn` is what the binary still calls, because `Endpoint` has no streaming `Model` impl yet, not because the transport refuses.
 - **The trim budget is by characters and defaults to 120,000 per request**, with two repairs that a provider otherwise rejects outright: the kept tail must begin at a `user` message, and a `tool` result whose `assistant` call was trimmed away is dropped with it. A request that reports itself too long halves the budget and retries at most twice; a **refusal is never** retried that way.
 - **Cancellation is a shared flag checked before every request and before every tool call in a batch**, so a cancelled turn runs no further command. The calls that did not run are recorded in `history.jsonl` as a note, so a reader can tell a cancelled batch from a model that asked for less.
 - **The layout under `~/.deepnest/apps/<slug>/.agent/`** is `history.jsonl`, `memory/<id>.md`, `memory/MEMORY.md`, and `subagents/<NNNN>/history.jsonl` — one conversation file per subagent call, because a child appending to its parent's file is two writers on one conversation.
@@ -266,12 +266,21 @@ Five decisions came with the wiring:
   name and an endpoint that cannot be reached are three messages with three different fixes, and
   since `native-tls` exposes no error kind — only a sentence — the split is read out of that
   sentence; where a platform does not name the mismatch, the message still says the certificate was
-  refused instead of falling back to "connection failed". What the adapter still does not do is
-  stream: `post_stream` stays a refusal, and a turn is still answered whole.
-- **A turn is answered whole, not streamed.** `Client`'s `Model` impl goes through `chat_stream`,
-  which this adapter cannot serve, so `crates/deepnest`'s `model::Endpoint` calls `Client::turn`:
-  the same `AssistantTurn`, arriving all at once. What is missing is watching the answer being
-  written, not the answer.
+  refused instead of falling back to "connection failed". **The adapter streams**
+  (`decided in implementation`, 2026-11-01): `post_stream` decodes the answer as it is read — a
+  chunked body de-chunked incrementally, a declared length honoured, a body with neither read to
+  the close — and hands each complete server-sent event to the caller **before asking for the next
+  byte**, so a provider that pauses mid-answer is a pause the caller sees. Two consequences are
+  part of the same rule: text is fed to the decoder only once it is complete, because a character
+  split across two reads is the ordinary case for an answer in Chinese; and a non-2xx answer is
+  read whole, because a refusal is a document and has to be classified exactly as the
+  non-streaming path classifies it.
+- **A turn is still answered whole, and the adapter is no longer why.** `crates/deepnest`'s
+  `model::Endpoint` implements `Model` as one `Client::turn`, and `POST …/chat` returns that one
+  answer as one JSON body; `crates/gateway` now serves `Client::chat_stream`, and nothing has yet
+  been built on top of it. What turns that into watching the answer being written is three separate
+  steps — a streaming `Model` impl, a `chat` route that writes the turn as it arrives, and a page
+  that renders it — and none of them is blocked on the transport any more.
 - **The endpoint is read per request, not held at startup.** `POST /api/config` can change it, and
   an agent assembled once would keep asking the old one until the next start.
 - **A writing turn says `changed` and does not rebuild.** `bash` and `write`/`edit` set the flag, the

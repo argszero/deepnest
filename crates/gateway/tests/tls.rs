@@ -364,14 +364,36 @@ fn a_line_break_in_a_header_is_refused_before_the_handshake() {
 }
 
 #[test]
-fn streaming_is_still_a_refusal_rather_than_a_lie() {
-    // Nothing above changes this seam: the loop asks for a whole answer, and an adapter that
-    // delivered every event at the end would look like a stream and behave like a lie.
-    let mut sink = |_event: deepnest_llm::SseEvent| Ok(());
-    let error = TlsHttp::with_connector(trusting(LOOPBACK_CERT))
-        .post_stream(&request("https://127.0.0.1:1/v1"), &mut sink)
-        .unwrap_err();
-    assert!(error.body.contains("no streaming path"), "{}", error.body);
+fn a_stream_crosses_the_handshake_event_by_event() {
+    // The other half of the seam, which used to answer this call with a refusal. What is checked
+    // here is that the stream survives the record layer at all — the delivery-as-it-arrives
+    // property is `stream_answer`'s and is measured on a plaintext socket, because both halves call
+    // the same function and only the connection in front of it differs.
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"one\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"two\"}}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let (url, seen) = serve(LOOPBACK_CERT, LOOPBACK_KEY, declared(body));
+
+    let mut events = Vec::new();
+    TlsHttp::with_connector(trusting(LOOPBACK_CERT))
+        .post_stream(&request(&url), &mut |event| {
+            events.push(event);
+            Ok(())
+        })
+        .expect("a streamed answer over TLS");
+
+    assert_eq!(events.len(), 3, "{events:?}");
+    assert!(events[0].data.contains("\"one\""), "{events:?}");
+    assert!(events[1].data.contains("\"two\""), "{events:?}");
+    assert!(
+        events[2].is_done(),
+        "the sentinel did not cross: {events:?}"
+    );
+    // And it asked for one: a stream is a request that says `stream: true`, not a reading habit.
+    let sent = seen.recv().expect("the request the server read");
+    assert!(sent.contains("\"stream\":true"), "{sent}");
 }
 
 #[test]
