@@ -272,6 +272,13 @@
   color: #ff9d90;
 }
 
+/* A turn that is still running, as opposed to an answer. Monospace and dimmer because it is a
+ * reading of the machine's state that will be replaced, not something the agent said. */
+#deepnest-dialog-answer.live {
+  font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: rgba(244, 244, 246, 0.62);
+}
+
 /* The conversation. Its own scroll box, because it is the one part of this panel that grows
  * without bound: a long session must not push the composer off the screen. */
 
@@ -338,4 +345,14 @@
   color: #f0d9a8;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* The turn in flight: the newest one while a request is out. A left rule rather than an animated
+ * dot — the count in the line under the box already moves every second, and a second thing moving
+ * on the page buys nothing. */
+#deepnest-dialog-transcript .deepnest-running {
+  border-left: 2px solid #6ea8fe;
+  padding-left: 0.45rem;
+  margin-left: -0.45rem;
+  background: rgba(110, 168, 254, 0.07);
 }

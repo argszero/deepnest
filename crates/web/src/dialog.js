@@ -177,14 +177,32 @@
 
   // Put a line under the box. `bad` is a class rather than a colour inline: the stylesheet is where
   // colours live, and `all: initial` means nothing here inherits one.
+  //
+  // This is the *final* line, so it is the one worth announcing: `aria-live` goes back on here
+  // after a progress line turned it off.
   function say(text, bad) {
     answer.textContent = text;
     answer.hidden = false;
+    answer.classList.remove("live");
+    answer.setAttribute("aria-live", "polite");
     if (bad) {
       answer.classList.add("bad");
     } else {
       answer.classList.remove("bad");
     }
+  }
+
+  // The line under the box *while* the turn runs.
+  //
+  // It turns the announcement off rather than leaving it on: a region that changes every second is
+  // a screen reader reading a new sentence every second, which is worse than silence. The answer
+  // that matters comes through `say` above, at the end.
+  function showProgress(text) {
+    answer.textContent = text;
+    answer.hidden = false;
+    answer.classList.remove("bad");
+    answer.classList.add("live");
+    answer.setAttribute("aria-live", "off");
   }
 
   // The question route: one path, one cookie, and nothing about it needs the control token.
@@ -201,9 +219,9 @@
 
   // One turn is: what was asked, what the agent did about it, and what it said back. Rendered with
   // `textContent` throughout — every string here is either the person's words or the model's.
-  function renderTurn(turn) {
+  function renderTurn(turn, live) {
     var line = document.createElement("div");
-    line.className = "deepnest-turn";
+    line.className = live ? "deepnest-turn deepnest-running" : "deepnest-turn";
 
     var asked = document.createElement("p");
     asked.className = "deepnest-asked";
@@ -238,19 +256,37 @@
     return line;
   }
 
-  function showTurns(turns) {
-    transcript.textContent = "";
+  // What was last drawn, so a poll that found nothing new does not redraw: a transcript rebuilt
+  // every second would fight the person scrolling through it.
+  var drawn = "";
+
+  function showTurns(turns, live) {
     if (!turns || turns.length === 0) {
+      drawn = "";
+      transcript.textContent = "";
       transcript.hidden = true;
       return;
     }
     var recent = turns.slice(-TURNS_SHOWN);
-    recent.forEach(function (turn) {
-      transcript.appendChild(renderTurn(turn));
+    var print = JSON.stringify(recent) + (live ? "+" : "");
+    if (print === drawn) {
+      return;
+    }
+    drawn = print;
+    // Read the scroll position before replacing the children, and restore it only if the person was
+    // already at the newest end. Auto-scrolling a reader who scrolled up is the page deciding it
+    // knows better, which is the one thing a transcript being written to must not do.
+    var atTheEnd =
+      transcript.scrollTop + transcript.clientHeight >= transcript.scrollHeight - 8;
+    transcript.textContent = "";
+    recent.forEach(function (turn, index) {
+      transcript.appendChild(renderTurn(turn, live && index === recent.length - 1));
     });
     transcript.hidden = false;
-    // Newest at the bottom, which is where a conversation is read from.
-    transcript.scrollTop = transcript.scrollHeight;
+    if (atTheEnd) {
+      // Newest at the bottom, which is where a conversation is read from.
+      transcript.scrollTop = transcript.scrollHeight;
+    }
   }
 
   function readHistory() {
@@ -259,11 +295,62 @@
         return response.ok ? response.json() : null;
       })
       .then(function (body) {
-        showTurns(body && body.turns);
+        var turns = (body && body.turns) || [];
+        showTurns(turns, watching !== null);
+        if (watching !== null) {
+          showProgress(describeProgress(turns));
+        }
       })
       .catch(function () {
         // A transcript nobody can read is not a reason to break the box that still works.
       });
+  }
+
+  // Watching a turn is reading the file again, on a timer, for as long as the request is out.
+  //
+  // One second, the same cadence as the question poll: a record is flushed per round and a tool
+  // call takes seconds, so this cannot miss a step and is not a second copy of anything. The
+  // server is not told it is being watched, and needs nothing new — a turn is legible in the file
+  // the agent was always writing.
+  var PROGRESS_MS = 1000;
+  var watching = null;
+  var sentAt = 0;
+
+  function stopWatching() {
+    if (watching !== null) {
+      clearInterval(watching);
+      watching = null;
+    }
+  }
+
+  // "Working — round 3, 9 tool calls, 12s". The count is what separates a turn that is thinking
+  // from one that is stuck, and it is the whole difference between a page that reads as
+  // unresponsive and one that says what it is doing.
+  function describeProgress(turns) {
+    var last = turns && turns.length ? turns[turns.length - 1] : null;
+    var said;
+    if (!last || !last.rounds) {
+      said = "Working — the model is thinking";
+    } else if (last.tools > 0) {
+      said =
+        "Working — round " +
+        last.rounds +
+        ", " +
+        last.tools +
+        (last.tools === 1 ? " tool call" : " tool calls");
+    } else {
+      said = "Working — round " + last.rounds;
+    }
+    return said + ", " + Math.round((Date.now() - sentAt) / 1000) + "s";
+  }
+
+  function watchTheTurn() {
+    sentAt = Date.now();
+    stopWatching();
+    // Read once immediately rather than a second from now: the first thing the person sees after
+    // pressing send must not be the word the last 112 seconds were spent on.
+    readHistory();
+    watching = setInterval(readHistory, PROGRESS_MS);
   }
 
   // Polling rather than a stream: a turn holds its own connection open while it waits, the answer
@@ -276,6 +363,10 @@
       clearInterval(polling);
       polling = null;
     }
+    // Both timers end at the same moment, so they end in the same place: a turn that is over is no
+    // longer asking a question and no longer making progress, and every exit from a turn — answer,
+    // refusal, expired grant, dead server — goes through here.
+    stopWatching();
     clearTheQuestion();
   }
 
@@ -432,7 +523,11 @@
     }
 
     send.disabled = true;
-    say("Asking…", false);
+    // Two timers for the one turn: this one asks the server what the question is, and
+    // `watchTheTurn` re-reads the transcript so the page can say what the turn is doing. `Asking…`
+    // with nothing after it was the whole of what this page said for 112 seconds, and the reason a
+    // turn that had rewritten the app read as a turn that never ran.
+    watchTheTurn();
     // The turn may stop and ask a question before it answers, so the poll starts with the
     // question already possible rather than after the first answer.
     startPolling();
