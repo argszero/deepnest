@@ -34,6 +34,7 @@ pub mod grant;
 pub mod home;
 pub mod model;
 pub mod open;
+pub mod payload;
 pub mod rebuild;
 pub mod refresh;
 pub mod router;

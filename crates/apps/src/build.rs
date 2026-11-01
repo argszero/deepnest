@@ -27,6 +27,7 @@
 //! panel waits. A build that reports progress and lets the panel stay live belongs to
 //! `crates/gateway`, with the real server loop.
 
+use std::ffi::{OsStr, OsString};
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -93,12 +94,19 @@ pub trait Runner: Send + Sync {
 pub struct StdRunner {
     /// How long one step may run.
     pub timeout: Duration,
+    /// A directory of programs to look in before `PATH`.
+    ///
+    /// It is set when deepnest carries a toolchain of its own: without it a bundled toolchain would
+    /// unpack perfectly and then be ignored, because every step resolves its program through the
+    /// machine's `PATH`. Empty when this binary carries none.
+    pub path_prefix: Option<PathBuf>,
 }
 
 impl Default for StdRunner {
     fn default() -> Self {
         Self {
             timeout: STEP_TIMEOUT,
+            path_prefix: None,
         }
     }
 }
@@ -111,8 +119,32 @@ impl StdRunner {
 
     /// The same runner, waiting at most `timeout` per step.
     pub fn with_timeout(timeout: Duration) -> Self {
-        Self { timeout }
+        Self {
+            timeout,
+            path_prefix: None,
+        }
     }
+
+    /// The same runner, finding `prefix`'s programs first.
+    pub fn with_path_prefix(mut self, prefix: Option<PathBuf>) -> Self {
+        self.path_prefix = prefix;
+        self
+    }
+}
+
+/// `PATH` with `prefix` in front of whatever the process already had.
+///
+/// Prepending rather than merging is the point: the toolchain deepnest carries has to win over one
+/// the machine happens to have, or a self-contained binary would build the user's app with whatever
+/// version was installed. `join_paths` decides the platform's separator, so this is one rule rather
+/// than one per OS.
+fn path_with_prefix(prefix: &Path, current: Option<&OsStr>) -> io::Result<OsString> {
+    let mut parts = vec![prefix.to_path_buf()];
+    if let Some(current) = current {
+        parts.extend(std::env::split_paths(current));
+    }
+    std::env::join_paths(parts)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))
 }
 
 impl Runner for StdRunner {
@@ -123,9 +155,14 @@ impl Runner for StdRunner {
         let sink = OpenOptions::new().create(true).append(true).open(log)?;
         let sink_err = sink.try_clone()?;
 
-        let mut child = Command::new(step.program)
-            .args(step.args)
-            .current_dir(&step.cwd)
+        let mut command = Command::new(step.program);
+        command.args(step.args).current_dir(&step.cwd);
+        if let Some(prefix) = &self.path_prefix {
+            let current = std::env::var_os("PATH");
+            command.env("PATH", path_with_prefix(prefix, current.as_deref())?);
+        }
+
+        let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::from(sink))
             .stderr(Stdio::from(sink_err))
@@ -315,6 +352,28 @@ fn note(log: &Path, line: &str) {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn a_path_prefix_is_in_front_of_whatever_the_machine_had() {
+        // The bundled toolchain has to win, so the order is the assertion and the merge is not: a
+        // list that mixed the two would let an installed bun build the user's app.
+        let prefix = Path::new("/deepnest/toolchain/0.1.0/bin");
+        let host = std::env::join_paths([Path::new("/usr/bin"), Path::new("/bin")]).unwrap();
+        let joined = path_with_prefix(prefix, Some(host.as_os_str())).unwrap();
+
+        let parts: Vec<PathBuf> = std::env::split_paths(&joined).collect();
+        assert_eq!(parts.first().map(PathBuf::as_path), Some(prefix));
+        assert_eq!(
+            parts.len(),
+            3,
+            "the machine's own entries were dropped: {joined:?}"
+        );
+        assert_eq!(parts[1], PathBuf::from("/usr/bin"));
+
+        // No `PATH` at all is a prefix and nothing else, not an error.
+        let alone = path_with_prefix(prefix, None).unwrap();
+        assert_eq!(std::env::split_paths(&alone).count(), 1);
+    }
 
     use crate::Slug;
 

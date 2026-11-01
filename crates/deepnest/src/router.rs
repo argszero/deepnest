@@ -45,9 +45,7 @@ use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use deepnest_apps::{
-    BuildError, Runner, Slug, StartError, State, StdRunner, Supervisor, TemplateError,
-};
+use deepnest_apps::{BuildError, Runner, Slug, StartError, State, Supervisor, TemplateError};
 use serde_json::{json, Value};
 
 use deepnest_gateway::{Answer, ForwardError, Forwarder, HttpTransport, StdForwarder, Target};
@@ -104,7 +102,10 @@ impl Lifecycle {
     /// The lifecycle the binary uses: the real supervisor and the real build runner.
     pub fn new(supervisor: Arc<Supervisor>, home: impl Into<PathBuf>) -> Self {
         let home = home.into();
-        let builder: Arc<dyn Runner> = Arc::new(StdRunner::new());
+        // The bundled toolchain, unpacked on the first build it is needed for: the runner
+        // resolves its programs through that directory before the machine's `PATH`, which is
+        // what makes a binary carrying its own tools build an app on a machine with none.
+        let builder: Arc<dyn Runner> = Arc::new(crate::payload::Toolchain::new(home.clone()));
         let releases: Arc<dyn deepnest_skills::Releases> = Arc::new(crate::updates::Github::new());
         let publisher: Arc<dyn deepnest_skills::Publisher> =
             Arc::new(deepnest_skills::StdPublisher);
@@ -290,8 +291,9 @@ impl Router {
     /// Build apps with `builder` instead of the real toolchain runner.
     ///
     /// Separate from [`Router::with_lifecycle`] because it is only ever the tests that want it: the
-    /// binary builds with [`StdRunner`], and a test that needed bun and a C compiler to check which
-    /// status a failed build returns would be measuring the toolchain.
+    /// binary builds with [`crate::payload::Toolchain`], and a test that needed bun, a C compiler and
+    /// an unpacked toolchain to check which status a failed build returns would be measuring all
+    /// three instead of the routing.
     pub fn with_builder(mut self, builder: Arc<dyn Runner>) -> Self {
         if let Some(lifecycle) = self.lifecycle.take() {
             self.lifecycle = Some(lifecycle.with_builder(builder));
