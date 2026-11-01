@@ -711,6 +711,9 @@
     typing = true;
     written = "";
     answer.textContent = "";
+    // An empty box has no line to be away from, so a mode left over from the previous turn would
+    // only be a way to start the next answer scrolled to a position it does not have.
+    placement = NEWEST;
     answer.hidden = false;
     answer.classList.remove("bad");
     answer.classList.remove("live");
@@ -734,22 +737,55 @@
   var written = "";
   var redrawal = 0;
 
+  // Where a redraw leaves the reader. The box is its own scroll window (`max-height` in the
+  // stylesheet), so an answer that outgrows it has to be given a position on every redraw —
+  // replacing the blocks throws the old one away. Three cases, and only these three:
+  //
+  //   NEWEST — the answer is still being written and the reader was on its newest line. Watching a
+  //            stream is watching the words arrive, and this box did not follow at all: measured in
+  //            Chrome against a sixteen-piece answer, it sat on its first line for the whole stream
+  //            while the newest line ended 636 px below a 144 px window — 780 px of answer, of
+  //            which the reader could see the first fifth and nothing else, ever.
+  //   FIRST  — the answer is whole. A finished answer is read from its first line, and that is
+  //            where the box sat in every version before this one.
+  //   HOLD   — the reader scrolled away while it was being written, so nothing in here may move
+  //            them. Pulling its own scroll to the end is a page a person cannot read while the
+  //            agent works, which is exactly when reading it is worth something; the transcript
+  //            above already yields to a reader for the same reason.
+  var NEWEST = "newest";
+  var FIRST = "first";
+  var HOLD = "hold";
+  var placement = HOLD;
+
+  // Whether the reader is on the newest line of the answer. The same 8 px the transcript allows: a
+  // box scrolled to its end rarely lands on the exact pixel, and demanding that would call a reader
+  // who followed by hand a reader who left.
+  function onTheNewest() {
+    return answer.scrollTop + answer.clientHeight >= answer.scrollHeight - 8;
+  }
+
   function drawAnswer() {
     redrawal = 0;
+    var where = placement;
+    // Read before the children are replaced: what HOLD restores is the pixel offset they were
+    // standing at, and after the replacement that reading is the box's own clamped value.
+    var held = answer.scrollTop;
     var said = document.createElement("div");
     said.className = "deepnest-said";
     // `null` is "this text is being shown, not copied from": the answer line carries no copy
     // controls of its own, because the transcript above already offers one per block and a second
     // set here would double the tab stops this panel spends on copying.
     said.appendChild(renderWords(written, null));
-    // The box scrolls when the answer outgrows it (`max-height` in the stylesheet), and rebuilding
-    // the blocks is what drops that scroll position back to the top. Appending text never did, so
-    // holding it here is what keeps a redraw from being a change of what the reader is looking at.
-    var kept = answer.scrollTop;
     answer.textContent = "";
     answer.appendChild(said);
-    if (kept) {
-      answer.scrollTop = kept;
+    if (where === NEWEST) {
+      // The bottom of the content, which is the newest line.
+      answer.scrollTop = answer.scrollHeight;
+    } else if (where === FIRST) {
+      answer.scrollTop = 0;
+    } else {
+      // What was added is below the reader, so the same offset is the same line they were on.
+      answer.scrollTop = held;
     }
   }
 
@@ -763,6 +799,9 @@
     if (!typing) {
       startTyping();
     }
+    // Read per piece rather than once: a reader who scrolled up mid-answer is left alone from the
+    // next piece on, and one who scrolled back down is followed again.
+    placement = onTheNewest() ? NEWEST : HOLD;
     written += piece;
     scheduleAnswer();
   }
@@ -771,6 +810,7 @@
   // agent's words wherever they are shown, so the two can never drift apart.
   function sayAnswer(text) {
     written = text;
+    placement = FIRST;
     if (redrawal) {
       // A draw held back for the next task would paint a partial answer over the finished one.
       clearTimeout(redrawal);

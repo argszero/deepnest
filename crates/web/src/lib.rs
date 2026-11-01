@@ -1222,6 +1222,71 @@ mod tests {
     }
 
     #[test]
+    fn the_answer_being_written_keeps_its_newest_line_in_view() {
+        // The answer line is its own scroll window (`max-height: 9rem`, `overflow: auto`), and it did
+        // not follow what it was writing. Measured in Chrome against a twenty-piece stream: the box
+        // sat on its first line for the whole answer, and the newest line ended 459 px below a 144 px
+        // window — 603 px of answer written while the reader could see the first quarter of it and
+        // nothing that came after.
+        //
+        // Three positions, and the third is the one that must not be lost: a box that pulls its own
+        // scroll to the end is a box a person cannot read while the agent works.
+        assert!(
+            DIALOG_SCRIPT.contains("function onTheNewest()"),
+            "the box cannot tell whether the reader is on its newest line"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("answer.scrollTop + answer.clientHeight >= answer.scrollHeight - 8"),
+            "the newest line is measured some other way, or demanding an exact pixel a scrolled box \
+             rarely lands on"
+        );
+        // While the answer is being written, the newest line — and the reading is taken per piece, so
+        // a reader who leaves mid-answer is left alone from that piece on.
+        let more = DIALOG_SCRIPT
+            .find("function typeMore(piece)")
+            .expect("the writer exists");
+        let body = &DIALOG_SCRIPT[more..];
+        let body = &body[..body.find("\n  }").expect("it ends")];
+        assert!(
+            body.contains("placement = onTheNewest() ? NEWEST : HOLD;"),
+            "the answer is written without following its own newest line, or without yielding"
+        );
+        // A finished answer opens at its first line, which is where every version before this one
+        // left it: the box is read top-down once there is nothing more coming.
+        let whole = DIALOG_SCRIPT
+            .find("function sayAnswer(text)")
+            .expect("the finished path exists");
+        let body = &DIALOG_SCRIPT[whole..];
+        let body = &body[..body.find("\n  }").expect("it ends")];
+        assert!(
+            body.contains("placement = FIRST;"),
+            "a finished answer is left scrolled wherever the stream ended"
+        );
+        // And the redraw puts the reader where the mode says, all three ways.
+        let draw = DIALOG_SCRIPT
+            .find("function drawAnswer()")
+            .expect("the draw exists");
+        let body = &DIALOG_SCRIPT[draw..];
+        let body = &body[..body.find("\n  }").expect("it ends")];
+        for move_line in [
+            "answer.scrollTop = answer.scrollHeight;",
+            "answer.scrollTop = 0;",
+            "answer.scrollTop = held;",
+        ] {
+            assert!(
+                body.contains(move_line),
+                "{move_line} is missing from the redraw"
+            );
+        }
+        // Replacing the children throws the old position away, so the held one is read first.
+        assert!(
+            body.find("var held = answer.scrollTop;").unwrap()
+                < body.find("answer.textContent = \"\";").unwrap(),
+            "the position to hold is read after the blocks that made it are gone"
+        );
+    }
+
+    #[test]
     fn a_list_drawn_under_an_item_stays_under_it() {
         // The renderer took every consecutive bullet line into one list, whatever its indent and
         // whatever its marker. Measured in Chrome against the running binary, on an answer whose
