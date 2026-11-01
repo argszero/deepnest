@@ -1050,9 +1050,16 @@ mod tests {
             "a list item is not a list item, so it draws no marker"
         );
         // And the `li` carries its own numbering: the reset gives it `disc` whatever the `ol`
-        // around it says, so a numbered list drew bullets until this rule existed.
+        // around it says, so a numbered list drew bullets until this rule existed. The selector and
+        // the declaration are asserted separately, and that is not laziness: an assertion written
+        // across the line break between them passed on macOS and Linux and failed on Windows, where
+        // the file is checked out with CRLF and the `{` is followed by `\r\n` rather than `\n`.
         assert!(
-            DIALOG_STYLE.contains("ol > li {\n  list-style-type: decimal;"),
+            DIALOG_STYLE.contains("ol > li {"),
+            "no rule reaches the items of a numbered list"
+        );
+        assert!(
+            DIALOG_STYLE.contains("list-style-type: decimal"),
             "a numbered list draws bullets"
         );
     }
