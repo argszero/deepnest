@@ -1380,6 +1380,79 @@ mod tests {
     }
 
     #[test]
+    fn a_table_in_an_answer_is_drawn_as_a_table() {
+        // A comparison table is the shape an agent answers with more often than any other, and no
+        // branch in the renderer caught one: every row of it fell through to the paragraph branch,
+        // which joins its lines with a space. Measured in Chrome against the running binary, on a
+        // reply holding a three-column table of four rows — one paragraph, 320 px wide and 88 px
+        // tall, whose text ran `| Model | Price per 1M input | Verdict | |---|--:|:--:| | kimi-k2.6 |
+        // 4.00 | …`: twenty pipe characters in a single run of prose, the delimiter row included.
+        // Nothing on the page was a `table`, so no row lined up under another and the verdict for
+        // one model sat beside the price of the next. After: one `table` 320 px wide, twelve
+        // `table-cell`s, four rows at four `y` offsets and three columns at three `x` offsets.
+        assert!(
+            DIALOG_SCRIPT.contains("function tableRule(line)"),
+            "the line under a header is never read as a delimiter row, so no table is recognised"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("function tableCells(line)"),
+            "a row is never split into the cells it is made of"
+        );
+        let words = DIALOG_SCRIPT
+            .find("function renderWords(text, what)")
+            .expect("the renderer exists");
+        let body = &DIALOG_SCRIPT[words..];
+        let body = &body[..body.find("\n  }").expect("it ends")];
+        assert!(
+            body.contains("var align = tableHere(lines, i);"),
+            "there is a cell splitter but no branch that draws a table"
+        );
+        // The delimiter row is scaffolding rather than content: skipping it along with the header
+        // is what keeps `|---|--:|:--:|` out of the answer.
+        assert!(
+            body.contains("i += 2;"),
+            "the delimiter row is drawn as a row of the table"
+        );
+        // A model writes "the numbers are:" and the table on the very next line, and a paragraph
+        // that kept reading would swallow the header row before the loop above ever saw it.
+        assert!(
+            body.contains("!tableHere(lines, i)"),
+            "a table written straight under a sentence is read as part of that sentence"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("\"deepnest-table-\" + align"),
+            "a column's alignment is read and then dropped"
+        );
+        for selector in [
+            "#deepnest-dialog .deepnest-said table",
+            "#deepnest-dialog .deepnest-said tr",
+            "#deepnest-dialog .deepnest-said th",
+        ] {
+            assert!(DIALOG_STYLE.contains(selector), "{selector} has no layout");
+        }
+        // The reset at the top of the stylesheet reaches every one of these and puts it back to
+        // `inline`, which draws a table as one run of words with its cells side by side. The
+        // declarations are asserted one at a time because an assertion written across the line
+        // break between a selector and its body failed on Windows, where the file is checked out
+        // with CRLF.
+        for display in [
+            "display: table;",
+            "display: table-header-group;",
+            "display: table-row;",
+            "display: table-cell;",
+        ] {
+            assert!(
+                DIALOG_STYLE.contains(display),
+                "{display} is missing, so the parts are drawn inline and the rows run together"
+            );
+        }
+        assert!(
+            DIALOG_STYLE.contains("border-collapse: collapse"),
+            "the reset leaves `separate`, so every cell is drawn with its own four borders"
+        );
+    }
+
+    #[test]
     fn the_drawer_lists_the_conversations_and_says_which_one_the_next_message_would_join() {
         // The gap this closes: an app had one conversation and no way to start a clean second one
         // without deleting the first. The page's part is the list and the choice, and the choice
