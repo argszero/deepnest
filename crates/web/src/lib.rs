@@ -606,6 +606,36 @@ mod tests {
     }
 
     #[test]
+    fn the_dialog_reads_the_conversation_back_instead_of_remembering_it() {
+        // The defect this route fixes: a turn that rewrites the app reloads the page, and the
+        // answer the person was reading was a variable that died with it. So the transcript is
+        // asked for, from the route the server scopes a read-only cookie to.
+        assert!(
+            DIALOG_SCRIPT.contains(r#"/history"#),
+            "the box never asks what the app's agent has already said"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("fetch(historyRoute()"),
+            "the transcript has to be fetched from its own route"
+        );
+        // A read: no method, no body. A `POST` here would mean the box could change something
+        // merely by opening, and it is the one route on this page that must not.
+        let read = &DIALOG_SCRIPT[DIALOG_SCRIPT
+            .find("fetch(historyRoute()")
+            .expect("just asserted")..];
+        let read = &read[..read.find("})").expect("the fetch call ends")];
+        assert!(
+            !read.contains("method"),
+            "the transcript request names a method, so it is not the read it claims: {read}"
+        );
+        assert!(!read.contains("body"), "a read has no body: {read}");
+        assert!(
+            read.contains(r#"credentials: "same-origin""#),
+            "without the cookie the route answers 401: {read}"
+        );
+    }
+
+    #[test]
     fn the_dialog_says_what_went_wrong_instead_of_failing_silently() {
         // Three failures a user can hit, each with a different next step, and the box has to name
         // the step: the grant expired, the server is gone, and the answer was a refusal.
