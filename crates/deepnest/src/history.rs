@@ -47,6 +47,14 @@ pub struct Turn {
     pub reply: String,
     /// How many tool calls the agent made about it — the number a reader has no other way to see.
     pub tools: usize,
+    /// How many pictures were pasted with the question.
+    ///
+    /// A count and not the pictures themselves, and the reason is the route's own shape: a page
+    /// polls this every second while a turn runs, and one screenshot's `data:` URL is about 1.4
+    /// million characters, so a transcript that carried them would answer with megabytes a second
+    /// to draw a thumbnail. The pictures stay in the conversation file for the model's own replay;
+    /// what a reader of the transcript needs is that there was one.
+    pub pictures: usize,
     /// How many times the model was asked in this turn.
     ///
     /// One more than a tool call count is not the same thing, and it is the number that says a
@@ -91,7 +99,11 @@ fn push(turns: &mut Vec<Turn>, record: &Record) {
         // A question starts a turn. Text before any question — a system message, which is the
         // agent's instructions and not the conversation — is not part of what the page shows.
         "user" => turns.push(Turn {
+            // A message that was only pictures has no content at all — `Message::with_images`
+            // filters blank text to `None` — so this is empty rather than missing, and `pictures`
+            // below is what says the message was not nothing.
             user: record.content.clone().unwrap_or_default(),
+            pictures: record.images.as_ref().map_or(0, Vec::len),
             reply: String::new(),
             tools: 0,
             rounds: 0,
@@ -192,6 +204,76 @@ mod tests {
         // Two assistant lines: the one that asked for the calls, and the one that answered.
         assert_eq!(turns[0].rounds, 2);
         assert_eq!(turns[0].at, "2026-11-01T01:00:01Z");
+    }
+
+    const ONE_PICTURE: &str = r#"{"type":"message","role":"user","images":["data:image/png;base64,iVBORw0KGgo="],"at":"2026-11-01T03:00:00Z"}"#;
+    const A_PICTURE_REPLY: &str = r#"{"type":"message","role":"assistant","content":"It is a white square.","at":"2026-11-01T03:00:05Z"}"#;
+
+    #[test]
+    fn a_picture_sent_on_its_own_is_a_turn_with_a_question() {
+        // The message was a screenshot and nothing else, so the record has no text at all. Read
+        // back without its pictures this was a turn with an empty question, and the page drew a
+        // blank row with the answer hanging under it — the one case the dialog was built for.
+        let scratch = Scratch::new("picture-only");
+        scratch.write(&[ONE_PICTURE, A_PICTURE_REPLY]);
+
+        let turns = read(&scratch.base);
+        assert_eq!(turns.len(), 1, "{turns:?}");
+        assert_eq!(turns[0].user, "", "the file holds no words for it");
+        assert_eq!(turns[0].pictures, 1, "the picture did not survive the read");
+        assert_eq!(turns[0].reply, "It is a white square.");
+
+        // And the route says so, which is what the page actually reads.
+        let wire: serde_json::Value = serde_json::from_str(&body(&scratch.base)).unwrap();
+        assert_eq!(wire["turns"][0]["pictures"], 1, "{wire}");
+        assert_eq!(wire["turns"][0]["user"], "", "{wire}");
+    }
+
+    #[test]
+    fn a_question_with_words_and_pictures_says_both() {
+        let scratch = Scratch::new("words-and-pictures");
+        scratch.write(&[
+            r#"{"type":"message","role":"user","content":"what is wrong here?","images":["data:image/png;base64,AA==","data:image/png;base64,BB=="],"at":"2026-11-01T03:00:00Z"}"#,
+            A_PICTURE_REPLY,
+        ]);
+        let turns = read(&scratch.base);
+        assert_eq!(turns[0].user, "what is wrong here?");
+        assert_eq!(
+            turns[0].pictures, 2,
+            "pictures are counted, not just noticed"
+        );
+    }
+
+    #[test]
+    fn a_conversation_written_before_pictures_existed_still_counts_zero() {
+        // The other half of the compatibility claim: a line with no `images` key is a message with
+        // no pictures, not an error and not a missing count.
+        let scratch = Scratch::new("no-pictures");
+        scratch.write(&[SYSTEM, ASK, TOOLS, RESULT, REPLY]);
+        let turns = read(&scratch.base);
+        assert_eq!(turns[0].pictures, 0, "{turns:?}");
+        let wire: serde_json::Value = serde_json::from_str(&body(&scratch.base)).unwrap();
+        assert_eq!(wire["turns"][0]["pictures"], 0, "{wire}");
+    }
+
+    #[test]
+    fn the_picture_count_is_a_count_and_not_the_pictures() {
+        // The route is polled every second while a turn runs, and one screenshot is about 1.4
+        // million characters. A transcript that carried them would answer with megabytes a second
+        // to draw a thumbnail, so what a turn carries is how many there were.
+        let scratch = Scratch::new("pictures-are-not-carried");
+        scratch.write(&[
+            r#"{"type":"message","role":"user","content":"look","images":["data:image/png;base64,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"],"at":"2026-11-01T03:00:00Z"}"#,
+            A_PICTURE_REPLY,
+        ]);
+        let wire = body(&scratch.base);
+        assert!(wire.contains(r#""pictures":1"#), "{wire}");
+        assert!(!wire.contains("data:image/"), "the picture itself: {wire}");
+        assert!(
+            wire.len() < 600,
+            "a transcript of one picture should be small: {} bytes",
+            wire.len()
+        );
     }
 
     #[test]

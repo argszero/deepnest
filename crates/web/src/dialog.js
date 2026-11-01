@@ -328,13 +328,22 @@
 
   // One turn is: what was asked, what the agent did about it, and what it said back. Rendered with
   // `textContent` throughout — every string here is either the person's words or the model's.
+  // "1 picture" / "3 pictures" — the one phrase both places below need.
+  function picturesIn(count) {
+    return count + (count === 1 ? " picture" : " pictures");
+  }
+
   function renderTurn(turn, live) {
     var line = document.createElement("div");
     line.className = live ? "deepnest-turn deepnest-running" : "deepnest-turn";
 
     var asked = document.createElement("p");
     asked.className = "deepnest-asked";
-    asked.textContent = turn.user;
+    // A picture sent on its own is the whole message: the record has no text for it, so drawing
+    // an empty line left the turn with no question at all — the reply hung under a blank row and
+    // the picture itself, which the model had been looking at, appeared nowhere.
+    var pictures = turn.pictures || 0;
+    asked.textContent = turn.user || (pictures > 0 ? picturesIn(pictures) : "");
 
     var did = document.createElement("p");
     did.className = "deepnest-did";
@@ -344,6 +353,13 @@
     }
 
     line.appendChild(asked);
+    // Words and a picture together: the words are the question, and this says what came with it.
+    if (turn.user && pictures > 0) {
+      var sent = document.createElement("p");
+      sent.className = "deepnest-pictures";
+      sent.textContent = "with " + picturesIn(pictures);
+      line.appendChild(sent);
+    }
     if (did.textContent) {
       line.appendChild(did);
     }
