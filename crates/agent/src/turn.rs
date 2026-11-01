@@ -214,7 +214,31 @@ impl Agent {
         user_text: &str,
         cancel: &Cancellation,
     ) -> Result<TurnOutcome, AgentError> {
-        self.append(&Message::user(user_text))?;
+        self.run_turn_with(user_text, &[], cancel)
+    }
+
+    /// Run one turn for a message that carries pictures as well as words.
+    ///
+    /// `images` are `data:` URLs, already validated by whoever read the request — the loop does not
+    /// care where a picture came from, only that the model is looking at the one the user sent. They
+    /// join the conversation as part of the user's own message, so a later turn replays them from
+    /// the file exactly as this turn sent them, and a conversation read back tomorrow still has its
+    /// screenshots.
+    ///
+    /// A message with no pictures takes the old path through [`Message::user`] rather than an
+    /// equivalent constructor, so a text-only turn produces the same record it always did.
+    pub fn run_turn_with(
+        &self,
+        user_text: &str,
+        images: &[String],
+        cancel: &Cancellation,
+    ) -> Result<TurnOutcome, AgentError> {
+        let opening = if images.is_empty() {
+            Message::user(user_text)
+        } else {
+            Message::with_images(Some(user_text.to_string()), images.to_vec())
+        };
+        self.append(&opening)?;
         let definitions = self.definitions();
         let mut budget = self.limits.max_history_chars;
         let mut shrinks = 0usize;
@@ -584,6 +608,48 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.base);
         }
+    }
+
+    #[test]
+    fn a_picture_reaches_the_model_with_the_words_that_came_with_it() {
+        let scratch = Scratch::new("picture");
+        let model = ScriptedModel::new(vec![Ok(answer("it is a cat"))]);
+        let agent = scratch.agent(model.clone());
+        let outcome = agent
+            .run_turn_with(
+                "what is this?",
+                &["data:image/png;base64,iVBORw0KGgo=".to_string()],
+                &Cancellation::new(),
+            )
+            .unwrap();
+        assert_eq!(outcome.text(), "it is a cat");
+        let seen = model.seen.lock().unwrap();
+        let request = &seen[0];
+        let user = request
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .unwrap();
+        assert_eq!(user.text(), "what is this?");
+        assert_eq!(user.image_count(), 1, "the model was shown the picture");
+        // A picture does not displace the rules: the system prompt is still the first message.
+        assert_eq!(request[0].role, "system");
+    }
+
+    #[test]
+    fn a_turn_with_no_picture_is_the_turn_it_always_was() {
+        let scratch = Scratch::new("no-picture");
+        let model = ScriptedModel::new(vec![Ok(answer("ok"))]);
+        let agent = scratch.agent(model.clone());
+        agent.run_turn("hello", &Cancellation::new()).unwrap();
+        let seen = model.seen.lock().unwrap();
+        let user = seen[0]
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .unwrap();
+        assert!(user.images.is_none());
+        assert_eq!(user.content.as_deref(), Some("hello"));
     }
 
     #[test]

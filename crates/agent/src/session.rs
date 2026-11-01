@@ -39,6 +39,14 @@ pub struct Record {
     pub role: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// Pictures the message carried, each a `data:` URL.
+    ///
+    /// Stored rather than referenced: the conversation has to be the whole conversation when it is
+    /// read back, and a path into a temporary directory is a picture that is gone by the time the
+    /// next turn replays it. The cost of that choice is size, and it is paid where it is measured —
+    /// in [`Record::chars`], which charges a picture the same fixed price whatever it weighs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<deepnest_llm::ToolCall>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -60,6 +68,7 @@ impl Record {
             kind: message_kind(),
             role: message.role.clone(),
             content: message.content.clone(),
+            images: message.images.clone(),
             tool_calls: message.tool_calls.clone(),
             tool_call_id: message.tool_call_id.clone(),
             at: now_iso(),
@@ -74,6 +83,7 @@ impl Record {
         Some(Message {
             role: self.role.clone(),
             content: self.content.clone(),
+            images: self.images.clone(),
             tool_calls: self.tool_calls.clone(),
             tool_call_id: self.tool_call_id.clone(),
         })
@@ -88,15 +98,27 @@ impl Record {
             kind: "note".to_string(),
             role: "agent".to_string(),
             content: Some(text.into()),
+            images: None,
             tool_calls: None,
             tool_call_id: None,
             at: now_iso(),
         }
     }
 
+    /// What one picture is charged against the history budget.
+    ///
+    /// Not its length. A 1 MB PNG is about 1.4 million base64 characters, and the whole budget is
+    /// [`crate::turn::Limits::max_history_chars`] — twenty times smaller — so charging the bytes
+    /// would evict every word of the conversation the picture was sent with, and the next turn
+    /// would arrive with a photograph and no history. What a picture really costs a provider is
+    /// tokens, by area; about a thousand of them for a screen-sized image, which in this budget's
+    /// currency is roughly this. An approximation, stated as one.
+    pub const IMAGE_CHARS: usize = 4_000;
+
     /// The characters this record costs once it is sent.
     pub fn chars(&self) -> usize {
-        let content = self.content.as_deref().unwrap_or(NO_TEXT).chars().count();
+        let content = self.content.as_deref().unwrap_or(NO_TEXT).chars().count()
+            + self.images.as_ref().map_or(0, Vec::len) * Self::IMAGE_CHARS;
         let calls: usize = self
             .tool_calls
             .as_ref()
@@ -600,6 +622,66 @@ mod tests {
         assert_eq!(iso_from_unix(0), "1970-01-01T00:00:00Z");
         assert_eq!(iso_from_unix(1_000_000_000), "2001-09-09T01:46:40Z");
         assert!(now_iso().ends_with('Z'));
+    }
+
+    const PIXEL: &str = "data:image/png;base64,iVBORw0KGgo=";
+
+    #[test]
+    fn a_picture_survives_a_round_trip_through_the_file() {
+        // A screenshot the agent cannot read back is a screenshot that vanished after one turn:
+        // the model sees it once, and every later request replays a conversation with a hole in it.
+        let scratch = Scratch::new("picture-roundtrip");
+        let session = scratch.session();
+        session
+            .append_message(&Message::with_images(
+                Some("what is this?".to_string()),
+                vec![PIXEL.to_string()],
+            ))
+            .unwrap();
+        let messages = session.messages().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content.as_deref(), Some("what is this?"));
+        assert_eq!(
+            messages[0].images.as_deref(),
+            Some([PIXEL.to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn a_file_written_before_pictures_existed_still_reads() {
+        // The claim that makes this shippable: `images` is an added key with a default, so every
+        // conversation already on a user's disk opens with its words intact and its pictures, of
+        // which it had none, absent rather than an error.
+        let scratch = Scratch::new("old-format");
+        let path = scratch.base.join("history.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                r#"{"type":"message","role":"user","content":"hello"}"#,
+                "\n",
+                r#"{"type":"message","role":"assistant","content":"hi"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let session = Session::open(path).unwrap();
+        let messages = session.messages().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content.as_deref(), Some("hello"));
+        assert!(messages[0].images.is_none());
+    }
+
+    #[test]
+    fn a_picture_is_charged_a_price_rather_than_its_length() {
+        // One photographed page is about 1.4 million base64 characters, and the whole history
+        // budget is 120 000: charging the bytes would evict every word the picture was sent with,
+        // and the next turn would arrive with a photograph and no conversation. So a picture costs
+        // a constant, and the constant is what this test pins.
+        let photo = format!("data:image/png;base64,{}", "A".repeat(1_400_000));
+        let record =
+            Record::from_message(&Message::with_images(Some("look".to_string()), vec![photo]));
+        assert_eq!(record.chars(), 4 + Record::IMAGE_CHARS);
+        assert!(Record::IMAGE_CHARS * 20 < crate::turn::Limits::default().max_history_chars);
     }
 
     #[test]

@@ -77,25 +77,110 @@ impl Reply {
 /// is a page that reloads in the middle of the user reading it.
 const WRITING_TOOLS: [&str; 3] = ["bash", "write", "edit"];
 
-/// Read `{"message": "..."}` out of a request body.
+/// The most pictures one message may carry.
+///
+/// Not a guess about the model: it is what the dialog can produce before the person has clearly
+/// stopped sending a message and started uploading an album. Every one of them travels in the
+/// request body and then into the conversation file.
+pub const MAX_IMAGES: usize = 8;
+
+/// The largest the pictures of one message may be together, in characters of `data:` URL.
+///
+/// A `data:` URL is a third larger than the bytes it carries, so this is a screenshot-sized budget
+/// with room for several of them, and a ceiling on what one request can make this process hold.
+pub const MAX_IMAGE_CHARS: usize = 8_000_000;
+
+/// One message as the dialog sends it: the words, and any pictures pasted with them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Ask {
+    pub text: String,
+    /// `data:` URLs, in the order they were pasted.
+    pub images: Vec<String>,
+}
+
+/// Read `{"message": "...", "images": ["data:image/png;base64,..."]}` out of a request body.
 ///
 /// The body and not the query for the same reason `POST /api/config` takes one: what the user types
 /// is their own text, and a URL is written into the browser's history and into whatever logs it.
-pub fn message_from(body: &[u8]) -> Result<String, String> {
+/// The pictures are here for the same reason, more so: a screenshot's base64 is far too long for a
+/// query string, and a query string is logged.
+///
+/// `images` is optional and its absence is the ordinary case — a typed message must parse exactly
+/// as it did before pictures existed.
+pub fn ask_from(body: &[u8]) -> Result<Ask, String> {
     let text = std::str::from_utf8(body).map_err(|_| "the body must be UTF-8 JSON")?;
     if text.trim().is_empty() {
         return Err("the body must be `{\"message\": \"...\"}` — it was empty".to_string());
     }
     let value: Value =
         serde_json::from_str(text).map_err(|error| format!("the body is not JSON: {error}"))?;
-    let message = value
-        .get("message")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "the body must carry a string field named `message`".to_string())?;
-    if message.trim().is_empty() {
-        return Err("`message` is empty — there is nothing to answer".to_string());
+    let images = images_from(&value)?;
+    let message = value.get("message").and_then(Value::as_str);
+    let words = message.map(str::trim).unwrap_or_default();
+    if words.is_empty() && images.is_empty() {
+        return Err(if message.is_none() {
+            "the body must carry a string field named `message`".to_string()
+        } else {
+            "`message` is empty — there is nothing to answer".to_string()
+        });
     }
-    Ok(message.to_string())
+    Ok(Ask {
+        text: message.unwrap_or_default().to_string(),
+        images,
+    })
+}
+
+/// Read the `images` field, if the body has one.
+///
+/// **A picture must be a `data:` URL and nothing else.** An `https://` URL here would be a request
+/// for the model provider to fetch that address on our behalf, which turns a pasted screenshot into
+/// a beacon that tells a third party what this machine is looking at — and it would make the
+/// conversation file a record of remote links rather than of the pictures themselves, so the turn
+/// replayed tomorrow would show whatever that URL serves then.
+fn images_from(value: &Value) -> Result<Vec<String>, String> {
+    let Some(field) = value.get("images") else {
+        return Ok(Vec::new());
+    };
+    if field.is_null() {
+        return Ok(Vec::new());
+    }
+    let array = field
+        .as_array()
+        .ok_or_else(|| "`images` must be a list of `data:image/...` URLs".to_string())?;
+    if array.len() > MAX_IMAGES {
+        return Err(format!(
+            "one message carries at most {MAX_IMAGES} pictures; this one has {}",
+            array.len()
+        ));
+    }
+    let mut images = Vec::with_capacity(array.len());
+    let mut total = 0usize;
+    for (index, entry) in array.iter().enumerate() {
+        let url = entry
+            .as_str()
+            .ok_or_else(|| format!("`images[{index}]` must be a string"))?;
+        if !url.starts_with("data:image/") {
+            return Err(format!(
+                "`images[{index}]` must be a `data:image/...` URL — anything else would have the \
+                 model provider fetch an address of its own, so a pasted picture is sent as bytes \
+                 or not at all"
+            ));
+        }
+        total += url.chars().count();
+        images.push(url.to_string());
+    }
+    if total > MAX_IMAGE_CHARS {
+        return Err(format!(
+            "the pictures in one message come to at most {MAX_IMAGE_CHARS} characters; this one \
+             has {total}"
+        ));
+    }
+    Ok(images)
+}
+
+/// Read `{"message": "..."}` out of a request body, words only.
+pub fn message_from(body: &[u8]) -> Result<String, String> {
+    ask_from(body).map(|ask| ask.text)
 }
 
 /// Run one message through the app's agent.
@@ -113,7 +198,10 @@ pub fn answer(
     home: &Path,
     app_dir: &Path,
     slug: &Slug,
-    message: &str,
+    // The message and whatever was pasted with it. One value rather than two parameters: they
+    // arrive together and are invalid apart, and a caller that passed words from one message and
+    // pictures from another would be a bug no type ever caught.
+    ask: &Ask,
     approver: Option<Arc<dyn Approver>>,
     // Why the last rebuild failed, when it did: the agent's next turn is told before it writes.
     build_note: Option<String>,
@@ -210,7 +298,7 @@ pub fn answer(
         agent = agent.with_approver(approver);
     }
 
-    let outcome = match agent.run_turn(message, &Cancellation::new()) {
+    let outcome = match agent.run_turn_with(&ask.text, &ask.images, &Cancellation::new()) {
         Ok(outcome) => outcome,
         // A turn that could not run at all is not a turn that failed: the difference is what the
         // user can do about it, so the status carries it.
@@ -345,6 +433,15 @@ mod tests {
         }
     }
 
+    /// A typed message: the words, and nothing pasted with them — the shape four of these tests
+    /// care about, spelled once.
+    fn ask_of(text: &str) -> Ask {
+        Ask {
+            text: text.to_string(),
+            images: Vec::new(),
+        }
+    }
+
     #[test]
     fn a_body_must_name_the_message() {
         assert_eq!(
@@ -361,6 +458,109 @@ mod tests {
             .contains("nothing to answer"));
     }
 
+    const PIXEL: &str = "data:image/png;base64,iVBORw0KGgo=";
+
+    #[test]
+    fn a_body_may_carry_pictures_beside_its_words() {
+        let ask =
+            ask_from(format!(r#"{{"message":"what is this?","images":["{PIXEL}"]}}"#).as_bytes())
+                .unwrap();
+        assert_eq!(ask.text, "what is this?");
+        assert_eq!(ask.images.len(), 1);
+        // Optional, and absent is the ordinary case: a client that never heard of pictures sends
+        // the same body it always did and gets the same message out.
+        let typed = ask_from(br#"{"message":"hello"}"#).unwrap();
+        assert!(typed.images.is_empty());
+        assert_eq!(typed.text, "hello");
+    }
+
+    #[test]
+    fn a_picture_must_be_bytes_and_not_a_link() {
+        // A link here would tell the model provider to fetch it, which is a request this machine
+        // never agreed to make — and a conversation that shows whatever that address serves later.
+        let error = ask_from(br#"{"message":"look","images":["https://example.com/album/1.png"]}"#)
+            .unwrap_err();
+        assert!(error.contains("data:image/"), "{error}");
+    }
+
+    #[test]
+    fn a_screenshot_with_no_words_is_still_something_to_answer() {
+        let ask = ask_from(format!(r#"{{"message":"","images":["{PIXEL}"]}}"#).as_bytes()).unwrap();
+        assert!(ask.text.is_empty(), "no words were invented for it");
+        assert_eq!(ask.images.len(), 1);
+        // With neither words nor pictures the old refusal still stands.
+        assert!(ask_from(br#"{"message":""}"#)
+            .unwrap_err()
+            .contains("nothing to answer"));
+    }
+
+    #[test]
+    fn a_body_is_refused_when_its_pictures_are_too_many_or_too_large() {
+        let one = format!(r#""{PIXEL}""#);
+        let many = [one.as_str(); MAX_IMAGES + 1].join(",");
+        let too_many = format!(r#"{{"message":"look","images":[{many}]}}"#);
+        assert!(ask_from(too_many.as_bytes())
+            .unwrap_err()
+            .contains("at most"));
+
+        let huge = format!(
+            r#"{{"message":"look","images":["data:image/png;base64,{}"]}}"#,
+            "A".repeat(MAX_IMAGE_CHARS + 1)
+        );
+        assert!(ask_from(huge.as_bytes())
+            .unwrap_err()
+            .contains("characters"));
+
+        // Not a list at all, and not a string inside it: both name the field they mean.
+        assert!(
+            ask_from(format!(r#"{{"message":"look","images":"{PIXEL}"}}"#).as_bytes())
+                .unwrap_err()
+                .contains("list")
+        );
+        assert!(ask_from(br#"{"message":"look","images":[42]}"#)
+            .unwrap_err()
+            .contains("`images[0]`"));
+    }
+
+    #[test]
+    fn a_picture_reaches_the_model_as_part_of_the_users_own_message() {
+        // The whole path, end to end in this process: a body with a pasted screenshot becomes a
+        // user message the model is shown, with the words it was sent with.
+        let scratch = Scratch::new("picture");
+        let model = Arc::new(Scripted::new(vec![Ok(AssistantTurn {
+            content: Some("A white pixel.".to_string()),
+            tool_calls: Vec::new(),
+            finish_reason: FinishReason::Stop,
+        })]));
+        let ask =
+            ask_from(format!(r#"{{"message":"what is this?","images":["{PIXEL}"]}}"#).as_bytes())
+                .unwrap();
+
+        let reply = answer(
+            Arc::clone(&model) as Arc<dyn Model>,
+            &scratch.home,
+            &scratch.app_dir(),
+            &scratch.slug(),
+            &ask,
+            None,
+            None,
+        );
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        let seen = model.seen.lock().unwrap();
+        let user = seen[0]
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .unwrap();
+        assert_eq!(user.text(), "what is this?");
+        assert_eq!(user.image_count(), 1);
+
+        // And it is in the conversation afterwards, so the next turn still has the screenshot.
+        let history = AgentPaths::for_app(scratch.app_dir()).history();
+        let text = std::fs::read_to_string(&history).unwrap();
+        assert!(text.contains("what is this?"), "{text}");
+    }
+
     #[test]
     fn a_message_is_answered_by_the_model_and_the_conversation_is_kept() {
         let scratch = Scratch::new("answered");
@@ -375,7 +575,7 @@ mod tests {
             &scratch.home,
             &scratch.app_dir(),
             &scratch.slug(),
-            "what is on the list?",
+            &ask_of("what is on the list?"),
             None,
             None,
         );
@@ -425,7 +625,7 @@ mod tests {
             &scratch.home,
             &scratch.app_dir(),
             &scratch.slug(),
-            "write the list",
+            &ask_of("write the list"),
             None,
             None,
         );
@@ -450,7 +650,7 @@ mod tests {
             &scratch.home,
             &stray,
             &Scratch::slug_of("stray"),
-            "hello",
+            &ask_of("hello"),
             None,
             None,
         );
@@ -474,7 +674,7 @@ mod tests {
             &scratch.home,
             &scratch.app_dir(),
             &scratch.slug(),
-            "something the provider will not answer",
+            &ask_of("something the provider will not answer"),
             None,
             None,
         );
@@ -507,7 +707,7 @@ mod tests {
             &scratch.home,
             &scratch.app_dir(),
             &scratch.slug(),
-            "hello",
+            &ask_of("hello"),
             None,
             None,
         );
