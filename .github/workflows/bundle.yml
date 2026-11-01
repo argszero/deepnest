@@ -1,32 +1,36 @@
 name: macOS bundle
 
-# What this produces is **a bundle to look at, not a release.** The `.app` inside the artifact is
-# unsigned, so Gatekeeper refuses it on any machine except the one that built it, and nothing here
-# attaches anything to a tag. It exists so the layout that `crates/bundle` writes can be produced the
-# way a release would produce it, and so the disk image around it is somebody else's problem to
-# check rather than a step discovered at the first release.
+# What this produces is a bundle, and — when it is dispatched by a tag — a release that carries it.
 #
-# Deliberately missing, and what each one needs:
+# The unsigned path is first-class rather than a degraded mode: a build with no Developer ID produces
+# an ad-hoc-signed `.dmg`, and that download opens after the README's right-click-open step. What it
+# cannot do is pass Gatekeeper unattended, and the summary says which of the two a given run was, so
+# nobody has to infer it from a log.
 #
-#   1. Signing every Mach-O — `codesign --options runtime --timestamp` over the binary, and over
-#      each executable inside the payload before it is packed, because first-run unpacking does not
-#      re-sign and an unsigned child process is refused under hardened runtime. **The step exists**:
-#      `cargo run -p deepnest-bundle -- --sign dist` walks a tree, signs every Mach-O in it and
-#      verifies each signature, taking the identity's name from `DEEPNEST_SIGNING_IDENTITY`. What it
-#      still needs is that identity — a Developer ID Application certificate whose key is already in
-#      a keychain, which is a secret this repository does not hold and this program never reads.
-#   2. Notarization — `notarytool submit --wait`, then `stapler staple` on the `.dmg`. Needs the
-#      Apple ID, the team id and an app-specific password.
-#   3. The tag path — `on: push: tags`, a version taken from the tag instead of the workspace, the
-#      `.dmg` attached to a GitHub release, and a README note on opening an unsigned build. It waits
-#      on 1 and 2, because a release that ships unsigned is a download that does not open.
+# Three inputs this repository does not hold, and what each one adds:
 #
-# Until then this runs on request only: a release pipeline is not a test loop, and the layout's
-# correctness is the unit tests `cargo test --workspace` runs on all three platforms.
+#   1. `DEEPNEST_SIGNING_IDENTITY` (with its certificate, imported from `MACOS_CERTIFICATE` /
+#      `MACOS_CERTIFICATE_PASSWORD`) — a Developer ID Application identity. Without it, everything is
+#      ad-hoc signed: the app runs where it was built and is refused elsewhere.
+#   2. `MACOS_APPLE_ID`, `MACOS_TEAM_ID`, `MACOS_NOTARY_PASSWORD` — the account, the team and an
+#      app-specific password. With them the `.dmg` is submitted to `notarytool` and stapled; without
+#      them it is not, and the README says what opening the download looks like.
+#   3. A tag. `on: push: tags: v*` is the release path; a manual dispatch produces the same artifact
+#      and attaches nothing.
+#
+# The payload is built here rather than committed: a Rust toolchain and the JavaScript runtime are
+# assembled on the runner, packed by `deepnest-pack`, and embedded through `DEEPNEST_PAYLOAD`. That
+# is what makes the binary genuinely self-contained instead of claiming to be.
 
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - "v*"
 
+# `contents: write` is what attaching an asset to a release costs. A dispatch from a branch has no
+# tag to attach to, and the extra permission buys nothing there — but GitHub sets permissions per
+# job, not per event, so it is granted on the tag path only.
 permissions:
   contents: read
 
@@ -36,11 +40,17 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # The toolchain the payload carries. Pinned rather than floating: a release that quietly changed
+  # compiler between two tags is a difference nobody can see in the tag's name.
+  TOOLCHAIN: "1.95.0"
+  BUN: "1.2.21"
 
 jobs:
   bundle:
     name: macOS bundle
     runs-on: macos-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -50,18 +60,107 @@ jobs:
       - name: Cache the build
         uses: Swatinem/rust-cache@v2
 
-      # No `DEEPNEST_PAYLOAD`, so this binary carries no toolchain and resolves one from `PATH` — the
-      # same build CI tests. A payload means compressing a real toolchain tree, which is the next step
-      # of the packaging work and not this one's.
-      - name: Build
+      # A tag is `v0.1.0`; the version a bundle reports is `0.1.0`. A dispatch from a branch has no
+      # tag, so it reports the workspace's own version — the honest one for a build that is not a
+      # release.
+      - name: Decide the version
+        id: version
+        run: |
+          set -eux
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version=$(cargo metadata --no-deps --format-version 1 \
+              | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          fi
+          case "$version" in
+            ''|*[!0-9.]*) echo "not a version: $version" >&2; exit 1 ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "releasing=${GITHUB_REF_TYPE}" >> "$GITHUB_OUTPUT"
+
+      # The payload's contents, assembled where a signature can reach them. `--profile minimal`
+      # because a toolchain that carries documentation, `clippy` and `rustfmt` is a download whose
+      # extra megabytes buy the user nothing at first run.
+      - name: Assemble the toolchain the binary will carry
+        run: |
+          set -eux
+          rustup toolchain install "${TOOLCHAIN}" --profile minimal --no-self-update
+          root=$(rustup toolchain list -v | awk -v want="${TOOLCHAIN}" '$1 ~ want {print $NF; exit}')
+          test -n "$root"
+          mkdir -p payload-tree/bin
+          cp -R "$root/bin" "$root/lib" payload-tree/
+          # The JavaScript runtime, from its own installer, then copied in: what is signed and packed
+          # is a file in the payload tree, not a path in somebody's home.
+          curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN}"
+          cp "$HOME/.bun/bin/bun" payload-tree/bin/bun
+          chmod +x payload-tree/bin/bun
+          # A payload with no compiler in it unpacks perfectly and changes nothing, so the tree is
+          # checked for the programs the first build will look for.
+          for tool in rustc cargo bun; do
+            test -x "payload-tree/bin/$tool" || { echo "no $tool in the payload" >&2; exit 1; }
+          done
+          du -sh payload-tree
+          payload-tree/bin/rustc --version
+          payload-tree/bin/bun --version
+
+      # The payload's own executables are signed *before* they are packed, because first-run
+      # unpacking does not re-sign anything: an unsigned child process inside a hardened-runtime app
+      # is refused, and the failure arrives as a build that cannot find its compiler.
+      - name: Sign the payload's Mach-O files
+        env:
+          DEEPNEST_SIGNING_IDENTITY: ${{ secrets.DEEPNEST_SIGNING_IDENTITY }}
+        run: |
+          set -eux
+          if [ -z "${DEEPNEST_SIGNING_IDENTITY}" ]; then
+            echo "no signing identity: the payload travels ad-hoc signed" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          cargo run --release --locked -p deepnest-bundle -- --sign payload-tree
+
+      # `-p` names the *package*, and the binary is not spelled like it: the crate is
+      # `deepnest-packaging` while the program it builds is `deepnest-pack`. Both are given, because
+      # `-p deepnest-pack` reads correct and resolves to nothing.
+      - name: Pack the payload
+        run: |
+          set -eux
+          mkdir -p payload
+          cargo run --release --locked -p deepnest-packaging --bin deepnest-pack -- \
+            --from payload-tree --into payload/toolchain.zst
+          size=$(stat -f%z payload/toolchain.zst)
+          echo "payload ${size} bytes" | tee -a "$GITHUB_STEP_SUMMARY"
+          # A truncated or empty archive unpacks to a tree with no compiler in it, and that failure
+          # would surface at a user's first build rather than here. The floor is well under what a
+          # minimal toolchain plus a JavaScript runtime compresses to.
+          test "$size" -gt 1000000
+
+      # `DEEPNEST_PAYLOAD` is what makes the binary carry the toolchain. It is set **here and not on
+      # the test step**, and that is not a detail: `payload::tests` asserts that a build without a
+      # payload says so, so a workspace test run that inherited this variable would fail on a binary
+      # that is behaving exactly as intended. The unit tests run in `ci.yml`, on all three platforms,
+      # with no payload — which is the build a developer has.
+      - name: Build, carrying the payload
+        env:
+          DEEPNEST_PAYLOAD: payload/toolchain.zst
         run: cargo build --release --locked -p deepnest
 
-      # No `--version`: this build is not a release, so the workspace's own version is the honest
-      # one. The release path passes the tag, which is the only case where the two differ.
+      # The binary is checked for the payload it claims: a release that shipped without one would
+      # otherwise look identical to one that shipped with it until a user's first build.
+      - name: Check the binary carries what it says
+        run: |
+          set -eux
+          bare=$(stat -f%z target/release/deepnest)
+          payload=$(stat -f%z payload/toolchain.zst)
+          echo "binary ${bare} bytes, payload ${payload} bytes" | tee -a "$GITHUB_STEP_SUMMARY"
+          # The payload is embedded byte for byte, so the binary has to be at least this large. A
+          # floor rather than an equality: the code around it is not this step's business.
+          test "$bare" -gt "$payload"
+
       - name: Lay out the bundle
         run: >-
           cargo run --release --locked -p deepnest-bundle --
           --binary target/release/deepnest --into dist
+          --version "${{ steps.version.outputs.version }}"
 
       # The bundle is checked the way the system will read it rather than by listing the directory:
       # an `Info.plist` that does not parse is a bundle the Finder offers to open and the system then
@@ -74,29 +173,31 @@ jobs:
             dist/Deepnest.app/Contents/Info.plist)
           test -x "dist/Deepnest.app/Contents/MacOS/$executable"
           file "dist/Deepnest.app/Contents/MacOS/$executable"
+          version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+            dist/Deepnest.app/Contents/Info.plist)
+          test "$version" = "${{ steps.version.outputs.version }}"
+          echo "bundle reports $version" | tee -a "$GITHUB_STEP_SUMMARY"
 
-          # Ad-hoc — what the linker leaves on arm64 — and *not* a Developer ID. This is a claim the
-          # header of this file makes, so it fails the day this workflow starts signing with an
-          # identity instead of the release path doing it: a bundle signed on its own, with an
-          # unsigned toolchain still inside its payload, is the failure that looks finished.
-          signature=$(codesign -dv "dist/Deepnest.app/Contents/MacOS/$executable" 2>&1)
-          echo "$signature"
-          case "$signature" in
-            *"Signature=adhoc"*) ;;
-            *) echo "expected an ad-hoc signature on an unsigned bundle" >&2; exit 1 ;;
-          esac
-
-          # And Gatekeeper refuses it, which is the other half of the header: this artifact is
-          # something to look at, never something to ship.
-          if spctl -a -t exec -vv dist/Deepnest.app; then
-            echo "Gatekeeper accepted a bundle nobody signed" >&2
-            exit 1
+      - name: Sign the bundle
+        env:
+          DEEPNEST_SIGNING_IDENTITY: ${{ secrets.DEEPNEST_SIGNING_IDENTITY }}
+        run: |
+          set -eux
+          if [ -z "${DEEPNEST_SIGNING_IDENTITY}" ]; then
+            # Ad-hoc — what the linker leaves on arm64 — and *not* a Developer ID. Measured rather
+            # than assumed, and named in the summary so the artifact says what it is.
+            signature=$(codesign -dv dist/Deepnest.app/Contents/MacOS/* 2>&1 || true)
+            case "$signature" in
+              *"Signature=adhoc"*) echo "unsigned release: ad-hoc signature only" ;;
+              *) echo "expected an ad-hoc signature on an unsigned bundle: $signature" >&2; exit 1 ;;
+            esac
+            echo "**unsigned build** — no Developer ID; open it with right-click → Open" \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
+          cargo run --release --locked -p deepnest-bundle -- --sign dist
+          codesign --verify --strict --verbose=2 dist/Deepnest.app
 
-      # The one step no local run could prove: `hdiutil` needs to attach a disk image to copy into,
-      # and it is refused inside the sandbox this project's own runs are confined to. So it verifies
-      # itself here rather than being trusted — a disk image that cannot be read back is not a disk
-      # image — and the first dispatch of this workflow is its first real execution.
       - name: Make the disk image
         run: |
           set -eux
@@ -105,12 +206,63 @@ jobs:
           hdiutil verify dist/Deepnest.dmg
           shasum -a 256 dist/Deepnest.dmg | tee dist/Deepnest.dmg.sha256
 
+      - name: Sign the disk image
+        env:
+          DEEPNEST_SIGNING_IDENTITY: ${{ secrets.DEEPNEST_SIGNING_IDENTITY }}
+        run: |
+          set -eux
+          if [ -z "${DEEPNEST_SIGNING_IDENTITY}" ]; then
+            echo "no signing identity: the disk image travels unsigned"
+            exit 0
+          fi
+          codesign --sign "${DEEPNEST_SIGNING_IDENTITY}" --options runtime --timestamp \
+            --force dist/Deepnest.dmg
+          codesign --verify --strict --verbose=2 dist/Deepnest.dmg
+
+      # Notarization needs all three, and it is skipped as a set rather than one at a time: a
+      # submission with two of them fails with an authentication error that says nothing about which
+      # one is missing.
+      - name: Notarize the disk image
+        env:
+          APPLE_ID: ${{ secrets.MACOS_APPLE_ID }}
+          TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+          DEEPNEST_SIGNING_IDENTITY: ${{ secrets.DEEPNEST_SIGNING_IDENTITY }}
+        run: |
+          set -eux
+          if [ -z "${APPLE_ID}" ] || [ -z "${TEAM_ID}" ] || [ -z "${NOTARY_PASSWORD}" ] \
+             || [ -z "${DEEPNEST_SIGNING_IDENTITY}" ]; then
+            echo "no notary credentials: the disk image is not notarized" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          xcrun notarytool submit dist/Deepnest.dmg --wait \
+            --apple-id "${APPLE_ID}" --team-id "${TEAM_ID}" --password "${NOTARY_PASSWORD}"
+          xcrun stapler staple dist/Deepnest.dmg
+          xcrun stapler validate dist/Deepnest.dmg
+          spctl --assess --type open --context context:primary-signature -vv dist/Deepnest.dmg
+
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: Deepnest-macos-unsigned
+          name: Deepnest-macos-${{ steps.version.outputs.version }}
           path: |
             dist/Deepnest.dmg
             dist/Deepnest.dmg.sha256
           if-no-files-found: error
           retention-days: 14
+
+      # The release path, and the whole reason a tag exists. `--clobber` because re-running a tag's
+      # workflow must replace the asset rather than fail on one that is already there: a release is
+      # a name for an artifact, and the artifact a tag points at is the one this run produced.
+      - name: Attach the disk image to the release
+        if: steps.version.outputs.releasing == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          tag="${GITHUB_REF_NAME}"
+          gh release view "$tag" >/dev/null 2>&1 \
+            || gh release create "$tag" --title "deepnest ${tag}" --generate-notes
+          gh release upload "$tag" dist/Deepnest.dmg dist/Deepnest.dmg.sha256 --clobber
+          gh release view "$tag" --json tagName,assets \
+            --jq '.tagName, (.assets[].name)'

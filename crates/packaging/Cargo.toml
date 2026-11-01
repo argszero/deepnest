@@ -12,3 +12,10 @@ publish = false
 # compression, and both are the shape rustup distributes a toolchain in.
 tar = "0.4"
 zstd = "0.13"
+
+# The writer `pack` was built against, reachable from a release. Named `deepnest-pack` rather than
+# taking the crate's own name, because the thing a pipeline calls should say what it does: this
+# program packs, and `deepnest-bundle` is the one that lays out a `.app`.
+[[bin]]
+name = "deepnest-pack"
+path = "src/main.rs"
