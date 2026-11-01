@@ -8,6 +8,10 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# The toolchain archive the release pipeline packs and the build embeds. A build input, never a
+# source file: it is tens of megabytes, and `git add -A` after a payload build must not take it.
+/payload/
+
 # Local app data and runtimes unpacked by deepnest
 /.deepnest/
 *.sqlite
