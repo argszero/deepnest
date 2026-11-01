@@ -927,6 +927,44 @@ mod tests {
     }
 
     #[test]
+    fn the_conversation_can_be_reached_by_a_keyboard() {
+        // The transcript is the one box in the dialog that scrolls on its own — `max-height:
+        // 18rem` and `overflow-y: auto` — and a box a keyboard cannot focus is a box a keyboard
+        // cannot scroll. Measured in Chrome with real key presses, before this: the tab order ran
+        // from the ball to "Conversations", then through the twelve copy buttons *inside* the
+        // transcript, then on to the jump button and the message box. The transcript itself never
+        // took focus, so with a keyboard the answers above the fold could not be read at all.
+        //
+        // The reading is about reach rather than about scrolling: focused by script, the box did
+        // move on PageDown in the same browser. What was missing was the way in.
+        assert!(
+            DIALOG_SCRIPT.contains(r#"transcript.setAttribute("tabindex", "0")"#),
+            "the transcript is not in the tab order, so a keyboard cannot reach the conversation"
+        );
+        // `role="log"` and its label were already there; the tab stop is what makes them reachable,
+        // and a test that dropped either half would leave a box announced to nobody.
+        assert!(
+            DIALOG_SCRIPT.contains(r#"transcript.setAttribute("role", "log")"#),
+            "the conversation is not announced as a log"
+        );
+        assert!(
+            DIALOG_SCRIPT
+                .contains(r#"transcript.setAttribute("aria-label", "This app's conversation")"#),
+            "the conversation has no name to announce"
+        );
+        // A box that takes focus has to show it, and inside its own edge: drawn outside, the ring
+        // lands on the jump button and the message box beneath.
+        assert!(
+            DIALOG_STYLE.contains("#deepnest-dialog-transcript:focus-visible"),
+            "the transcript takes focus without saying so"
+        );
+        assert!(
+            DIALOG_STYLE.contains("outline-offset: -2px"),
+            "the focus ring is drawn outside the box it belongs to"
+        );
+    }
+
+    #[test]
     fn the_transcript_yields_to_a_reader_who_scrolled_up_and_offers_the_way_back() {
         // A transcript that scrolls itself while it is being written to cannot be read while the
         // agent works, which is the one moment reading it is worth something.
