@@ -482,18 +482,95 @@ const INDEX_HTML: &str = r#"<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>@@APP_NAME@@</title>
 <!-- The stylesheet is inline and the script is a relative path: one artifact to build, and it
-     keeps working when deepnest serves this page under /app/<slug>/ with an injected <base>. -->
+     keeps working when deepnest serves this page under /app/<slug>/ with an injected <base>.
+
+     This page is the first thing the user sees of the app, and it is the reference the app's agent
+     reads before changing it, so it is a starting point that already looks deliberate rather than
+     a wireframe: the token block below is the whole palette, rhythm and elevation. A new colour or
+     a new gap that is not one of those variables is a second visual system in a page that can
+     carry one. -->
 <style>
-  :root { color-scheme: light dark; }
-  body { font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, sans-serif; margin: 0; }
-  main { max-width: 34rem; margin: 10vh auto 0; padding: 0 1.5rem; }
-  h1 { font-size: 1.5rem; margin: 0 0 .25rem; letter-spacing: -.02em; }
-  .sub { margin: 0 0 1.5rem; opacity: .65; font-size: .9rem; }
-  ul { list-style: none; padding: 0; margin: 0 0 1.5rem; }
-  li { padding: .5rem 0; border-bottom: 1px solid rgba(127,127,127,.25); }
-  form { display: flex; gap: .5rem; }
-  input { flex: 1; padding: .5rem .65rem; font: inherit; border: 1px solid rgba(127,127,127,.4); border-radius: 6px; background: transparent; color: inherit; }
-  button { padding: .5rem .9rem; font: inherit; border-radius: 6px; border: 1px solid rgba(127,127,127,.4); background: rgba(127,127,127,.14); color: inherit; cursor: pointer; }
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfbfd;
+    --surface: #ffffff;
+    --line: #e4e4ee;
+    --text: #16161d;
+    --muted: #62626f;
+    --accent: #5b5bd6;
+    --accent-soft: #ededfb;
+    --danger: #b3261e;
+    --danger-soft: #fbebe9;
+    --radius: 12px;
+    --step: 8px;
+    --shadow: 0 1px 2px rgba(16, 16, 24, .06), 0 10px 30px rgba(16, 16, 24, .07);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d0d11;
+      --surface: #16161d;
+      --line: #2a2a36;
+      --text: #f2f2f6;
+      --muted: #a2a2b2;
+      --accent: #a6a6ff;
+      --accent-soft: #21213a;
+      --danger: #ff9c94;
+      --danger-soft: #2e1b1a;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .5), 0 10px 30px rgba(0, 0, 0, .35);
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  main {
+    max-width: 38rem;
+    margin: 0 auto;
+    padding: calc(var(--step) * 8) calc(var(--step) * 3) calc(var(--step) * 6);
+  }
+  .head { display: flex; align-items: baseline; gap: var(--step); flex-wrap: wrap; }
+  h1 { font-size: 1.6rem; line-height: 1.2; letter-spacing: -.021em; margin: 0; }
+  .badge {
+    font-size: .75rem;
+    font-weight: 600;
+    letter-spacing: .02em;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border-radius: 999px;
+    padding: 1px 9px;
+  }
+  .lede { margin: calc(var(--step) / 2) 0 calc(var(--step) * 3); color: var(--muted); }
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .list { list-style: none; margin: 0; padding: 0; }
+  .row { padding: calc(var(--step) * 1.5) calc(var(--step) * 2); border-bottom: 1px solid var(--line); }
+  .row:last-child { border-bottom: 0; }
+  /* The empty state is not an absence of design: for a new app it is the only screen there is,
+     which is why it gets a shape and a sentence rather than a blank panel. */
+  .empty { margin: 0; padding: calc(var(--step) * 5) calc(var(--step) * 2); color: var(--muted); text-align: center; }
+  .problem {
+    margin: 0 0 calc(var(--step) * 2);
+    padding: calc(var(--step) * 1.25) calc(var(--step) * 2);
+    border-radius: var(--radius);
+    border: 1px solid var(--danger);
+    background: var(--danger-soft);
+    color: var(--danger);
+  }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  @media (prefers-reduced-motion: no-preference) {
+    .row { transition: background-color .12s ease; }
+    .row:hover { background: var(--accent-soft); }
+  }
 </style>
 </head>
 <body>
@@ -534,15 +611,31 @@ function App() {
 
   return (
     <main>
-      <h1>@@APP_NAME@@</h1>
-      <p className="sub">A new app. Ask its agent to change it.</p>
-      {problem ? <p className="sub">Cannot read the list: {problem}</p> : null}
-      <ul>
-        {items.length === 0 ? <li>Nothing yet.</li> : null}
-        {items.map((item) => (
-          <li key={item.id}>{item.text}</li>
-        ))}
-      </ul>
+      <header className="head">
+        <h1>@@APP_NAME@@</h1>
+        <span className="badge">
+          {items.length} {items.length === 1 ? "item" : "items"}
+        </span>
+      </header>
+      <p className="lede">Running on this machine. Ask its agent for a change.</p>
+      {problem !== null ? (
+        <p className="problem" role="alert">
+          Cannot read the list: {problem}
+        </p>
+      ) : null}
+      <section className="panel" aria-label="Items">
+        {items.length === 0 ? (
+          <p className="empty">Nothing here yet. Ask the agent to add the first one.</p>
+        ) : (
+          <ul className="list">
+            {items.map((item) => (
+              <li className="row" key={item.id}>
+                {item.text}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
     </main>
   );
 }
@@ -790,5 +883,51 @@ mod tests {
         ] {
             assert!(ignore.contains(pattern), "{pattern} missing from {ignore}");
         }
+    }
+
+    #[test]
+    fn the_generated_page_declares_its_whole_look_as_one_token_block() {
+        // Found by running deepnest for real and looking at the page: it worked and looked like a
+        // wireframe. The fix has to be a look the app can keep, not a single flattering screen, so
+        // what is checked is the seam the agent restyles through — one place for the palette and
+        // the rhythm, and a dark set beside it.
+        let scratch = Scratch::new("tokens");
+        let created = create(&slug(), &scratch.dir(), "Notes").unwrap();
+        let page = fs::read_to_string(created.dir.join("frontend/index.html")).unwrap();
+
+        for token in [
+            "--bg:",
+            "--surface:",
+            "--text:",
+            "--accent:",
+            "--step:",
+            "--radius:",
+        ] {
+            assert!(page.contains(token), "{token} missing from the token block");
+        }
+        // A page that reads the OS's preference is a page that is right in both.
+        assert!(page.contains("prefers-color-scheme: dark"), "{page}");
+        // `color-scheme` is what makes the scrollbar and form controls follow it.
+        assert!(page.contains("color-scheme: light dark"), "{page}");
+    }
+
+    #[test]
+    fn the_generated_page_styles_the_states_a_new_app_starts_in() {
+        // An app's first screen is an empty list on a day-one database, so the empty state is the
+        // design, not an edge case. Both states are checked in both halves — the stylesheet defines
+        // them and the component reaches for them — because a class the component never uses is a
+        // stylesheet that is dead on arrival.
+        let scratch = Scratch::new("states");
+        let created = create(&slug(), &scratch.dir(), "Notes").unwrap();
+        let page = fs::read_to_string(created.dir.join("frontend/index.html")).unwrap();
+        let script = fs::read_to_string(created.dir.join("frontend/src/main.jsx")).unwrap();
+
+        assert!(page.contains(".empty"), "{page}");
+        assert!(page.contains(".problem"), "{page}");
+        assert!(script.contains("className=\"empty\""), "{script}");
+        assert!(script.contains("className=\"problem\""), "{script}");
+        // A failure is announced, not merely painted: colour alone is not a state a screen reader
+        // reaches.
+        assert!(script.contains("role=\"alert\""), "{script}");
     }
 }
