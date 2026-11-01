@@ -1453,6 +1453,58 @@ mod tests {
     }
 
     #[test]
+    fn the_message_box_sends_on_enter_and_keeps_shift_enter_for_a_new_line() {
+        // The box a person types into constantly, and the key every agent front end sends with.
+        // Measured in Chrome with a real key press, on the box holding "fix the failing tests":
+        // `Enter` reached the textarea as a `keydown`, the browser turned it into a line break
+        // (`beforeinput:insertLineBreak`), the form was submitted **0** times and the stub saw **0**
+        // chat requests. So the sentence stayed in the box and a second line appeared under it.
+        // After: the same press submits **1** time, posts exactly one request carrying that
+        // message, and no line break is inserted.
+        assert!(
+            DIALOG_SCRIPT.contains("input.addEventListener(\"keydown\""),
+            "the message box has no key handler, so Enter cannot send"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#"if (event.key !== "Enter" || event.shiftKey) {"#),
+            "Enter is not the sending key, or Shift+Enter is taken away from the new line"
+        );
+        // An input method's Enter belongs to the input method. Without this guard a person writing
+        // Chinese sends half a word the moment they accept a candidate — the host does write
+        // Chinese, so the guard is the difference between the key working and the key losing text.
+        assert!(
+            DIALOG_SCRIPT.contains("if (event.isComposing || event.keyCode === 229) {"),
+            "an Enter that is choosing an input method's candidate would send the message"
+        );
+        // `requestSubmit` rather than a click on the button: the button is disabled for the length
+        // of a turn, and clicking it would turn the key off for exactly the minutes it is used.
+        assert!(
+            DIALOG_SCRIPT.contains("form.requestSubmit()"),
+            "Enter does not go through the form's own send path"
+        );
+        // Measured after the fix: with a turn running, `send.disabled` is true and the key is left
+        // to the browser, so it is a line break rather than a send that the server would refuse.
+        assert!(
+            DIALOG_SCRIPT.contains("if (send.disabled) {"),
+            "Enter during a turn would post a second request instead of leaving the key alone"
+        );
+        // The handler has to reach the send path, and the send path is the submit handler below it:
+        // a key handler defined after it would still work, but one that named the route itself
+        // would be a second place that knows what sending means. This pins the arrangement the
+        // comment above describes.
+        let keyed = DIALOG_SCRIPT
+            .find("input.addEventListener(\"keydown\"")
+            .expect("the handler exists");
+        let submitted = DIALOG_SCRIPT
+            .find("form.addEventListener(\"submit\"")
+            .expect("the send path exists");
+        assert!(
+            keyed < submitted,
+            "the Enter handler sits after the submit handler it is supposed to route into"
+        );
+    }
+
+    #[test]
     fn the_drawer_lists_the_conversations_and_says_which_one_the_next_message_would_join() {
         // The gap this closes: an app had one conversation and no way to start a clean second one
         // without deleting the first. The page's part is the list and the choice, and the choice
