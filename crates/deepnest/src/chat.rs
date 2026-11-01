@@ -26,11 +26,12 @@
 //! What this does **not** do yet, stated where it is implemented so a later reader does not have to
 //! infer it from an absence:
 //!
-//! - **The answer arrives whole.** Not any more because the transport refuses to stream — it does
-//!   stream, and delivers each event as it arrives — but because nothing above it asks: this route
-//!   returns one JSON body, `crate::model::Endpoint` implements one `Model` call per turn, and the
-//!   page waits for the reply. The turn is the same turn either way; what is missing is watching it
-//!   being written.
+//! - **The answer can arrive whole or a piece at a time.** The transport streams and delivers each
+//!   event as it arrives. [`answer`] still returns one [`Reply`] and `POST …/chat` still answers
+//!   one JSON body, because a caller that only wants the result loses nothing by waiting for it;
+//!   [`watched`] is the same turn with an observer, and the route above it uses that when the
+//!   request asks for a stream. The turn is the same turn either way — what differs is whether
+//!   anything is watching it being written.
 //! - **A writing turn starts a rebuild, and does not wait for it.** The reply says `changed` and
 //!   the router enqueues the build ([`crate::rebuild`]); this function returns at once, because a
 //!   build inside the request would hold one HTTP connection for a minute of `bun install`, which
@@ -233,6 +234,25 @@ pub fn answer(
     ask: &Ask,
     terms: &Terms,
 ) -> Reply {
+    self::watched(model, home, app_dir, slug, ask, terms, &mut |_| {})
+}
+
+/// The same turn, with the model's text handed to `on_text` as it is written.
+///
+/// What the observer is for is the route above this: a caller that draws the answer while it is
+/// being written passes one, and a caller that only wants the result passes nothing and gets the
+/// behaviour it always had. Everything else — the refusals before the turn starts, the conversation
+/// written to disk, the reply's shape — is shared, because a watched turn and an unwatched one are
+/// the same turn and must not be able to drift.
+pub fn watched(
+    model: Arc<dyn Model>,
+    home: &Path,
+    app_dir: &Path,
+    slug: &Slug,
+    ask: &Ask,
+    terms: &Terms,
+    on_text: &mut dyn FnMut(&str),
+) -> Reply {
     if let Err(error) = manifest::load(app_dir) {
         return Reply::error(
             404,
@@ -349,7 +369,7 @@ pub fn answer(
     // The flag the router registered for this turn: a stop pressed in the dialog reaches the loop
     // from another connection, and the loop checks it before the next request and before every
     // tool call of a batch.
-    let outcome = match agent.run_turn_with(&ask.text, &ask.images, &terms.cancel) {
+    let outcome = match agent.run_turn_watched(&ask.text, &ask.images, &terms.cancel, on_text) {
         Ok(outcome) => outcome,
         // A turn that could not run at all is not a turn that failed: the difference is what the
         // user can do about it, so the status carries it.

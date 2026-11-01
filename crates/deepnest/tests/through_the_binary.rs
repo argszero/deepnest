@@ -27,7 +27,7 @@
 //! port and is refused on it.
 
 use std::io::{Read, Write};
-use std::net::{Shutdown, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, MutexGuard};
@@ -131,6 +131,45 @@ impl Install {
         // A copy rather than a symlink: a link needs privileges on Windows and is resolved to the
         // example's own path, which the app contract would then see instead of its own binary.
         std::fs::copy(standin_app(), &binary).expect("copy the stand-in app into place");
+    }
+
+    /// A request with a JSON body and the token, answered whole.
+    ///
+    /// Separate from [`Install::call`] because that one sends no body: the routes that read one are
+    /// exactly the routes a token is required on, so a body and a token travel together here.
+    fn post_json(&self, target: &str, body: &str) -> String {
+        let mut stream = TcpStream::connect(("127.0.0.1", self.port))
+            .unwrap_or_else(|error| panic!("connect to 127.0.0.1:{}: {error}", self.port));
+        stream
+            .set_read_timeout(Some(Duration::from_secs(PATIENCE.as_secs())))
+            .unwrap();
+        stream
+            .write_all(
+                format!(
+                    "POST {target} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\
+                     Authorization: Bearer {}\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\n\r\n{body}",
+                    self.port,
+                    self.token(),
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let mut answer = Vec::new();
+        stream.read_to_end(&mut answer).unwrap();
+        String::from_utf8_lossy(&answer).into_owned()
+    }
+
+    /// Point the binary at a model endpoint, as the first-run form does.
+    fn configure(&self, base_url: &str) {
+        let body =
+            format!(r#"{{"base_url":"{base_url}","api_key":"sk-test","model":"test-model"}}"#);
+        let answer = self.post_json("/api/config", &body);
+        assert!(
+            answer.starts_with("HTTP/1.1 200"),
+            "configuring the model endpoint failed: {answer}"
+        );
     }
 
     /// Start the binary against this home, learn the port it took, and wait until it answers.
@@ -741,4 +780,154 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
         .any(|window| window == needle)
+}
+
+/// A model endpoint on this machine that writes its answer in pieces, pausing between them.
+///
+/// A real endpoint on a real socket rather than a stub, because the turn under test runs inside the
+/// binary: what this replaces is the provider and nothing else. The request is the one deepnest
+/// sends, the stream is read by the adapter that reads a provider's stream, and the pauses are what
+/// tell an answer shown while it is written from an answer shown once it is finished.
+fn dribbling_provider() -> String {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let pieces: Vec<(String, Duration)> = vec![
+        (
+            format!(
+                "data: {}\n\n",
+                r#"{"choices":[{"index":0,"delta":{"content":"Let me "}}]}"#
+            ),
+            Duration::from_millis(700),
+        ),
+        (
+            format!(
+                "data: {}\n\n",
+                r#"{"choices":[{"index":0,"delta":{"content":"look."}}]}"#
+            ),
+            Duration::from_millis(700),
+        ),
+        (
+            format!(
+                "data: {}\n\ndata: [DONE]\n\n",
+                r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#
+            ),
+            Duration::ZERO,
+        ),
+    ];
+    // A declared length rather than a chunked body: the adapter honours either, and a length is one
+    // fewer thing this fixture can get wrong while the timing is what it is measuring.
+    let total: usize = pieces.iter().map(|(piece, _)| piece.len()).sum();
+
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut seen = Vec::new();
+            let mut buffer = [0u8; 1024];
+            while !contains(&seen, b"\r\n\r\n") {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => seen.extend_from_slice(&buffer[..read]),
+                }
+            }
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                     Content-Length: {total}\r\n\r\n"
+                )
+                .as_bytes(),
+            );
+            let _ = stream.flush();
+            for (piece, pause) in pieces {
+                let _ = stream.write_all(piece.as_bytes());
+                let _ = stream.flush();
+                std::thread::sleep(pause);
+            }
+        }
+    });
+
+    format!("http://127.0.0.1:{port}")
+}
+
+/// The reason the chat route has a second answer at all: the page sees the answer being written
+/// instead of the answer having been written.
+///
+/// The provider pauses 700 ms before its second fragment and before its last, and the assertion is
+/// on *when* the first fragment arrived against when the answer ended. An implementation that ran
+/// the turn to completion and then wrote the events would produce exactly the same bytes — the same
+/// text, the same `done`, the same order — and fail only this one, which is why it is here.
+#[test]
+fn a_chat_that_asks_for_events_shows_the_answer_before_it_is_finished() {
+    let _door = door();
+    let mut install = Install::new();
+    install.start();
+    install.configure(&dribbling_provider());
+
+    let message = r#"{"message":"build me a note app"}"#;
+    let mut stream = connect(install.port);
+    stream
+        .write_all(
+            format!(
+                "POST /api/apps/notes/chat HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\
+                 Authorization: Bearer {}\r\nAccept: text/event-stream\r\n\
+                 Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{message}",
+                install.port,
+                install.token(),
+                message.len()
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    stream.flush().unwrap();
+
+    let started = Instant::now();
+    let mut answer = Vec::new();
+    let mut first_text = None;
+    let mut buffer = [0u8; 4096];
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => {
+                answer.extend_from_slice(&buffer[..read]);
+                if first_text.is_none() && contains(&answer, b"event: text") {
+                    first_text = Some(started.elapsed());
+                }
+            }
+        }
+    }
+    let ended = started.elapsed();
+    let text = String::from_utf8_lossy(&answer).into_owned();
+
+    assert!(
+        text.starts_with("HTTP/1.1 200"),
+        "the answer was not a stream at all: {text}"
+    );
+    assert!(
+        text.contains("Content-Type: text/event-stream"),
+        "the answer's type does not say it is a stream: {text}"
+    );
+    assert!(
+        text.contains("Connection: close"),
+        "a stream with no length has to say how it ends: {text}"
+    );
+    let first = text
+        .find("event: text")
+        .unwrap_or_else(|| panic!("no fragment was written at all: {text}"));
+    let done = text
+        .find("event: done")
+        .unwrap_or_else(|| panic!("the answer never finished: {text}"));
+    assert!(
+        first < done,
+        "the end arrived before the answer did: {text}"
+    );
+    assert!(
+        text.contains(r#""text":"Let me look.""#),
+        "the finished answer is not the turn's own: {text}"
+    );
+
+    let first_text = first_text.unwrap_or_else(|| panic!("no fragment arrived at all: {text}"));
+    assert!(
+        first_text + Duration::from_millis(700) < ended,
+        "the text was held until the turn ended (first {first_text:?}, end {ended:?}) — the \\
+         answer was collected and replayed, not written as it was produced"
+    );
 }

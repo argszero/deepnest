@@ -24,6 +24,13 @@
 //! conversation, and it is why the listening loop in the binary is no longer one connection at a
 //! time.
 //!
+//! **The third kind of answer is deepnest's own** (`decided in implementation`, 2026-11-01). A
+//! route that shows its work — the chat route, which can hand each fragment of a model's answer to
+//! the page while the model is still writing — has a body it cannot produce before it starts, and a
+//! length it cannot declare. [`Answer::Produced`] is that shape: a framed head written first, and a
+//! body called afterwards. It sits beside the app's two because what this connection does next is
+//! one decision, and the server's loop has to answer all three.
+//!
 //! **The floating dialog is injected here, and the app's CSP moves with it** (`decided in
 //! implementation`, 2026-10-31). [`dialog`] adds the dialog to every `text/html` answer and widens
 //! the policy that would otherwise refuse its script — because a ball that a browser refuses to
@@ -44,7 +51,7 @@ pub mod rewrite;
 pub mod transport;
 
 pub use proxy::{
-    exchange, forward, is_upgrade, Answer, ForwardError, Forwarder, StdForwarder, Stream,
+    exchange, forward, is_upgrade, Answer, ForwardError, Forwarder, Produced, StdForwarder, Stream,
     StreamKind, Target,
 };
 pub use transport::{HttpTransport, PlainHttp, TlsHttp};
