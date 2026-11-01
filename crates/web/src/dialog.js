@@ -123,6 +123,10 @@
   // model is thinking" from "the model is talking", and the two must not overwrite each other.
   var typing = false;
 
+  // Which line the box is showing, counted. Every writer bumps it, so a hand-over that reaches the
+  // box after something newer was put there can tell it has been overtaken and keep its hands off.
+  var shownAnswer = 0;
+
   // The widening request. It appears only while a turn is waiting for one, which is why it is a
   // block that starts hidden rather than something the user opens: there is nothing to open when
   // nobody is asking, and a permanent button that says "approve" would be a button with no object.
@@ -605,6 +609,14 @@
     }
   }
 
+  // Every writer below says something newer than what the box last held, so every one starts here:
+  // it takes the box back from a hand-over (further down) and counts the line it drew.
+  function drawAgain() {
+    answer.classList.remove("settled");
+    answer.hidden = false;
+    shownAnswer += 1;
+  }
+
   // Put a line under the box. `bad` is a class rather than a colour inline: the stylesheet is where
   // colours live, and `all: initial` means nothing here inherits one.
   //
@@ -612,7 +624,7 @@
   // after a progress line turned it off.
   function say(text, bad) {
     answer.textContent = text;
-    answer.hidden = false;
+    drawAgain();
     answer.classList.remove("live");
     // The answer is finished, so the mark that says more is coming leaves with the class that drew
     // it. Nothing else has to remember to take it off.
@@ -639,10 +651,24 @@
       return;
     }
     answer.textContent = text;
-    answer.hidden = false;
+    drawAgain();
     answer.classList.remove("bad");
     answer.classList.add("live");
     answer.setAttribute("aria-live", "off");
+  }
+
+  // The box's words, given up once the transcript holds the same answer.
+  //
+  // The box is the answer's *live* drawing — the only surface with text the record does not have
+  // yet — and the transcript is the record. Once the turn is on disk and drawn, the same answer in
+  // both is one copy too many: measured in Chrome, a settled turn showed the same 88 characters
+  // twice, in a 40 px box over a 148 px transcript, inside a panel 470 px wide.
+  //
+  // Not `hidden`, because `role="status"` is how an answer reaches someone who cannot see it and a
+  // hidden region announces nothing. This takes the box out of the layout and leaves it in the
+  // accessibility tree: the answer is heard once, and read once, where it is being read from.
+  function yieldToTranscript() {
+    answer.classList.add("settled");
   }
 
   // The answer as the model writes it, rather than in one piece when the turn is over.
@@ -741,7 +767,7 @@
     // An empty box has no line to be away from, so a mode left over from the previous turn would
     // only be a way to start the next answer scrolled to a position it does not have.
     placement = NEWEST;
-    answer.hidden = false;
+    drawAgain();
     answer.classList.remove("bad");
     answer.classList.remove("live");
     answer.classList.add("typing");
@@ -843,7 +869,7 @@
       clearTimeout(redrawal);
       redrawal = 0;
     }
-    answer.hidden = false;
+    drawAgain();
     answer.classList.remove("bad");
     answer.classList.remove("live");
     answer.classList.remove("typing");
@@ -1756,7 +1782,7 @@
       found.hidden = true;
       transcript.textContent = "";
       transcript.hidden = true;
-      return;
+      return false;
     }
     // Numbered first: a search draws exchanges from anywhere in the conversation, and each one has
     // to keep the number it has in the conversation rather than the position it landed in on
@@ -1777,6 +1803,13 @@
       recent = numbered.slice(-shownTurns);
       older = numbered.length - recent.length;
     }
+    // Whether the transcript is about to hold the newest answer there is: the last exchange is among
+    // the ones being drawn, and the record already has its reply. The answer box handing its copy
+    // over (below, in the submit path) turns on exactly this — a search that has filtered the newest
+    // turn out, or a record whose reply has not been written yet, answers false and the box stays
+    // the only copy, rather than the page leaving a person with neither.
+    var newest = numbered[numbered.length - 1];
+    var drawsTheAnswer = recent.indexOf(newest) !== -1 && !!newest.turn.reply;
     find.hidden = older === 0 && !finding;
     found.hidden = !finding;
     if (finding) {
@@ -1794,7 +1827,7 @@
       // Nothing was redrawn, so there is no place to hold: a flag kept for a redraw that did not
       // happen would be spent on the next one, which moved something else.
       holdingPlace = false;
-      return;
+      return drawsTheAnswer;
     }
     drawn = print;
     // Read the scroll position before replacing the children, and restore it only if the person was
@@ -1829,6 +1862,7 @@
       transcript.scrollTop = wasTop + (transcript.scrollHeight - wasTall);
     }
     offerTheLatest(atTheEnd);
+    return drawsTheAnswer;
   }
 
   // Whether the reader is at the newest end of the transcript.
@@ -1852,10 +1886,13 @@
       })
       .then(function (body) {
         var turns = (body && body.turns) || [];
-        showTurns(turns, watching !== null);
+        var drawnTheAnswer = showTurns(turns, watching !== null);
         if (watching !== null) {
           showProgress(describeProgress(turns));
         }
+        // Handed back rather than read off the panel afterwards: only the caller that has just been
+        // given an answer knows which answer it is looking for the transcript to hold.
+        return drawnTheAnswer;
       })
       .catch(function () {
         // A transcript nobody can read is not a reason to break the box that still works.
@@ -2363,7 +2400,17 @@
           sayAnswer(words);
           // The turn is on disk the moment the route answers, so this reads what was actually
           // recorded rather than echoing what came back in the reply.
-          readHistory();
+          //
+          // `handed` counts the line the box is holding: the box gives that answer up only if the
+          // transcript has the same one and nothing newer has been put there in the meantime. Two
+          // things can overtake it — the rebuild line this turn starts below, and the next turn's
+          // progress line — and either one is a line the person still needs to read.
+          var handed = shownAnswer;
+          readHistory().then(function (drawnTheAnswer) {
+            if (drawnTheAnswer && shownAnswer === handed) {
+              yieldToTranscript();
+            }
+          });
           if (result.body.changed) {
             watchTheRebuild();
           }

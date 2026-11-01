@@ -538,6 +538,23 @@
   color: rgba(244, 244, 246, 0.45);
 }
 
+/* The answer has been handed to the transcript, which draws the same words one box down and is the
+ * record. Announced, not drawn: `role="status"` is how an answer reaches someone who cannot see it,
+ * and a `display: none` region announces nothing — so this keeps the box in the accessibility tree
+ * and takes it out of the layout instead of hiding it. Every writer the page has takes the class
+ * off again, because whatever it says next is newer than the answer that was handed over. */
+#deepnest-dialog-answer.settled {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 /* The conversation. Its own scroll box, because it is the one part of this panel that grows
  * without bound: a long session must not push the composer off the screen. */
 
