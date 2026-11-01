@@ -148,79 +148,122 @@
     whyNot.value = "";
   }
 
-  // Pictures pasted into the box, waiting for the message they will be sent with.
+  // Pictures in the message, as markers where the person put them.
   //
-  // Kept here as `data:` URLs rather than as files: the route takes bytes, and a URL is what the
-  // conversation file keeps — so what the model is shown tomorrow is what the user pasted, not
-  // whatever an address serves by then. Nothing is sent until the message is, which is also why a
-  // picture is removable: a screenshot pasted by mistake is a screenshot the model would otherwise
-  // keep looking at for the rest of the app's life.
+  // The marker is the whole mechanism. A picture parked beside the box loses the one thing the
+  // question needs — which words it belongs to — so "this bit is wrong, do it like that one"
+  // arrives as two pictures and some prose with nothing tying either to the sentence it is about.
+  // Typed into the text at the caret, `[image 1]` sits exactly where the reference is, travels in
+  // the message body itself, and is what the transcript shows afterwards.
+  //
+  // The bytes stay out of the text, in `attached`: a `data:` URL typed into the box would be a
+  // screen of base64 to edit around, and the request already has a field for them. What links the
+  // two is the number, and a number is never reused, so deleting one marker cannot quietly attach
+  // the next picture to the previous reference.
   var MAX_PICTURES = 8;
-  var pasted = [];
-
-  var pictures = document.createElement("div");
-  pictures.id = "deepnest-dialog-pictures";
-  pictures.hidden = true;
+  var attached = [];
+  var nextPicture = 1;
 
   // A live region of its own rather than a line in the answer box: the answer box is where the
-  // last turn's words are, and taking a picture arrives before any turn has run.
+  // last turn's words are, and taking a picture arrives before any turn has run. It says what is
+  // in the message rather than showing it, because the markers are the picture's place and a
+  // person who cannot see the message still has to know how many travelled with it.
   var pictureNote = document.createElement("p");
   pictureNote.id = "deepnest-dialog-picture-note";
   pictureNote.setAttribute("role", "status");
   pictureNote.setAttribute("aria-live", "polite");
   pictureNote.hidden = true;
 
-  function showPictures() {
-    pictures.textContent = "";
-    pictures.hidden = pasted.length === 0;
-    pictureNote.hidden = pasted.length === 0;
-    if (pasted.length === 1) {
-      pictureNote.textContent = "1 picture will be sent with your message.";
-    } else if (pasted.length > 1) {
-      pictureNote.textContent = pasted.length + " pictures will be sent with your message.";
+  function markerFor(id) {
+    return "[image " + id + "]";
+  }
+
+  // The pictures the message still refers to, in the order the words mention them.
+  //
+  // Read out of the text rather than out of `attached`: a marker that was deleted is a picture the
+  // person decided against, and a marker that survived is one they kept. Ordering by first mention
+  // is what makes the numbers in the words and the order in the request agree, and a marker the
+  // person happens to repeat still sends its bytes once.
+  function picturesReferredTo(text) {
+    var pattern = /\[image (\d+)\]/g;
+    var found = [];
+    var taken = {};
+    var match = pattern.exec(text);
+    while (match !== null) {
+      var id = Number(match[1]);
+      if (!taken[id]) {
+        for (var index = 0; index < attached.length; index += 1) {
+          if (attached[index].id === id) {
+            taken[id] = true;
+            found.push(attached[index].url);
+            break;
+          }
+        }
+      }
+      match = pattern.exec(text);
     }
-    pasted.forEach(function (url, index) {
-      var frame = document.createElement("div");
-      frame.className = "deepnest-picture";
+    return found;
+  }
 
-      var thumb = document.createElement("img");
-      thumb.src = url;
-      // The picture is the message, so it is named as one; `alt` empty would hide it from the
-      // person who cannot see it and leave them with a message box that says nothing about why it
-      // will not send.
-      thumb.alt = "Pasted picture " + (index + 1);
+  // Sent, so the pictures go with it: one left behind would ride along with the next message too,
+  // and a conversation that accumulates screenshots nobody chose to resend is a conversation that
+  // costs the user tokens for the rest of the app's life. The numbering does not restart, because a
+  // marker that outlived its picture would then name the wrong one.
+  function forgetPictures() {
+    attached = [];
+    refreshNote();
+  }
 
-      var drop = document.createElement("button");
-      drop.type = "button";
-      drop.className = "deepnest-picture-drop";
-      drop.textContent = "\u00d7";
-      drop.setAttribute("aria-label", "Remove pasted picture " + (index + 1));
-      drop.addEventListener("click", function () {
-        pasted.splice(index, 1);
-        showPictures();
-      });
+  function refreshNote() {
+    var count = picturesReferredTo(input.value).length;
+    pictureNote.hidden = count === 0;
+    if (count === 1) {
+      pictureNote.textContent = "1 picture in the message, where its marker is.";
+    } else if (count > 1) {
+      pictureNote.textContent = count + " pictures in the message, each where its marker is.";
+    }
+  }
 
-      frame.appendChild(thumb);
-      frame.appendChild(drop);
-      pictures.appendChild(frame);
+  // Insert at the caret, because that is where the person was typing when they reached for the
+  // picture. `setRangeText` rather than an assignment to `value`: it keeps the box's undo history
+  // and leaves the caret after what it inserted, so typing carries on around the marker, and the
+  // marker can be selected, cut and moved like the words it sits between.
+  function putAtCaret(text) {
+    input.setRangeText(text, input.selectionStart, input.selectionEnd, "end");
+    input.focus();
+  }
+
+  // One at a time, in the order they were pasted: two readers finishing out of order would put the
+  // second picture's marker first, and the numbers in the words are what the request is read from.
+  function takeAll(files) {
+    if (files.length === 0) {
+      return;
+    }
+    take(files[0], function () {
+      takeAll(files.slice(1));
     });
   }
 
-  function take(file) {
-    if (pasted.length >= MAX_PICTURES) {
+  function take(file, next) {
+    if (picturesReferredTo(input.value).length >= MAX_PICTURES) {
       say("A message carries at most " + MAX_PICTURES + " pictures.", true);
+      next();
       return;
     }
     var reader = new FileReader();
     reader.onload = function () {
-      if (typeof reader.result !== "string") {
-        return;
+      if (typeof reader.result === "string") {
+        var id = nextPicture;
+        nextPicture += 1;
+        attached.push({ id: id, url: reader.result });
+        putAtCaret(markerFor(id));
+        refreshNote();
       }
-      pasted.push(reader.result);
-      showPictures();
+      next();
     };
     reader.onerror = function () {
       say("That picture could not be read from the clipboard.", true);
+      next();
     };
     reader.readAsDataURL(file);
   }
@@ -250,8 +293,15 @@
     // A picture pasted into a textarea would otherwise be dropped by the browser silently, which
     // reads as the paste having failed.
     event.preventDefault();
-    files.forEach(take);
+    // Focus without writing anything: the caret is where the reader will insert, and an empty
+    // insertion here would type over whatever the person had selected.
+    input.focus();
+    takeAll(files);
   }
+
+  // `setRangeText` fires no `input` event, so a marker the person cuts out is noticed here rather
+  // than at the moment it is cut.
+  input.addEventListener("input", refreshNote);
 
   panel.addEventListener("paste", onPaste);
 
@@ -275,7 +325,6 @@
   panel.appendChild(title);
   panel.appendChild(note);
   panel.appendChild(transcript);
-  panel.appendChild(pictures);
   panel.appendChild(pictureNote);
   panel.appendChild(form);
   panel.appendChild(asked);
@@ -669,9 +718,9 @@
   form.addEventListener("submit", function (event) {
     event.preventDefault();
     var text = input.value.trim();
-    // A screenshot with no words is a question — "what is this?" is what the person means, and
-    // making them type it is asking them to say it twice.
-    if (!text && pasted.length === 0) {
+    // A picture is in the message as a marker, so a message of nothing but pictures is not empty:
+    // "what is this?" is what the person means, and the marker says which picture they mean.
+    if (!text) {
       return;
     }
     if (!slug) {
@@ -690,7 +739,7 @@
     // question already possible rather than after the first answer.
     startPolling();
 
-    ask(text, pasted.slice())
+    ask(text, picturesReferredTo(text))
       .then(function (response) {
         // A refusal is JSON in every case this server produces; a proxy's error page is not, and
         // the status is then the only thing left to report.
@@ -715,11 +764,7 @@
             text += "\n\nThis changed the app — rebuilding it now.";
           }
           input.value = "";
-          // Sent, so the strip empties: a picture left behind would ride along with the next
-          // message too, and a conversation that accumulates screenshots nobody chose to resend is
-          // a conversation that costs the user tokens for the rest of the app's life.
-          pasted = [];
-          showPictures();
+          forgetPictures();
           say(text, false);
           // The turn is on disk the moment the route answers, so this reads what was actually
           // recorded rather than echoing what came back in the reply.
