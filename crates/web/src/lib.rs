@@ -1169,7 +1169,7 @@ mod tests {
             "there is no path that draws an answer rather than a line"
         );
         assert!(
-            DIALOG_SCRIPT.contains("sayAnswer(text);"),
+            DIALOG_SCRIPT.contains("sayAnswer(words);"),
             "the finished answer still goes through the plain line"
         );
         assert!(
@@ -1566,6 +1566,74 @@ mod tests {
         assert!(
             DIALOG_SCRIPT.contains("input.setSelectionRange(end, end)"),
             "a recalled message leaves the caret at its start"
+        );
+    }
+
+    #[test]
+    fn the_box_empties_when_the_message_goes_rather_than_when_the_answer_comes() {
+        // The box used to keep the message for the whole length of a turn, because the clearing sat
+        // in the branch that runs when the answer arrives. Two things followed, both measured in
+        // Chrome against a stub holding the chat POST open for eight seconds: the box read as "not
+        // sent" while the turn ran (`value` still held the message at T+1s), and a sentence typed
+        // into it during the turn was deleted by the answer — `value` went from "build me a page
+        // that lists the invoices and add a total row" to `""` the moment the reply landed. After:
+        // the box is empty at T+0.3s, and the same typed sentence is still there after the answer.
+        let cleared = DIALOG_SCRIPT
+            .find("input.value = \"\";")
+            .expect("the box is emptied somewhere");
+        let asked = DIALOG_SCRIPT
+            .find("ask(text, picturesReferredTo(text), filesReferredTo(text))")
+            .expect("the request is made somewhere");
+        assert!(
+            cleared < asked,
+            "the box is emptied only once the answer arrived, so the panel reads as not sent for \
+             the whole turn and anything typed into it meanwhile is deleted"
+        );
+        // The one thing that clearing early costs: a turn that could not be sent would take the
+        // sentence with it, so every exit that is not an answer has to give it back.
+        assert!(
+            DIALOG_SCRIPT.contains("function giveBack(text)"),
+            "a message whose turn was refused is lost from the box, and the reload one of those \
+             refusals asks for would lose it for good"
+        );
+        // Measured, both refusals: `{"value":"build me a page that lists the invoices","caret":39}`
+        // after a `500` carrying `{"error":"the model refused this one"}` and after a `401`.
+        assert_eq!(
+            DIALOG_SCRIPT.matches("giveBack(text);").count(),
+            3,
+            "the refusals that give the message back are not the three that leave without an \
+             answer — and the one that must not is the stream that died mid-answer, because that \
+             turn did run and a box holding the message again asks it a second time"
+        );
+        // The box is emptied when the message leaves, so a person may have typed the next sentence
+        // by the time a turn fails. That sentence is theirs.
+        assert!(
+            DIALOG_SCRIPT.contains("if (input.value.trim() !== \"\") {"),
+            "the given-back message replaces a sentence the person typed while the turn failed"
+        );
+        // Not `putBack`: that one records the text as a recalled message, so the next `Up` would
+        // walk over a sentence the person is about to fix and resend.
+        let given = DIALOG_SCRIPT
+            .find("function giveBack(text)")
+            .expect("the message is given back");
+        let walked = DIALOG_SCRIPT
+            .find("recalled = text !== \"\";")
+            .expect("a recalled message is recorded");
+        assert!(
+            walked < given,
+            "the message that comes back from a failed turn is marked recalled, so `Up` replaces \
+             it instead of protecting it"
+        );
+        // The inner name shadowed the outer one for the whole callback, which is why no failure
+        // exit below it could have reached the message that was sent.
+        assert!(
+            !DIALOG_SCRIPT.contains("var text = result.body.text;"),
+            "the answer's own text shadows the message the turn was asked"
+        );
+        // The caret belongs after what came back, or the next word typed lands in front of it.
+        assert!(
+            DIALOG_SCRIPT.contains("function caretAtTheEnd()"),
+            "a message given back leaves the caret at its start"
         );
     }
 

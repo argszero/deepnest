@@ -2141,13 +2141,10 @@
     recalled = false;
   });
 
-  // A message put back into the box, with the caret at its end. Position 0 is the default after
-  // setting `value`, and it would put the next word the person types in front of the sentence they
-  // just asked for.
-  function putBack(text) {
-    input.value = text;
-    recalled = text !== "";
-    input.focus();
+  // Where the caret goes when a message lands in the box from the page rather than from typing.
+  // Position 0 is the default after setting `value`, and it would put the next word the person
+  // types in front of the sentence they just asked for.
+  function caretAtTheEnd() {
     var end = input.value.length;
     try {
       input.setSelectionRange(end, end);
@@ -2155,8 +2152,33 @@
       // A box the browser will not let us place a caret in still holds the text, which is the part
       // that matters.
     }
+  }
+
+  // A message put back into the box, with the caret at its end.
+  function putBack(text) {
+    input.value = text;
+    recalled = text !== "";
+    input.focus();
+    caretAtTheEnd();
     // The markers in a recalled message refer to pictures this page no longer holds, so the note
     // that counts them would be describing attachments that are not there.
+    refreshNote();
+  }
+
+  // The message back in the box after a turn that could not be sent, with the caret at its end.
+  //
+  // Not `putBack`: that one records the text as a recalled message, so the next `Up` would replace
+  // the sentence it put back. A message whose turn failed is one the person is about to fix, and
+  // the history walk takes the arrow keys away from a message being written.
+  //
+  // Never over their words, either. The box is emptied when the message goes, so a person may have
+  // typed the next sentence while the turn was failing; that sentence is theirs and stays.
+  function giveBack(text) {
+    if (input.value.trim() !== "") {
+      return;
+    }
+    input.value = text;
+    caretAtTheEnd();
     refreshNote();
   }
 
@@ -2178,6 +2200,15 @@
     // Remembered before the answer arrives, not after: this is the message that was typed, and a
     // turn that fails still leaves the person wanting it back to fix and resend.
     remember(text);
+    // The box empties when the message leaves, not when the answer arrives. Keeping it full for
+    // the length of a turn reads as "not sent" — the box is where a person looks to see whether
+    // anything happened — and measured in Chrome, the clearing that only ran on the answer deleted
+    // a sentence typed during the turn along with it: `value` went from "…and add a total row" to
+    // `""` the moment the reply landed. What the turn cost the person is now only what they said.
+    // Both are read out of the message, not out of the box, so emptying it here cannot take the
+    // pictures and files the words name with it.
+    input.value = "";
+    refreshNote();
     // Two timers for the one turn: this one asks the server what the question is, and
     // `watchTheTurn` re-reads the transcript so the page can say what the turn is doing. `Asking…`
     // with nothing after it was the whole of what this page said for 112 seconds, and the reason a
@@ -2215,18 +2246,20 @@
         // connection died, the next turn's progress line has to be able to use it again.
         typing = false;
         if (result.status === 200 && result.body && typeof result.body.text === "string") {
-          var text = result.body.text;
+          // `words`, not `text`: `text` is the message this turn was asked, and every exit below
+          // has to be able to put it back. A second `text` here is scoped to this callback, so it
+          // would shadow that one for the failures as well as for the answer.
+          var words = result.body.text;
           if (result.body.changed) {
             // The turn came back as soon as it had written; the build it started is still running.
             // Saying "reload to see it" was the whole defect — nothing had been built to see — so
             // the line names what is happening and `watchTheRebuild` finishes the sentence.
-            text += "\n\nThis changed the app — rebuilding it now.";
+            words += "\n\nThis changed the app — rebuilding it now.";
           }
-          input.value = "";
           forgetAttachments();
           // The answer, drawn as the same blocks the transcript will draw it as: `say` is for this
           // page's own lines, and the agent's words are Markdown.
-          sayAnswer(text);
+          sayAnswer(words);
           // The turn is on disk the moment the route answers, so this reads what was actually
           // recorded rather than echoing what came back in the reply.
           readHistory();
@@ -2239,6 +2272,9 @@
           // The grant is gone: expired, or this page was not served by this process. Reloading is
           // the one action that mints another.
           say("This page's permission to send has expired — reload the page and ask again.", true);
+          // The page never had the message, so the box keeps it: the reload this line asks for
+          // would otherwise take the sentence with it.
+          giveBack(text);
           return;
         }
         if (result.streamed) {
@@ -2252,6 +2288,9 @@
               "page to read what the turn recorded.",
             true
           );
+          // Not given back, unlike the refusals above: this turn did run, so a box holding the
+          // message again is an invitation to ask it a second time. `Up` still has it — the recall
+          // list is written when the message leaves, and it is the one place a sent message stays.
           return;
         }
         var why =
@@ -2259,12 +2298,14 @@
             ? result.body.error
             : "the request failed (" + result.status + ")";
         say(why, true);
+        giveBack(text);
       })
       .catch(function () {
         send.disabled = false;
         stopPolling();
         typing = false;
         say("The request did not reach deepnest. Is it still running?", true);
+        giveBack(text);
       });
   });
 
