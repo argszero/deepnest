@@ -608,9 +608,12 @@ mod tests {
     #[test]
     fn the_dialog_takes_a_pasted_picture_and_sends_it_with_the_message() {
         // The core page could carry words only, and "look at this" is what a screenshot is for.
-        // Three things have to hold at once — the paste is caught, the picture is shown so it can
-        // be taken back, and it travels in the same body as the message — because any one of them
-        // missing is a paste that silently does nothing.
+        // What a screenshot is *for* is the part that is easy to get wrong: `this bit is wrong, do
+        // it like that one` is two pictures and one sentence, and a picture parked beside the box
+        // has nothing tying it to the sentence it is about. Three things have to hold at once — the
+        // paste is caught, the picture lands where the caret was, and its bytes travel in the same
+        // body as the message — because any one of them missing is a paste that silently does
+        // nothing.
         assert!(
             DIALOG_SCRIPT.contains("clipboardData"),
             "nothing reads the clipboard"
@@ -627,18 +630,80 @@ mod tests {
             DIALOG_SCRIPT.contains(r#"indexOf("image/")"#),
             "everything pasted would be taken for a picture"
         );
-        // Removable: a picture that cannot be taken back is one the model keeps looking at.
-        assert!(DIALOG_SCRIPT.contains("Remove pasted picture"));
+        // The place, not a list. `setRangeText` is what keeps the marker inside the words: it
+        // inserts at the caret and it keeps the box's undo history, which an assignment to `value`
+        // would throw away along with the ability to cut the marker back out.
+        assert!(
+            DIALOG_SCRIPT.contains("setRangeText"),
+            "the marker is not inserted into the text"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("selectionStart"),
+            "the insertion point is not the caret"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#"return "[image " + id + "]""#),
+            "the marker has no number to be referred to by"
+        );
+        // Read back out of the words: a marker that was deleted is a picture the person decided
+        // against, and the order of the markers is the order the request must carry.
+        assert!(
+            DIALOG_SCRIPT.contains("picturesReferredTo("),
+            "the pictures are not read out of the message"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("ask(text, picturesReferredTo(text))"),
+            "the request does not carry the pictures the words mention"
+        );
         // The same body the route already reads, with one more key, and only when it is needed.
         assert!(DIALOG_SCRIPT.contains("body.images = images"));
-        // And the strip empties once the message is away.
-        assert!(DIALOG_SCRIPT.contains("pasted = [];"));
+        // Nothing left behind once the message is away, because a picture nobody chose to resend
+        // is tokens spent on every later turn of the app's life.
+        assert!(
+            DIALOG_SCRIPT.contains("forgetPictures();"),
+            "the pictures are still in the box after the message was sent"
+        );
+        // The strip is gone: a picture beside the box is the shape this change exists to remove.
+        assert!(
+            !DIALOG_SCRIPT.contains("deepnest-dialog-pictures"),
+            "the picture strip is still in the script"
+        );
+        assert!(
+            !DIALOG_STYLE.contains("#deepnest-dialog-pictures"),
+            "the picture strip is still in the stylesheet"
+        );
         // The token rule from the test above holds here too: a picture does not need a credential.
         assert!(!DIALOG_SCRIPT.contains("deepnest-token"));
         // Colours and layout come from the stylesheet, never from an inline style.
-        assert!(DIALOG_STYLE.contains("#deepnest-dialog-pictures"));
-        assert!(DIALOG_STYLE.contains(".deepnest-picture-drop"));
         assert!(DIALOG_STYLE.contains("#deepnest-dialog-picture-note"));
+    }
+
+    #[test]
+    fn a_picture_travels_with_the_words_that_point_at_it() {
+        // The reason the marker is in the text and not in a list: the request's `message` is what
+        // the model reads in order, so the reference and the thing referenced arrive in one piece.
+        // A message whose picture has been taken out is a message with no marker for it, and the
+        // two readings — what the words say and what the request carries — cannot disagree.
+        assert!(
+            DIALOG_SCRIPT.contains("var pattern = /\\[image (\\d+)\\]/g"),
+            "the marker is not parsed out of the words"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("found.push(attached[index].url)"),
+            "a marker does not resolve to the picture it numbers"
+        );
+        // Deleted marker, deleted picture: `attached` is consulted only through the markers, so an
+        // entry nothing refers to is never sent.
+        assert!(
+            !DIALOG_SCRIPT.contains("body.images = attached"),
+            "the request sends every picture that was ever pasted"
+        );
+        // A marker typed twice is one picture, because one question does not become two by being
+        // pointed at twice.
+        assert!(
+            DIALOG_SCRIPT.contains("if (!taken[id])"),
+            "a repeated marker would send its picture twice"
+        );
     }
 
     #[test]
