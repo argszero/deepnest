@@ -222,7 +222,7 @@ A shell-text scanner for the read-direction escapes and for the one prohibition 
 
 `bash`, `read`, `write`, `edit`, `glob`, `grep`, `subagent`, `install_skill`. Not a reduced set: the host decision is that the per-app agent has near-complete EMRG capability, including starting and stopping the app, reading its logs, driving a browser and taking screenshots. Browser driving and screen capture come **from the browser-harness skill, not from the core** (`host 20:23`, re-confirmed `host 20:48`) — the core only opens the app page in the default browser.
 
-Two of those are **seams rather than leaves**, and both exist because the thing they delegate to lives in a crate this one must not depend on: `subagent` needs a child loop (`crates/agent`) and `install_skill` needs a catalog, a state file and a publisher (`crates/deepnest`, which is the only crate that knows where the home is). Neither is offered until the caller supplies it — `registry::all` is the six leaves, `with_runner` and `with_installer` add one each — so the set the model is told about is always the set the dispatcher can run.
+Two of those are **seams rather than leaves**, and both exist because the thing they delegate to lives in a crate this one must not depend on: `subagent` needs a child loop (`crates/agent`) and `install_skill` needs a catalog, a state file and a publisher (`crates/deepnest`, which is the only crate that knows where the home is). Neither is offered until the caller supplies it — `registry::all` is the six leaves, `registry::with_seams` adds each seam it can honour or both — so the set the model is told about is always the set the dispatcher can run. And the prompt takes that list from the set itself (`registry::names`), because a hand-written sentence is a second list: until 2026-11-01 it named `subagent`, which the dialog did not wire, and left out `install_skill`, which it did, so a model that believed it was told "there is no tool called subagent" (`decided in implementation`).
 
 A shell result carries the sandbox verdict explicitly, distinguishes "the runner never started" from "the sandbox refused", kills the process group on timeout, and appends the escalation hint when it was refused (`impl, ref: emrg/tools/bash_tool_v2.py`).
 
@@ -244,8 +244,11 @@ Four decisions were made while implementing it and are recorded here rather than
 refusals come first, and each names a different next step: a body that is not a message (`400`), a
 process with no config file to read (`503`), a config with no model in it yet (`412`, with the
 first-run form one request away). Then `crates/deepnest::chat` assembles **one agent per app** — the
-six leaf tools over a `workspace-write` policy for that app, its conversation and memory under
-`<app>/.agent/`, and a system prompt built from the real skill loader — and hands it to the loop.
+six leaf tools and the two seams, eight in all, over a `workspace-write` policy for that app, its
+conversation and memory under `<app>/.agent/`, and a system prompt built from the real skill loader
+— and hands it to the loop. A `subagent` call is a child of the same model and the same policy, with
+its own conversation under `<app>/.agent/subagents/<NNNN>/` and neither seam of its own, so a child
+cannot start a child.
 Five decisions came with the wiring:
 
 - **The HTTP adapter carries both schemes, and neither degrades into the other.** `crates/gateway::transport`

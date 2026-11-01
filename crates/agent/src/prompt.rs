@@ -17,7 +17,7 @@
 //!
 //! The prompt is assembled from [`PromptContext`] so that everything it claims is a fact the
 //! caller supplied: the app's name and directory, the sandbox mode, the memory index, the skills
-//! that are actually installed, and where the app is served.
+//! that are actually installed, where the app is served, and the tools the turn was built with.
 
 use std::fmt::Write as _;
 
@@ -39,6 +39,12 @@ pub struct PromptContext {
     pub skills: Vec<(String, String, String)>,
     /// Where the app is served, so the agent can tell the user where to look.
     pub app_url: String,
+    /// The tools this turn actually has, by name, in the order it is offered them.
+    ///
+    /// Filled from the set the turn was built with — never written by hand. The tool section below
+    /// is rendered from this list, so the prompt cannot name a tool the dispatcher does not have,
+    /// and a tool that is added or removed there is a line that appears or disappears here.
+    pub tools: Vec<String>,
 }
 
 impl PromptContext {
@@ -56,6 +62,7 @@ impl PromptContext {
             memory_index: String::new(),
             skills: Vec::new(),
             app_url: String::new(),
+            tools: Vec::new(),
         }
     }
 
@@ -76,6 +83,14 @@ impl PromptContext {
 
     pub fn with_app_url(mut self, url: impl Into<String>) -> Self {
         self.app_url = url.into();
+        self
+    }
+
+    /// The tools this turn actually has, in the order it is offered them.
+    ///
+    /// Takers pass what the registry built, not a list of their own; see the field's own note.
+    pub fn with_tools(mut self, tools: Vec<String>) -> Self {
+        self.tools = tools;
         self
     }
 }
@@ -182,20 +197,28 @@ truly cannot be done where you are — every request spends the user's attention
 an answer you do not repeat.\n",
     );
 
-    out.push_str(
-        "\n## Your tools\n\n\
-You have `bash`, `read`, `write`, `edit`, `glob`, `grep`, and — when a job is big enough that \
-doing it here would flood the conversation — `subagent`, which runs a child agent with its own \
-context and reports back only its final answer.\n\n\
-- Prefer the narrow tool: `read` over `cat`, `grep` over `bash`+`grep`, `edit` over rewriting a \
-file. The narrow tool refuses what it cannot do honestly, and the shell does not.\n\
-- `edit` needs an `old_string` that occurs exactly once. If it occurs more than once, include \
-more of the surrounding text, or set `replace_all` when you really mean all of them.\n\
-- A command runs with `bash`, from the app directory, with stdin closed. A command that would \
-prompt will not get an answer — pass its input instead.\n\
-- A non-zero exit is a result, not a tool failure. Read it. A timeout means the command did not \
-finish, which is different from one that failed.\n",
-    );
+    out.push_str("\n## Your tools\n\n");
+    if ctx.tools.is_empty() {
+        // A turn with no tools can only talk. Said plainly, because the alternative — an empty
+        // list — reads as a prompt that forgot to mention them.
+        out.push_str("No tools are available to this turn: every call would be refused.\n");
+    } else {
+        out.push_str(
+            "These are the tools you have, and there are no others — a name that is not on this \
+list is a call that cannot run:\n\n",
+        );
+        for name in &ctx.tools {
+            match tool_note(name) {
+                Some(note) => {
+                    let _ = writeln!(out, "- `{name}` — {note}");
+                }
+                None => {
+                    let _ = writeln!(out, "- `{name}`");
+                }
+            }
+        }
+    }
+    out.push('\n');
 
     out.push_str(
         "\n## Your memory\n\n\
@@ -247,6 +270,59 @@ variation.\n",
     out
 }
 
+/// What a tool's line adds beyond its own definition, keyed by name.
+///
+/// Keyed rather than written in order so a note can only appear under a tool that is present: the
+/// renderer walks the set it was handed and asks this function about each name, so a note whose
+/// tool is not offered is never printed, and a tool with no note is still named. That is the
+/// property a hand-written sentence did not have — it named `subagent` while the dialog offered no
+/// such tool, and a model that believed it got "there is no tool called `subagent`" back.
+///
+/// What belongs here is behaviour the schema cannot state: what to reach for first, and what a
+/// refusal means. What does not belong here is a second copy of a tool's own description, which is
+/// already sent with the request.
+fn tool_note(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "bash" => {
+            "It runs from the app directory with stdin closed, so a command that would prompt gets \
+no answer — pass its input instead. A non-zero exit is a result and not a tool failure: read it. \
+A timeout means the command did not finish, which is a different thing from one that failed."
+        }
+        "read" => {
+            "It shows line numbers and pages through a file that does not fit in one result. Reach \
+for it instead of `cat` through `bash`: the narrow tool refuses what it cannot show honestly, and \
+the shell does not."
+        }
+        "grep" => {
+            "It reports the file and the line, and it cannot run a command by accident — the \
+narrow tool again."
+        }
+        "glob" => "It finds a path by pattern, before you guess one and read a refusal.",
+        "write" => {
+            "It replaces whatever the file held and creates parent directories. To change part of \
+a file that already exists, `edit` is the tool."
+        }
+        "edit" => {
+            "`old_string` has to match exactly once, whitespace and indentation included. If it \
+matches more than once, include more of the surrounding text, or set `replace_all` when you \
+really mean all of them."
+        }
+        "subagent" => {
+            "It hands one self-contained job to a child agent with its own context and its own \
+tools, and only that child's final answer comes back. Use it when a job is big enough that doing \
+it here would flood this conversation — and state the job completely, because the child cannot \
+see anything you did not tell it."
+        }
+        "install_skill" => {
+            "It installs one skill that deepnest's catalog names, by the name the catalog lists. \
+The file lands in deepnest's skills directory, outside this app, so at this mode the call is \
+refused and has to be sent again with `request_mode` and `justification`: installing is the user's \
+decision to approve, not yours to take. The skill is in your index from the next turn on."
+        }
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,6 +331,98 @@ mod tests {
         PromptContext::new("notes", "/home/u/.deepnest/apps/notes", "workspace-write")
             .with_writable(vec!["/home/u/.deepnest/apps/notes".to_string()])
             .with_app_url("http://127.0.0.1:4270/app/notes/")
+            .with_tools(tool_names(&[
+                "bash",
+                "read",
+                "write",
+                "edit",
+                "glob",
+                "grep",
+                "subagent",
+                "install_skill",
+            ]))
+    }
+
+    fn tool_names(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    /// The tool names the prompt advertises, read back out of the section it prints them in.
+    ///
+    /// Read back rather than compared against the field, because the field is what is being
+    /// checked: what matters is the sentence the model sees.
+    fn advertised(prompt: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut inside = false;
+        for line in prompt.lines() {
+            if line.starts_with("## Your tools") {
+                inside = true;
+                continue;
+            }
+            if !inside {
+                continue;
+            }
+            if line.starts_with("## ") {
+                break;
+            }
+            if let Some(rest) = line.strip_prefix("- `") {
+                if let Some(end) = rest.find('`') {
+                    names.push(rest[..end].to_string());
+                }
+            }
+        }
+        names
+    }
+
+    #[test]
+    fn the_tool_section_is_exactly_the_set_the_turn_was_given() {
+        // The defect this closes: the sentence named `subagent` while the dialog offered no such
+        // tool, so a model that believed the prompt was told there is no tool called `subagent`.
+        // Nothing pinned it, so nothing caught it.
+        assert_eq!(advertised(&system_prompt(&ctx())), ctx().tools);
+
+        let two = ctx().with_tools(tool_names(&["bash", "write"]));
+        assert_eq!(
+            advertised(&system_prompt(&two)),
+            tool_names(&["bash", "write"])
+        );
+        // A tool that is not offered is not named anywhere in the section.
+        let prompt = system_prompt(&two);
+        assert!(!prompt.contains("`subagent`"), "{prompt}");
+        assert!(!prompt.contains("`install_skill`"), "{prompt}");
+    }
+
+    #[test]
+    fn a_note_appears_only_under_the_tool_it_belongs_to() {
+        let bash_only = system_prompt(&ctx().with_tools(tool_names(&["bash"])));
+        assert!(bash_only.contains("stdin closed"), "{bash_only}");
+        assert!(!bash_only.contains("old_string"), "{bash_only}");
+
+        let with_edit = system_prompt(&ctx().with_tools(tool_names(&["bash", "edit"])));
+        assert!(with_edit.contains("old_string"), "{with_edit}");
+    }
+
+    #[test]
+    fn a_turn_with_no_tools_says_so_rather_than_listing_nothing() {
+        let prompt = system_prompt(&PromptContext::new("notes", "/apps/notes", "read-only"));
+        assert!(
+            prompt.contains("No tools are available to this turn"),
+            "{prompt}"
+        );
+        assert!(advertised(&prompt).is_empty(), "{prompt}");
+    }
+
+    #[test]
+    fn every_tool_with_a_name_has_a_line_the_schema_cannot_state() {
+        // A tool that arrives with no line here arrives as its schema alone. That is not a bug on
+        // its own — the note is optional — but the leaf set is the one place a new tool is added,
+        // so this is where forgetting one shows up rather than three releases later.
+        for name in deepnest_tools::registry::names(&deepnest_tools::registry::all()) {
+            assert!(tool_note(&name).is_some(), "{name} has no line of its own");
+        }
+        for name in ["subagent", "install_skill"] {
+            assert!(tool_note(name).is_some(), "{name} has no line of its own");
+        }
     }
 
     #[test]

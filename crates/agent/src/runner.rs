@@ -21,6 +21,7 @@ use std::sync::Arc;
 use deepnest_tools::subagent::{SubagentRequest, SubagentRunner};
 use deepnest_tools::{Tool, ToolContext, ToolResult, MAX_RESULT_CHARS};
 
+use crate::prompt::{system_prompt, PromptContext};
 use crate::session::Session;
 use crate::turn::{Agent, Cancellation, Limits, Model, TurnOutcome};
 use crate::AgentPaths;
@@ -33,18 +34,21 @@ pub struct LoopRunner {
     /// buffer.
     tools: Arc<dyn Fn() -> Vec<Box<dyn Tool>> + Send + Sync>,
     paths: AgentPaths,
-    system: String,
+    /// The app's context, not a rendered prompt: the child's prompt is rendered from this each
+    /// time, with the tool list of the set the child is actually given. A string kept here would
+    /// be a prompt that starts lying the moment `with_tools` picks a different set.
+    prompt: PromptContext,
     limits: Limits,
     serial: AtomicU64,
 }
 
 impl LoopRunner {
-    pub fn new(model: Arc<dyn Model>, paths: AgentPaths, system: impl Into<String>) -> Self {
+    pub fn new(model: Arc<dyn Model>, paths: AgentPaths, prompt: PromptContext) -> Self {
         Self {
             model,
             tools: Arc::new(deepnest_tools::registry::all),
             paths,
-            system: system.into(),
+            prompt,
             limits: Limits::default(),
             serial: AtomicU64::new(0),
         }
@@ -68,14 +72,21 @@ impl LoopRunner {
     ///
     /// The parent's prompt plus one paragraph, because a child that believed it was the main
     /// agent would try to talk to the user — and it has no user, only the brief it was handed.
-    fn child_system(&self) -> String {
+    /// The tool section is re-rendered from the set the child is actually handed, so a child given
+    /// fewer tools is told it has fewer tools rather than inheriting the parent's list.
+    fn child_system(&self, tools: &[Box<dyn Tool>]) -> String {
+        let base = system_prompt(
+            &self
+                .prompt
+                .clone()
+                .with_tools(deepnest_tools::registry::names(tools)),
+        );
         format!(
-            "{}\n\n## You are a subagent\n\n\
+            "{base}\n\n## You are a subagent\n\n\
 You were started by another agent to do one job, and you cannot see the conversation that \
 produced your brief. Nothing you say reaches the user directly: your final message is the only \
 thing that comes back, and it goes to the agent that asked. So state the result plainly, and say \
-where you worked.\n",
-            self.system
+where you worked.\n"
         )
     }
 
@@ -136,12 +147,16 @@ impl LoopRunner {
                 format!("the child's conversation could not be started: {err}"),
             )
         })?;
+        // Built once: the prompt names this set and the loop runs this set, so they cannot be two
+        // different sets that happen to agree today.
+        let tools = (self.tools)();
+        let system = self.child_system(&tools);
         let agent = Agent::new(
             self.model.clone(),
-            (self.tools)(),
+            tools,
             Self::child_context(ctx),
             session,
-            self.child_system(),
+            system,
         )
         .with_limits(self.limits);
         // The child's own cancellation: a deadline thread flips it, and the loop stops at the
@@ -227,7 +242,11 @@ mod tests {
             LoopRunner::new(
                 model,
                 AgentPaths::for_app(&self.base),
-                "you are the app agent",
+                crate::prompt::PromptContext::new(
+                    "notes",
+                    self.base.display().to_string(),
+                    "workspace-write",
+                ),
             )
         }
     }
@@ -264,6 +283,19 @@ mod tests {
             result.content.contains("history.jsonl"),
             "{}",
             result.content
+        );
+        // The layout design §4 promises, written by the run rather than merely named in a message:
+        // one conversation file per call, and never the parent's.
+        let paths = AgentPaths::for_app(&scratch.base);
+        let child_file = paths.subagent_dir(0).join("history.jsonl");
+        assert!(
+            child_file.is_file(),
+            "{} was not written",
+            child_file.display()
+        );
+        assert!(
+            !paths.history().exists(),
+            "the child appended to the parent's conversation"
         );
     }
 
@@ -302,11 +334,29 @@ mod tests {
         let seen = model.seen.lock().unwrap();
         let system = seen[0][0].content.clone().unwrap();
         assert!(
-            system.starts_with("you are the app agent"),
+            system.starts_with("You are the agent for one app inside deepnest"),
             "the parent prompt is kept"
         );
         assert!(system.contains("You are a subagent"), "{system}");
         assert!(system.contains("cannot see the conversation"), "{system}");
+    }
+
+    #[test]
+    fn a_child_is_told_about_its_own_tools_and_not_the_parent_s() {
+        // The child's factory here is the six leaves, because this runner holds neither a child
+        // loop nor a catalog. A child told it could call `subagent` would try and be refused.
+        let scratch = Scratch::new("child-tools");
+        let model = Arc::new(FixedModel {
+            reply: "ok".into(),
+            seen: Mutex::new(Vec::new()),
+        });
+        let runner = scratch.runner(model.clone());
+        runner.run(&brief("do the job"), &scratch.ctx());
+        let seen = model.seen.lock().unwrap();
+        let system = seen[0][0].content.clone().unwrap();
+        assert!(system.contains("`bash`"), "{system}");
+        assert!(!system.contains("`subagent`"), "{system}");
+        assert!(!system.contains("`install_skill`"), "{system}");
     }
 
     #[test]
