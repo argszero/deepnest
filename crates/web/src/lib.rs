@@ -1105,9 +1105,13 @@ mod tests {
         );
         // What is copied is the model's own source, not the drawn nodes: the person pastes it
         // somewhere that reads Markdown, and re-serialising the DOM would be a second renderer.
+        // The block is now drawn one element per line, so the text no longer arrives in one
+        // assignment — but the control still receives `source` itself, which is the property that
+        // matters: what a person copies must not be the boxes the block was laid out with.
         assert!(
-            section.contains("code.textContent = source"),
-            "the block is not written as text"
+            section.contains("code.textContent = source")
+                || (section.contains("copyControl(") && section.contains("source,")),
+            "the block is not written as text, or the control does not receive the source"
         );
     }
 
@@ -1219,6 +1223,49 @@ mod tests {
         ] {
             assert!(DIALOG_STYLE.contains(selector), "{selector} has no layout");
         }
+    }
+
+    #[test]
+    fn a_wrapped_line_of_code_reads_as_a_continuation_and_not_a_new_line() {
+        // A fenced block wraps on purpose — the column is 19rem wide and a real line of Rust does
+        // not fit — but every row used to begin at the block's own left edge. Measured in Chrome
+        // against a five-line block whose third line was 122 characters: the browser drew seven rows
+        // and all seven began at the same x, so one statement read as three, the last of them
+        // starting mid-expression at `…sum::<i64>();`.
+        //
+        // One element per line, and the stylesheet pulls the first row back by what it pushes the
+        // wrapped rows in, is what tells them apart.
+        assert!(
+            DIALOG_SCRIPT.contains("line.className = \"deepnest-code-line\""),
+            "a line of a block has no element of its own to be laid out by"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#".split("\n")"#),
+            "the block is still written as one text node"
+        );
+        // A blank line is a line: an empty block generates no line box, so it would vanish and the
+        // code under it would move up into its place.
+        assert!(
+            DIALOG_SCRIPT.contains(r#"one === "" ? "\u200b" : one"#),
+            "the blank lines of a block are dropped"
+        );
+        // The two halves of the hanging indent, and the three declarations `all: initial` costs.
+        for needed in [
+            "#deepnest-dialog .deepnest-said pre .deepnest-code-line",
+            "#deepnest-dialog .deepnest-code pre .deepnest-code-line",
+            "padding-left: 2ch",
+            "text-indent: -2ch",
+            "white-space: pre-wrap",
+            "display: block",
+        ] {
+            assert!(DIALOG_STYLE.contains(needed), "{needed} is missing");
+        }
+        // The block is drawn the same way in the transcript and under the box, so the rule has to
+        // reach both places — a continuation that only reads right in one of them is half a fix.
+        assert!(
+            DIALOG_STYLE.contains("#deepnest-dialog .deepnest-code pre"),
+            "the under-the-box block is not covered by the line rule"
+        );
     }
 
     #[test]
