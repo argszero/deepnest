@@ -1,0 +1,230 @@
+//! The conversation an app's agent has had, read back for the page.
+//!
+//! The dialog could show only the answer to the message just sent, and that turned out to be the
+//! wrong shape twice over. A turn that ends by rewriting the app reloads the page, so the one
+//! sentence explaining what happened was destroyed by the thing it was explaining; and a turn that
+//! spends its whole budget on tools has no answer at all, which is indistinguishable on screen from
+//! a turn that never ran.
+//!
+//! So the conversation is read from the file the agent already writes ([`crates/agent`'s
+//! `history.jsonl`]) rather than held in the page. Nothing new is stored: the record of what
+//! happened was always there, and what was missing was a way to ask for it.
+//!
+//! Three decisions:
+//!
+//! - **A turn is the unit, not a message.** The file is a flat list — a user line, then dozens of
+//!   assistant/tool pairs. Rendered as-is, one question produces a wall of tool chatter; grouped,
+//!   it produces "you asked this, it ran 12 tools, here is what it said" and the notes beside it.
+//! - **The agent's own notes are part of the transcript.** `the round budget of 24 ran out` is
+//!   what the user needed to read and could not; a note is written for a reader of the file, and
+//!   the page is that reader.
+//! - **A missing or unreadable line is an empty conversation, not a failure.** A page that cannot
+//!   show what happened is worse than a page showing "nothing yet", and a `500` in a dialog that
+//!   has just been opened says the app is broken when it may only be new.
+
+use std::path::Path;
+
+use deepnest_agent::Record;
+use serde::Serialize;
+
+/// The route this module answers — the same spelling the router routes on.
+pub const ACTION: &str = "history";
+
+/// Where the agent writes the conversation, relative to the app directory.
+const HISTORY: &str = ".agent/history.jsonl";
+
+/// One exchange: what the user asked, and everything the agent did about it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Turn {
+    /// What the person typed.
+    pub user: String,
+    /// The agent's last prose in this turn, or empty when it never wrote any.
+    pub reply: String,
+    /// How many tool calls the agent made about it — the number a reader has no other way to see.
+    pub tools: usize,
+    /// The agent's own notes, in order: why a turn ended early, what it could not run.
+    pub notes: Vec<String>,
+    /// When the user's message was written, UTC to the second, as the file wrote it.
+    pub at: String,
+}
+
+/// Read `app_dir`'s conversation, oldest turn first.
+///
+/// Never an error: a missing file is a conversation with nothing in it, which is what an app
+/// nobody has spoken to has. Records written before the last one are trusted to be complete
+/// because the agent appends whole lines; a last line that does not parse is dropped rather than
+/// turning the whole transcript into a failure.
+pub fn read(app_dir: &Path) -> Vec<Turn> {
+    let Ok(text) = std::fs::read_to_string(app_dir.join(HISTORY)) else {
+        return Vec::new();
+    };
+    let mut turns: Vec<Turn> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<Record>(line) else {
+            // A torn last line is the expected shape of a file that is being written while it is
+            // read: the agent appends whole lines, so a partial one can only be the newest.
+            continue;
+        };
+        push(&mut turns, &record);
+    }
+    turns
+}
+
+/// Where one record belongs in the transcript.
+fn push(turns: &mut Vec<Turn>, record: &Record) {
+    match record.role.as_str() {
+        // A question starts a turn. Text before any question — a system message, which is the
+        // agent's instructions and not the conversation — is not part of what the page shows.
+        "user" => turns.push(Turn {
+            user: record.content.clone().unwrap_or_default(),
+            reply: String::new(),
+            tools: 0,
+            notes: Vec::new(),
+            at: record.at.clone(),
+        }),
+        "assistant" => {
+            let Some(turn) = turns.last_mut() else {
+                return;
+            };
+            turn.tools += record.tool_calls.as_ref().map_or(0, Vec::len);
+            // Only the newest prose is the answer; an agent that writes a line before each tool
+            // call would otherwise have a transcript of its own narration.
+            if let Some(text) = record
+                .content
+                .as_ref()
+                .filter(|text| !text.trim().is_empty())
+            {
+                turn.reply = text.clone();
+            }
+        }
+        // A tool's result is not counted again: the call was already counted on the assistant
+        // line that asked for it, and counting both would report twice the work.
+        "tool" => {}
+        "agent" => {
+            if let (Some(turn), Some(note)) = (turns.last_mut(), record.content.as_ref()) {
+                turn.notes.push(note.clone());
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The body of the `history` route: the conversation, oldest first.
+pub fn body(app_dir: &Path) -> String {
+    let turns = read(app_dir);
+    serde_json::json!({ "turns": turns }).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    struct Scratch {
+        base: PathBuf,
+    }
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let base = std::env::temp_dir()
+                .join(format!("deepnest-history-{name}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&base);
+            fs::create_dir_all(base.join(".agent")).unwrap();
+            Self { base }
+        }
+
+        fn write(&self, lines: &[&str]) {
+            fs::write(self.base.join(HISTORY), lines.join("\n") + "\n").unwrap();
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.base);
+        }
+    }
+
+    const SYSTEM: &str = r#"{"type":"message","role":"system","content":"You are the agent","at":"2026-11-01T01:00:00Z"}"#;
+    const ASK: &str = r#"{"type":"message","role":"user","content":"build a todo list","at":"2026-11-01T01:00:01Z"}"#;
+    const TOOLS: &str = r#"{"type":"message","role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"bash","arguments":"{}"}},{"id":"c2","type":"function","function":{"name":"read","arguments":"{}"}}],"at":"2026-11-01T01:00:02Z"}"#;
+    const RESULT: &str = r#"{"type":"message","role":"tool","content":"ok","tool_call_id":"c1","at":"2026-11-01T01:00:03Z"}"#;
+    const REPLY: &str = r#"{"type":"message","role":"assistant","content":"Done: three files.","at":"2026-11-01T01:00:04Z"}"#;
+    const NOTE: &str = r#"{"type":"note","role":"agent","content":"the round budget of 24 ran out with the model still asking for work","at":"2026-11-01T01:00:05Z"}"#;
+
+    #[test]
+    fn an_app_nobody_has_spoken_to_has_an_empty_conversation() {
+        // The state every newly created app is in, and the one a `500` would misreport as broken.
+        let scratch = Scratch::new("empty");
+        let _ = fs::remove_file(scratch.base.join(HISTORY));
+        assert!(read(&scratch.base).is_empty());
+        assert_eq!(body(&scratch.base), r#"{"turns":[]}"#);
+    }
+
+    #[test]
+    fn a_question_and_its_answer_are_one_turn() {
+        let scratch = Scratch::new("one");
+        scratch.write(&[SYSTEM, ASK, TOOLS, RESULT, REPLY]);
+        let turns = read(&scratch.base);
+        assert_eq!(turns.len(), 1, "{turns:?}");
+        assert_eq!(turns[0].user, "build a todo list");
+        assert_eq!(turns[0].reply, "Done: three files.");
+        // Two calls on the assistant line, and the tool results are not counted again: the
+        // number the page shows is how many things the agent did, not how many lines the file has.
+        assert_eq!(turns[0].tools, 2);
+        assert_eq!(turns[0].at, "2026-11-01T01:00:01Z");
+    }
+
+    #[test]
+    fn a_turn_that_never_wrote_an_answer_still_has_a_turn() {
+        // The measured case: a turn that spends its whole budget on tools returns no prose, and
+        // it has to be distinguishable on the page from a turn that never ran.
+        let scratch = Scratch::new("no-answer");
+        scratch.write(&[ASK, TOOLS, RESULT, NOTE]);
+        let turns = read(&scratch.base);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].reply, "");
+        assert_eq!(turns[0].tools, 2);
+        assert_eq!(turns[0].notes.len(), 1);
+        assert!(
+            turns[0].notes[0].contains("round budget of 24"),
+            "{:?}",
+            turns[0].notes
+        );
+    }
+
+    #[test]
+    fn the_agent_s_instructions_are_not_part_of_the_conversation() {
+        let scratch = Scratch::new("system");
+        scratch.write(&[SYSTEM]);
+        assert!(read(&scratch.base).is_empty());
+    }
+
+    #[test]
+    fn two_questions_are_two_turns_in_the_order_they_were_asked() {
+        let scratch = Scratch::new("order");
+        let second = r#"{"type":"message","role":"user","content":"now add dates","at":"2026-11-01T02:00:00Z"}"#;
+        let answer = r#"{"type":"message","role":"assistant","content":"Added.","at":"2026-11-01T02:00:01Z"}"#;
+        scratch.write(&[ASK, REPLY, second, answer]);
+        let turns = read(&scratch.base);
+        assert_eq!(turns.len(), 2, "{turns:?}");
+        assert_eq!(turns[0].user, "build a todo list");
+        assert_eq!(turns[1].user, "now add dates");
+        assert_eq!(turns[1].reply, "Added.");
+    }
+
+    #[test]
+    fn a_torn_last_line_costs_one_record_and_not_the_conversation() {
+        // The file is appended a line at a time while this reads it, so a partial newest line is
+        // expected rather than exceptional.
+        let scratch = Scratch::new("torn");
+        scratch.write(&[ASK, REPLY, r#"{"type":"message","role":"assistant","cont"#]);
+        let turns = read(&scratch.base);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].reply, "Done: three files.");
+    }
+}

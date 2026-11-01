@@ -145,8 +145,17 @@
   link.href = "/";
   link.textContent = "Open the control panel";
 
+  // The conversation, read back from the server rather than remembered here. That is what makes
+  // it survive the reload a finished rebuild performs: the page comes back empty and asks again,
+  // and the answer it was showing is in the file the agent wrote, not in a variable that died.
+  var transcript = document.createElement("div");
+  transcript.id = "deepnest-dialog-transcript";
+  transcript.setAttribute("role", "log");
+  transcript.setAttribute("aria-label", "This app's conversation");
+
   panel.appendChild(title);
   panel.appendChild(note);
+  panel.appendChild(transcript);
   panel.appendChild(form);
   panel.appendChild(asked);
   panel.appendChild(answer);
@@ -159,6 +168,9 @@
     panel.hidden = !open;
     ball.setAttribute("aria-expanded", open ? "true" : "false");
     if (open) {
+      // Read before focus: the transcript is what the person came to see, and asking for it here
+      // is also what makes the page's first open after a rebuild show the turn that caused it.
+      readHistory();
       input.focus();
     }
   }
@@ -178,6 +190,80 @@
   // The question route: one path, one cookie, and nothing about it needs the control token.
   function askingRoute() {
     return "/api/apps/" + encodeURIComponent(slug) + "/escalation";
+  }
+
+  // The conversation route: a read, and the only thing here that is.
+  var TURNS_SHOWN = 20;
+
+  function historyRoute() {
+    return "/api/apps/" + encodeURIComponent(slug) + "/history";
+  }
+
+  // One turn is: what was asked, what the agent did about it, and what it said back. Rendered with
+  // `textContent` throughout — every string here is either the person's words or the model's.
+  function renderTurn(turn) {
+    var line = document.createElement("div");
+    line.className = "deepnest-turn";
+
+    var asked = document.createElement("p");
+    asked.className = "deepnest-asked";
+    asked.textContent = turn.user;
+
+    var did = document.createElement("p");
+    did.className = "deepnest-did";
+    if (turn.tools > 0) {
+      did.textContent =
+        "ran " + turn.tools + (turn.tools === 1 ? " tool" : " tools");
+    }
+
+    line.appendChild(asked);
+    if (did.textContent) {
+      line.appendChild(did);
+    }
+    if (turn.reply) {
+      var said = document.createElement("p");
+      said.className = "deepnest-said";
+      said.textContent = turn.reply;
+      line.appendChild(said);
+    }
+    // The agent's own notes: why a turn ended early, what it could not run. This is the line the
+    // user needed and could not see — a turn that spent its budget on tools has no answer, and
+    // without the note it is indistinguishable from a turn that never ran.
+    (turn.notes || []).forEach(function (text) {
+      var noteLine = document.createElement("p");
+      noteLine.className = "deepnest-note";
+      noteLine.textContent = text;
+      line.appendChild(noteLine);
+    });
+    return line;
+  }
+
+  function showTurns(turns) {
+    transcript.textContent = "";
+    if (!turns || turns.length === 0) {
+      transcript.hidden = true;
+      return;
+    }
+    var recent = turns.slice(-TURNS_SHOWN);
+    recent.forEach(function (turn) {
+      transcript.appendChild(renderTurn(turn));
+    });
+    transcript.hidden = false;
+    // Newest at the bottom, which is where a conversation is read from.
+    transcript.scrollTop = transcript.scrollHeight;
+  }
+
+  function readHistory() {
+    return fetch(historyRoute(), { credentials: "same-origin" })
+      .then(function (response) {
+        return response.ok ? response.json() : null;
+      })
+      .then(function (body) {
+        showTurns(body && body.turns);
+      })
+      .catch(function () {
+        // A transcript nobody can read is not a reason to break the box that still works.
+      });
   }
 
   // Polling rather than a stream: a turn holds its own connection open while it waits, the answer
@@ -377,6 +463,9 @@
           }
           input.value = "";
           say(text, false);
+          // The turn is on disk the moment the route answers, so this reads what was actually
+          // recorded rather than echoing what came back in the reply.
+          readHistory();
           if (result.body.changed) {
             watchTheRebuild();
           }
@@ -412,6 +501,10 @@
   ball.addEventListener("click", function () {
     show(panel.hidden);
   });
+
+  // The page a finished rebuild reloads onto has no memory of the turn that started it, so this
+  // is where the conversation comes back from: the file, not the tab.
+  readHistory();
 
   document.addEventListener("keydown", function (event) {
     if (event.key === "Escape" && !panel.hidden) {

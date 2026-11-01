@@ -73,6 +73,14 @@ pub const ESCALATION_COOKIE: &str = "deepnest-escalation";
 /// spending a compiler are different capabilities.
 pub const BUILD_COOKIE: &str = "deepnest-build";
 
+/// The cookie that opens an app's conversation history.
+///
+/// A read, and the only one of the four that is. It is separate from [`COOKIE`] because the two
+/// are different capabilities that happen to sit on the same page: writing a message spends the
+/// user's model budget, and reading what was already said costs nothing. The dialog is handed both
+/// when the page is served; a page that only wants to show the transcript needs only this one.
+pub const HISTORY_COOKIE: &str = "deepnest-history";
+
 /// How long a minted value stays usable.
 ///
 /// Long enough for a day's work in one tab, short enough that a value lifted out of a browser
@@ -98,6 +106,7 @@ pub fn cookie_name(action: &str) -> Option<&'static str> {
         crate::chat::ACTION => Some(COOKIE),
         crate::escalation::ACTION => Some(ESCALATION_COOKIE),
         crate::rebuild::ACTION => Some(BUILD_COOKIE),
+        crate::history::ACTION => Some(HISTORY_COOKIE),
         _ => None,
     }
 }
