@@ -815,6 +815,31 @@
   overflow-wrap: anywhere;
 }
 
+/* One line of a fenced block, so a wrapped row is visibly a continuation and not a new line. The
+ * column is 19rem wide and a real line of Rust does not fit in it, so the block wraps by design —
+ * but every row used to begin at the block's own left edge. Measured in Chrome against a four-line
+ * block whose second line was 122 characters: the browser drew six rows, every one of them flush at
+ * the same x, so one statement read as three, the last of them starting mid-expression.
+ *
+ * The first row of a line is pulled back by exactly what the wrapped rows are pushed in, which is
+ * the whole mechanism. `all: initial` comes first as everywhere in this file, and it costs three
+ * declarations here: it sets `display` back to `inline` (a span), `white-space` back to `normal`
+ * (the line runs together), and `font`/`color` back to the page defaults (16px black on the block's
+ * own dark background). */
+#deepnest-dialog .deepnest-said pre .deepnest-code-line,
+#deepnest-dialog .deepnest-code pre .deepnest-code-line {
+  all: initial;
+  display: block;
+  box-sizing: border-box;
+  max-width: 100%;
+  padding-left: 2ch;
+  text-indent: -2ch;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #f4f4f6;
+}
+
 /* A fenced block and the head above it. `all: initial` still comes first — the app's stylesheet
  * must not reach this — but `color` is handed back on the very next line: the reset drops it to
  * canvas text, and a `pre` and `code` inherit from here, so without `inherit` every code block in

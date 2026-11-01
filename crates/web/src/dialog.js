@@ -1433,7 +1433,25 @@
 
     var pre = document.createElement("pre");
     var code = document.createElement("code");
-    code.textContent = source;
+    // One element per line of the source, rather than all of it as one text node. The column is
+    // 19rem wide and a real line of Rust does not fit in it, so the block wraps — and every row used
+    // to start at the block's own left edge, which made one statement read as several. Measured in
+    // Chrome against a four-line block whose second line was 122 characters: the browser drew six
+    // rows, all of them flush at the same x, so `let totals = rows.iter()…sum::<i64>();` read as
+    // three lines with the last of them starting `…sum::<i64>();`.
+    //
+    // A span per line is what lets the stylesheet pull the first row of a line back to the margin and
+    // push the wrapped rows in, which is the difference between a continuation and a new line.
+    String(source)
+      .split("\n")
+      .forEach(function (one) {
+        var line = document.createElement("span");
+        line.className = "deepnest-code-line";
+        // An empty line is still a line: an empty block generates no line box at all, so the blank
+        // row would vanish and the code below it would move up into its place.
+        line.textContent = one === "" ? "\u200b" : one;
+        code.appendChild(line);
+      });
     pre.appendChild(code);
 
     // `what` is null where the text is being *shown* rather than copied from — the answer line under
