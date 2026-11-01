@@ -778,6 +778,66 @@
   padding-left: 0.85rem;
 }
 
+/* A table. Every one of `table`, `thead`, `tbody`, `tr`, `th` and `td` names its own `display`,
+ * for the reason the paragraph rules above spell out: the reset at the top of this file sets
+ * `display` on every descendant and the initial value is `inline`, so nodes built as a table still
+ * draw as one run of words unless each part says what it is.
+ *
+ * The width is `100%` with `table-layout: fixed`, not the content's own width: the transcript is a
+ * 320 px column, and a three-column table left to size itself would push the third column past the
+ * edge of the answer rather than wrap inside it. */
+#deepnest-dialog .deepnest-said table {
+  display: table;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  margin: 0.4rem 0 0;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font: 11px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: rgba(244, 244, 246, 0.9);
+}
+
+#deepnest-dialog .deepnest-said thead {
+  display: table-header-group;
+}
+
+#deepnest-dialog .deepnest-said tbody {
+  display: table-row-group;
+}
+
+#deepnest-dialog .deepnest-said tr {
+  display: table-row;
+}
+
+#deepnest-dialog .deepnest-said th,
+#deepnest-dialog .deepnest-said td {
+  display: table-cell;
+  box-sizing: border-box;
+  padding: 0.22rem 0.32rem;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+/* The head is the one row a reader needs to find without reading: `color` is stated because the
+ * reset gives every descendant black, and the shade separates it from the rows under it. */
+#deepnest-dialog .deepnest-said th {
+  font-weight: 600;
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* Where the delimiter row put a colon. `left` is the cell rule's own default and needs no class. */
+#deepnest-dialog .deepnest-said .deepnest-table-right {
+  text-align: right;
+}
+
+#deepnest-dialog .deepnest-said .deepnest-table-center {
+  text-align: center;
+}
+
 /* `color` is stated rather than inherited, and that is the whole point of this comment: the reset
  * at the top of this file sets `color` on *every* descendant, so code inside an answer does not
  * inherit the answer's colour — it keeps the reset's black. Measured in Chrome against the running

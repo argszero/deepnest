@@ -1159,6 +1159,99 @@
   var BULLET = /^([ \t]*)([-*+]|\d+[.)])\s+(.*)$/;
   var HEADING = /^(#{1,4})\s+(.*)$/;
 
+  // ---- Tables ---------------------------------------------------------------------------------
+
+  // An agent answers a comparison with a table more often than with anything else, and none of the
+  // shapes above caught one: every row of it fell through to the paragraph branch, which joins its
+  // lines with a space. Measured in Chrome against the running binary, a reply holding a
+  // three-column table of four rows drew **one paragraph**, 320 px wide and 88 px tall, whose text
+  // ran `| Model | Price per 1M input | Verdict | |---|--:|:--:| | kimi-k2.6 | 4.00 | …` — twenty
+  // pipe characters in a single run of prose, the delimiter row included. Nothing on the page was a
+  // `table`, so nothing lined up under anything: the verdict for one model sat beside the price of
+  // the next.
+  //
+  // The delimiter row is the whole signal. A line is a header when the line under it is made only
+  // of `-`, `:` and `|`, which is exactly what separates a table from prose that happens to carry a
+  // pipe, and the colons in it are what the columns are aligned by.
+  function tableRule(line) {
+    var body = String(line).trim();
+    if (body.indexOf("-") < 0) {
+      return null;
+    }
+    if (body.charAt(0) === "|") {
+      body = body.slice(1);
+    }
+    if (body.charAt(body.length - 1) === "|") {
+      body = body.slice(0, -1);
+    }
+    var parts = body.split("|");
+    var align = [];
+    for (var n = 0; n < parts.length; n++) {
+      var one = parts[n].trim();
+      if (!/^:?-+:?$/.test(one)) {
+        return null;
+      }
+      var left = one.charAt(0) === ":";
+      var right = one.charAt(one.length - 1) === ":";
+      align.push(left && right ? "center" : right ? "right" : left ? "left" : "");
+    }
+    return align;
+  }
+
+  // One row's cells. The outer pipes are optional — a model writes a table with them and without —
+  // and `\|` is a cell that is meant to contain a bar rather than end at one.
+  function tableCells(line) {
+    var body = String(line).trim();
+    if (body.charAt(0) === "|") {
+      body = body.slice(1);
+    }
+    if (body.charAt(body.length - 1) === "|") {
+      body = body.slice(0, -1);
+    }
+    var cells = [];
+    var at = "";
+    for (var n = 0; n < body.length; n++) {
+      var ch = body.charAt(n);
+      if (ch === "\\" && body.charAt(n + 1) === "|") {
+        at += "|";
+        n += 1;
+        continue;
+      }
+      if (ch === "|") {
+        cells.push(at);
+        at = "";
+        continue;
+      }
+      at += ch;
+    }
+    cells.push(at);
+    return cells.map(function (one) {
+      return one.trim();
+    });
+  }
+
+  // Does a table start at this line? Asked from the paragraph branch as well, because a model
+  // writes "the numbers are:" and the table on the next line with no blank line between them, and
+  // a paragraph that kept reading would swallow the header row before this loop ever saw it.
+  function tableHere(lines, i) {
+    if (i < 0 || i + 1 >= lines.length) {
+      return null;
+    }
+    if (String(lines[i]).indexOf("|") < 0) {
+      return null;
+    }
+    return tableRule(lines[i + 1]);
+  }
+
+  function tableCell(tag, text, align) {
+    var cell = document.createElement(tag);
+    if (align) {
+      cell.className = "deepnest-table-" + align;
+    }
+    withInline(cell, text);
+    return cell;
+  }
+
   // What a control is *called*, which is all a person with a screen reader has to go on.
   //
   // The transcript drew twelve controls with two names between them: measured in Chrome's own
@@ -1237,6 +1330,34 @@
         box.appendChild(fencedBlock(language, body.join("\n"), what, drawn, blocks));
         continue;
       }
+      var align = tableHere(lines, i);
+      if (align) {
+        var table = document.createElement("table");
+        var head = document.createElement("thead");
+        var headRow = document.createElement("tr");
+        tableCells(line).forEach(function (text, column) {
+          headRow.appendChild(tableCell("th", text, align[column]));
+        });
+        head.appendChild(headRow);
+        table.appendChild(head);
+        // The delimiter row is scaffolding, not a row: it says how wide the table is and where each
+        // column leans, and drawing it would put the punctuation of the format into the answer.
+        i += 2;
+        var rows = document.createElement("tbody");
+        while (i < lines.length && lines[i].trim() && lines[i].indexOf("|") >= 0) {
+          var row = document.createElement("tr");
+          tableCells(lines[i]).forEach(function (text, column) {
+            row.appendChild(tableCell("td", text, align[column]));
+          });
+          rows.appendChild(row);
+          i += 1;
+        }
+        if (rows.childNodes.length > 0) {
+          table.appendChild(rows);
+        }
+        box.appendChild(table);
+        continue;
+      }
       var bullet = BULLET.exec(line);
       var heading = HEADING.exec(line);
       if (heading) {
@@ -1308,7 +1429,8 @@
         lines[i].trim() &&
         lines[i].indexOf("```") !== 0 &&
         !BULLET.test(lines[i]) &&
-        !HEADING.test(lines[i])
+        !HEADING.test(lines[i]) &&
+        !tableHere(lines, i)
       ) {
         words.push(lines[i]);
         i++;
