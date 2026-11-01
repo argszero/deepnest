@@ -588,6 +588,14 @@
   display: none;
 }
 
+/* The box takes focus, so it has to say when it has it: without a ring, a person who tabs into a
+ * scroll box cannot tell that the arrow keys now move this and not the page. Drawn *inside* the
+ * box — a ring outside it would land on the jump button and the message box beneath. */
+#deepnest-dialog-transcript:focus-visible {
+  outline: 2px solid #7aa7ff;
+  outline-offset: -2px;
+}
+
 #deepnest-dialog-transcript .deepnest-turn {
   display: block;
   box-sizing: border-box;

@@ -513,6 +513,14 @@
   transcript.id = "deepnest-dialog-transcript";
   transcript.setAttribute("role", "log");
   transcript.setAttribute("aria-label", "This app's conversation");
+  // Reachable by Tab, and that is the whole point: this is the one box in the dialog that scrolls
+  // on its own, and a box a keyboard cannot focus is a box a keyboard cannot scroll. Measured in
+  // Chrome with real key presses before this line existed: the tab order ran from the ball to
+  // "Conversations", then through the twelve copy buttons *inside* the transcript, then to the jump
+  // button and the message box — the transcript itself never took focus, so the answer above the
+  // fold could be read with a mouse and not with a keyboard. `role="log"` and its label were
+  // already here; what was missing was a way in.
+  transcript.setAttribute("tabindex", "0");
 
   // The way back to the newest line, offered only when the reader has left it. A transcript that
   // being written to keeps pulling its own scroll to the end is a transcript a person cannot read
