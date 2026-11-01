@@ -470,6 +470,12 @@ On the build side, three:
 
 An install with no apps has no `apps/` directory at all, and the listing reports that as "none yet" rather than as a fault. That is now the whole of `crates/apps`: the directory contract, the process lifecycle, the template and the build.
 
+**What the page looks like is part of what an app is** (`decided in implementation`, 2026-11-01). Running deepnest and looking at a generated app made the gap plain: it worked and it looked like a wireframe, and every app after it would look the same, because the two things that decide an app's appearance — the starting page and the instructions the app's agent follows — carried no design content at all. Both now do, and three decisions came with it:
+
+- **The look is one token block, not a stylesheet.** `frontend/index.html` declares the palette, the spacing step, the radius and the elevation as custom properties on `:root`, with a dark set under `prefers-color-scheme` and `color-scheme: light dark` so the scrollbar and native controls follow it. A page whose colours are scattered through its rules is a page nobody can restyle, and this one exists to be restyled.
+- **The empty state is the design, not an edge case.** A new app's first screen is an empty list on a day-one database, so it gets a shape and a sentence naming the next action rather than blank space; the failure state carries `role="alert"`, because colour alone is not a state a screen reader reaches. The stylesheet and the component are both checked: a class the component never uses is a stylesheet that is dead on arrival.
+- **The standard is stated twice on purpose.** The template can only fix the first render; the agent is what rewrites the page afterwards. A rule that lives only in the template stops existing at the first change, so the prompt carries the same one — build on the tokens, four states, one emphasis, and add no component library, web font or icon set unless the request names one, each being a dependency in an app that has to build on the user's own machine.
+
 What none of it does: build in the background, or report progress while it runs. A build occupies the thread that asked for it — the panel's own tab waits, which is what a synchronous request means — while the rest of the door stays open. Reporting progress *to that tab* is a streaming answer, and the gateway now has one.
 
 ### `crates/gateway` — the single door
