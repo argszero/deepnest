@@ -11,12 +11,20 @@
 //! directory under the name the app contract fixes. Nothing here needs a package registry, a
 //! bundler or a browser: it is the binary, a real child process, and raw bytes on loopback.
 //!
-//! **The port is 4270 and cannot be anything else.** It is the one address the design fixes — the
-//! user's bookmark, the README, and the single-instance rule all name it — so unlike every other
-//! test in this workspace this one cannot let the OS choose. It therefore *fails* rather than
-//! skips when something else already holds the port, with a message that says which: a test that
-//! quietly skips is a test that reports green having checked nothing, which is the failure this
-//! whole file exists to prevent.
+//! **The product's port is 4270; this file's is one the operating system says is free.** The
+//! design fixes 4270 — the user's bookmark, the README and the single-instance rule all name it —
+//! and that is not what `$DEEPNEST_PORT` changes about a release. What it changes is the one thing
+//! that made this file unrunnable on a machine where deepnest is open: it used to demand 4270 and
+//! fail when a real instance held it, which is every developer who has the program running while
+//! working on it. A suite that asks a person to close their own app first is a suite that gets
+//! skipped, and a skipped end-to-end run checks nothing.
+//!
+//! So the harness hands the binary `$DEEPNEST_PORT=0`, reads back from its banner which port the
+//! operating system gave it, and reaches it there. What the file still refuses to do is skip: a
+//! start that never says where it is fails, with its own log attached, because a test that quietly
+//! skips is a test that reports green having checked nothing. And the single-instance rule is still
+//! checked where it actually lives — at the bind — so the second start below is handed the same
+//! port and is refused on it.
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
@@ -29,8 +37,23 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use sha1::{Digest, Sha1};
 
-/// The port the design fixes, and the only one the binary listens on.
-const PORT: u16 = 4270;
+/// The port a start says it took, read back from the banner it prints once it is listening.
+///
+/// This file hands the binary `$DEEPNEST_PORT=0`, which asks the operating system to pick, so the
+/// pick is knowable from exactly one place: the line the binary itself prints — `listening on
+/// http://127.0.0.1:<port>/`. Reading it back rather than choosing it here is what keeps the
+/// harness honest. A port this side had picked (bind, release, hand over) would be a guess that is
+/// usually right, and "usually" is a test that reports a port conflict as a defect in the code;
+/// the binary's own sentence is the fact.
+fn port_in(log: &str) -> Option<u16> {
+    const SAID: &str = "listening on http://127.0.0.1:";
+    let from = log.find(SAID)? + SAID.len();
+    let digits: String = log[from..]
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
 
 /// The RFC 6455 handshake constant, so this side can compute the accept a browser would demand.
 const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -48,9 +71,13 @@ const PATIENCE: Duration = Duration::from_secs(30);
 #[cfg(unix)]
 const EXIT_PATIENCE: Duration = Duration::from_secs(15);
 
-/// The port is fixed by the design, so two tests in this file cannot run at the same time: whoever
-/// holds this one runs a deepnest on 4270, and the other waits its turn. Without it the second test
-/// to start would find the port taken and report that as the code's fault.
+/// One test at a time, because every install in this file is created in the same directory —
+/// `deepnest-e2e-<pid>`, since both run in one process — and the second to start would delete the
+/// first one's home from under it.
+///
+/// The port used to be the reason, and it is not any more: an install that asks the operating
+/// system for a port contends with no one, not with another install and not with the deepnest the
+/// person running this suite may have open. The shared directory is what still needs the door.
 static DOOR: Mutex<()> = Mutex::new(());
 
 fn door() -> MutexGuard<'static, ()> {
@@ -63,6 +90,9 @@ fn door() -> MutexGuard<'static, ()> {
 struct Install {
     home: PathBuf,
     child: Option<Child>,
+    /// The port the binary took, learned from its own banner once it is listening. `0` until then,
+    /// which is what makes a `Drop` after a start that failed safe: there is nothing to ask.
+    port: u16,
 }
 
 impl Install {
@@ -74,7 +104,11 @@ impl Install {
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).expect("create the temporary deepnest home");
 
-        let install = Self { home, child: None };
+        let install = Self {
+            home,
+            child: None,
+            port: 0,
+        };
         install.install_app();
         install
     }
@@ -99,7 +133,7 @@ impl Install {
         std::fs::copy(standin_app(), &binary).expect("copy the stand-in app into place");
     }
 
-    /// Start the binary against this home, and wait until it answers.
+    /// Start the binary against this home, learn the port it took, and wait until it answers.
     fn start(&mut self) {
         let log = self.home.join("deepnest.log");
         let output = std::fs::File::create(&log).expect("create the server log");
@@ -110,6 +144,11 @@ impl Install {
             // on the machine running the suite — three of them at once in CI, none of them wanted.
             .arg("--no-open")
             .env("DEEPNEST_HOME", &self.home)
+            // `0`, not a number: the operating system hands out a port nobody is on, so this suite
+            // runs on a machine whose own deepnest is open on 4270. Which one it got is read back
+            // below, from the binary's own banner. That read-back is what this file does instead of
+            // skipping: a start that never says where it is fails here, with its log attached.
+            .env("DEEPNEST_PORT", "0")
             .stdin(Stdio::null())
             // To a file, never to a pipe: an undrained pipe fills and blocks the child, and that
             // failure looks like "the server never started".
@@ -118,15 +157,15 @@ impl Install {
             .spawn()
             .expect("spawn the deepnest binary this test was built with");
         self.child = Some(child);
+        self.port = self.learn_port();
 
         let deadline = Instant::now() + PATIENCE;
         loop {
             if let Some(ours) = self.child.as_mut() {
                 if let Ok(Some(status)) = ours.try_wait() {
                     panic!(
-                        "the binary exited ({status}) before serving. Its output:\n{}{}",
-                        self.read_log(),
-                        TAKEN
+                        "the binary exited ({status}) before serving. Its output:\n{}",
+                        self.read_log()
                     );
                 }
             }
@@ -137,12 +176,43 @@ impl Install {
             }
             if Instant::now() >= deadline {
                 panic!(
-                    "the binary did not answer on 127.0.0.1:{PORT} within {PATIENCE:?}. \
-                     Its output:\n{}",
+                    "the binary said it was listening on 127.0.0.1:{} but did not answer within \
+                     {PATIENCE:?}. Its output:\n{}",
+                    self.port,
                     self.read_log()
                 );
             }
             std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// The port this run actually took, waited for with the same patience as the answer itself.
+    ///
+    /// Never assumed and never skipped: a run that cannot be located is a run that cannot be
+    /// checked, and a test that shrugged at that would report green having tested nothing.
+    fn learn_port(&mut self) -> u16 {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            if let Some(ours) = self.child.as_mut() {
+                if let Ok(Some(status)) = ours.try_wait() {
+                    panic!(
+                        "the binary exited ({status}) before it said where it was listening. \
+                         Its output:\n{}",
+                        self.read_log()
+                    );
+                }
+            }
+            if let Some(port) = port_in(&self.read_log()) {
+                return port;
+            }
+            if Instant::now() >= deadline {
+                panic!(
+                    "the binary was given $DEEPNEST_PORT=0 and never said which port it took \
+                     within {PATIENCE:?}. Its output:\n{}",
+                    self.read_log()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(25));
         }
     }
 
@@ -160,13 +230,17 @@ impl Install {
 
     /// A request and its whole answer, `None` while nothing is listening yet.
     fn try_get(&self, target: &str) -> Option<String> {
-        let mut stream = TcpStream::connect(("127.0.0.1", PORT)).ok()?;
+        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).ok()?;
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
         stream
             .write_all(
-                format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{PORT}\r\n\r\n").as_bytes(),
+                format!(
+                    "GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n",
+                    self.port
+                )
+                .as_bytes(),
             )
             .ok()?;
         let mut answer = Vec::new();
@@ -176,28 +250,41 @@ impl Install {
 
     fn get(&self, target: &str) -> String {
         self.try_get(target)
-            .unwrap_or_else(|| format!("GET {target} could not reach 127.0.0.1:{PORT}"))
+            .unwrap_or_else(|| format!("GET {target} could not reach 127.0.0.1:{}", self.port))
     }
 
     /// A request with the token, for the routes that are not pages.
     fn call(&self, method: &str, target: &str) -> String {
-        let mut stream = TcpStream::connect(("127.0.0.1", PORT)).expect("connect to the binary");
+        self.try_call(method, target).unwrap_or_else(|| {
+            panic!(
+                "{method} {target} got no answer from 127.0.0.1:{}",
+                self.port
+            )
+        })
+    }
+
+    /// The same request, answering `None` rather than panicking when nothing is listening — the
+    /// only shape [`Drop`] may use, because a panic there while a test is already unwinding aborts
+    /// the whole run instead of reporting the one failure.
+    fn try_call(&self, method: &str, target: &str) -> Option<String> {
+        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).ok()?;
         stream
             .set_read_timeout(Some(Duration::from_secs(PATIENCE.as_secs())))
-            .unwrap();
+            .ok()?;
         stream
             .write_all(
                 format!(
-                    "{method} {target} HTTP/1.1\r\nHost: 127.0.0.1:{PORT}\r\n\
+                    "{method} {target} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\
                      Authorization: Bearer {}\r\n\r\n",
+                    self.port,
                     self.token()
                 )
                 .as_bytes(),
             )
-            .unwrap();
+            .ok()?;
         let mut answer = Vec::new();
-        stream.read_to_end(&mut answer).unwrap();
-        String::from_utf8_lossy(&answer).into_owned()
+        stream.read_to_end(&mut answer).ok()?;
+        Some(String::from_utf8_lossy(&answer).into_owned())
     }
 
     /// Start the app through the API, as the panel does, and insist it worked.
@@ -258,7 +345,7 @@ impl Drop for Install {
         // child outlives its supervisor — killing it here would hide that, and stopping it through
         // the door is also a check in its own right.
         if self.child.is_some() {
-            let _ = self.call("POST", "/api/apps/notes/stop");
+            let _ = self.try_call("POST", "/api/apps/notes/stop");
         }
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
@@ -267,12 +354,6 @@ impl Drop for Install {
         let _ = std::fs::remove_dir_all(&self.home);
     }
 }
-
-/// Said when the binary refuses to start, so a taken port is never read as a code defect.
-const TAKEN: &str =
-    "\n\nIf that says \"deepnest is already running\", this test needs 127.0.0.1:4270 \
-free — the design fixes that port, so a running deepnest on this machine holds it. Stop it and \
-run the suite again; nothing is wrong with the code.\n";
 
 /// The stand-in app, built as an example beside this test binary.
 fn standin_app() -> PathBuf {
@@ -297,16 +378,16 @@ fn standin_app() -> PathBuf {
 }
 
 /// Connect with timeouts, so a hang is a failure rather than a hung suite.
-fn connect() -> TcpStream {
-    let stream = TcpStream::connect(("127.0.0.1", PORT)).expect("connect to the binary");
+fn connect(port: u16) -> TcpStream {
+    let stream = TcpStream::connect(("127.0.0.1", port)).expect("connect to the binary");
     stream
         .set_read_timeout(Some(Duration::from_secs(20)))
         .unwrap();
     stream
 }
 
-fn handshake(target: &str) -> String {
-    format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{PORT}\r\n\r\n")
+fn handshake(port: u16, target: &str) -> String {
+    format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n")
 }
 
 /// The one scenario, in order: page, answer, stream, upgrade, the door staying open throughout, and
@@ -343,9 +424,9 @@ fn an_app_is_served_through_the_door_the_way_a_browser_sees_it() {
     );
 
     // 3. A stream: answered, framed as the app framed it, complete, and *not* held to the end.
-    let mut stream = connect();
+    let mut stream = connect(install.port);
     stream
-        .write_all(handshake("/app/notes/events").as_bytes())
+        .write_all(handshake(install.port, "/app/notes/events").as_bytes())
         .unwrap();
     let started = Instant::now();
     let mut seen = Vec::new();
@@ -388,14 +469,15 @@ fn an_app_is_served_through_the_door_the_way_a_browser_sees_it() {
     );
 
     // 4. An upgrade: accepted, with the accept key the app itself computed, then bytes both ways.
-    let mut socket = connect();
+    let mut socket = connect(install.port);
     let key = BASE64.encode(b"deepnest-e2e-1234");
     socket
         .write_all(
             format!(
-                "GET /app/notes/ws HTTP/1.1\r\nHost: 127.0.0.1:{PORT}\r\nUpgrade: websocket\r\n\
+                "GET /app/notes/ws HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nUpgrade: websocket\r\n\
                  Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
-                 Sec-WebSocket-Key: {key}\r\n\r\n"
+                 Sec-WebSocket-Key: {key}\r\n\r\n",
+                install.port
             )
             .as_bytes(),
         )
@@ -443,15 +525,16 @@ fn an_app_is_served_through_the_door_the_way_a_browser_sees_it() {
     let _ = socket.shutdown(Shutdown::Both);
 
     // 6. A method this door cannot carry is refused by name rather than mis-forwarded.
-    let mut refused = TcpStream::connect(("127.0.0.1", PORT)).unwrap();
+    let mut refused = TcpStream::connect(("127.0.0.1", install.port)).unwrap();
     refused
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
     refused
         .write_all(
             format!(
-                "POST /app/notes/save HTTP/1.1\r\nHost: 127.0.0.1:{PORT}\r\n\
-                 Content-Length: 0\r\n\r\n"
+                "POST /app/notes/save HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\
+                 Content-Length: 0\r\n\r\n",
+                install.port
             )
             .as_bytes(),
         )
@@ -506,6 +589,9 @@ fn an_app_is_served_through_the_door_the_way_a_browser_sees_it() {
     let second = Command::new(env!("CARGO_BIN_EXE_deepnest"))
         .arg("--no-open")
         .env("DEEPNEST_HOME", &install.home)
+        // The same port, because the port is the admission: a second run that asked for a port of
+        // its own would not be a second double-click on the first one but a second deepnest.
+        .env("DEEPNEST_PORT", install.port.to_string())
         .stdin(Stdio::null())
         .output()
         .expect("run a second deepnest against the home the first one is using");
@@ -520,12 +606,47 @@ fn an_app_is_served_through_the_door_the_way_a_browser_sees_it() {
         "the second start did not say where the first one is: {said}"
     );
     assert!(
-        said.contains(&format!("http://127.0.0.1:{PORT}/")),
+        said.contains(&format!("http://127.0.0.1:{}/", install.port)),
         "the second start did not give the address to open: {said}"
     );
     assert!(
         install.get("/api/health").starts_with("HTTP/1.1 200"),
         "the second start disturbed the first one"
+    );
+}
+
+/// A `$DEEPNEST_PORT` that is not a port ends the run as the usage error it is, before anything is
+/// written: no token file may be left behind suggesting a start that never happened.
+#[test]
+fn a_port_that_is_not_a_port_stops_the_run_before_anything_is_written() {
+    let _held = door();
+    let install = Install::new();
+    let said = Command::new(env!("CARGO_BIN_EXE_deepnest"))
+        .arg("--no-open")
+        .env("DEEPNEST_HOME", &install.home)
+        .env("DEEPNEST_PORT", "forty")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run deepnest with a port that is not a port");
+
+    assert_eq!(
+        said.status.code(),
+        Some(2),
+        "a variable that is not a port is a usage error, not a failed start: {:?}",
+        said.status
+    );
+    let refused = String::from_utf8_lossy(&said.stderr);
+    assert!(
+        refused.contains("DEEPNEST_PORT"),
+        "the refusal did not name what to fix: {refused}"
+    );
+    assert!(
+        refused.contains("forty"),
+        "the refusal did not quote what was set: {refused}"
+    );
+    assert!(
+        !install.home.join("deepnest.token").is_file(),
+        "a run that never listened left a token behind that says it did"
     );
 }
 
