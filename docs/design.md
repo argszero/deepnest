@@ -672,7 +672,7 @@ A hard link is packed as a file: it is a second name for the same bytes, and fin
 - **The payload's programs are under `bin/`, and that directory is prepended to `PATH`.** Prepending, not merging: a bundled toolchain has to win over one the machine happens to have, or a self-contained binary would build the user's app with whatever version was installed. A payload with no `bin/` leaves `PATH` alone instead of pointing it at a directory that does not exist.
 - **The `Runner` is where the payload meets the build.** `payload::Toolchain` implements the same seam `crates/apps` already had — `StdRunner` gained a `path_prefix` and nothing else changed — so a build that cannot get its toolchain reports that as the step's own outcome, where the user is already reading, instead of as a missing program.
 
-Still to come: **the signature over the archive**, plus signing every bundled Mach-O before packing.
+Still to come: **the signature over the archive**, and the `codesign` run itself — what the binaries to sign *are* is now decided and tested (`crates/bundle/src/macho.rs`, below), so what is missing there is an identity and a password rather than an answer.
 
 macOS ships signed and notarized (`host 20:48`). Every Mach-O inside the bundled toolchain must be **signed before packing**, because first-run unpacking does not re-sign, and an unsigned child process is refused under hardened runtime. Windows ships unsigned (`host 20:56`) — SmartScreen will warn on first run, and both README and the first-run page say so plainly rather than teaching users to bypass security prompts blindly.
 
@@ -684,6 +684,15 @@ macOS ships signed and notarized (`host 20:48`). Every Mach-O inside the bundled
 - **The executable bit is set rather than inherited.** A binary that arrives `0644` is a bundle that opens onto nothing, and the system's own refusal to `exec` it never reaches a person.
 
 The bundle is **unsigned**, and the disk image is `hdiutil`'s: a signature covers files that exist, so it comes after this, and a Rust wrapper around a program only one platform has would be a second thing to keep correct for no reading it adds.
+
+**Which files a signature has to cover is now a tested answer too** (`decided in implementation`, 2026-11-01). `crates/bundle/src/macho.rs` decides whether a file is a Mach-O from its first bytes and walks a tree for the ones that are, because a signing step that misses a binary is not a build error: it is a payload that installs, opens, and then refuses to start a compiler on the user's machine. Four decisions:
+
+- **The magic decides, and the walk reads eight bytes per file.** That is what the loader reads as well, so nothing else is inspected — no load commands, no `LC_CODE_SIGNATURE`, no file format to be taught later.
+- **One magic means two things, and the count separates them.** `0xcafebabe` begins both a fat binary and a Java class file, and a toolchain archive is not only binaries. The four bytes after it are an architecture count for the one and a minor-then-major version for the other, and those ranges do not overlap: Java 1.1 is major 45 and today's is 65, where no binary carries 45 architectures. A count of 1 to 20 is a fat binary; above it the file is left alone.
+- **A symlink is skipped rather than followed.** Signing follows a link to its target, so following one inside the tree signs the same bytes twice under two names and following one that leaves the tree signs something the payload does not own. The target inside the tree is found under the path that really holds it.
+- **The order is sorted and an unreadable entry is refused.** Sorted so two signing logs of the same tree can be diffed, which is the choice the packer already made; refused rather than passed over, because skipping what cannot be read is this failure wearing a green build.
+
+It signs nothing and knows nothing about `codesign`, which is deliberate: the enumeration is the half of "sign every Mach-O" that fails quietly, so it is the half that has to be checkable on the two platforms that ship no `codesign` at all.
 
 ## 5. Interfaces that must not drift
 
@@ -751,10 +760,11 @@ One module per cycle, each landing with its tests:
    every path and every link target checked against the toolchain root before anything is written.
    It is not wired into the binary yet, and cannot be: there is no payload in the build for it to
    read. What remains is that payload and the signing of it.
-10. `crates/bundle` — the macOS app bundle. **Landed**: `Deepnest.app` laid out around a binary that
-    has already been built, by `deepnest-bundle`, which is what the release pipeline calls. It is
-    unsigned on purpose: the signature is item 9's remaining half, and it covers files that have to
-    exist before it can be applied.
+10. `crates/bundle` — the macOS app bundle, and which files a signature covers. **Landed**:
+    `Deepnest.app` laid out around a binary that has already been built, by `deepnest-bundle`, which
+    is what the release pipeline calls; and `src/macho.rs`, which walks a tree and says which of its
+    files are Mach-O binaries, tested on all three platforms. The `codesign` run over that list is
+    still item 9's remaining half, and it covers files that have to exist before it can be applied.
 
 ## 7. Non-negotiables
 

@@ -10,8 +10,10 @@ name: macOS bundle
 #
 #   1. Signing every Mach-O — `codesign --options runtime --timestamp` over the binary, and over
 #      each executable inside the payload before it is packed, because first-run unpacking does not
-#      re-sign and an unsigned child process is refused under hardened runtime. Needs a Developer ID
-#      Application certificate and its password, which is a secret this repository does not hold.
+#      re-sign and an unsigned child process is refused under hardened runtime. What those binaries
+#      *are* is already answered and tested (`crates/bundle/src/macho.rs` walks a tree and decides,
+#      on all three platforms); running `codesign` over that list needs a Developer ID Application
+#      certificate and its password, which is a secret this repository does not hold.
 #   2. Notarization — `notarytool submit --wait`, then `stapler staple` on the `.dmg`. Needs the
 #      Apple ID, the team id and an app-specific password.
 #   3. The tag path — `on: push: tags`, a version taken from the tag instead of the workspace, the
