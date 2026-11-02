@@ -643,6 +643,73 @@ call, approved by a person — and the person is looking at this page. Five deci
   know and an approval has nothing to explain. The field is cleared with the question, so a reason
   typed at one request cannot answer the next one.
 
+**The transcript is the turn's order, not a list of its calls** (`decided in
+implementation`, 2026-11-02). The record always held a turn as what was said, what was called and
+what came back; the page drew every call as one flat list with the answer under all of them, so a
+model that said why it was about to act, acted, and said what it found before acting again left a
+turn whose shape — words, batch, words, batch, answer — was invisible. The host named the rule while
+reading one: **every message separates one batch of calls from the next.** Four things follow, and
+they are one decision rather than four:
+
+- **A batch is folded, and the fold says how it ended.** Calls of one round sit under one disclosure
+  whose line reads `3 tool calls · 2 ok, 1 failed` — endings counted rather than summed into a
+  verdict, because a batch that read four files and failed one is both. The wording is the rows'
+  own, so the summary and the row it summarises cannot drift apart.
+- **A note is drawn where it happened.** The agent writes notes — why a turn stopped early, what it
+  could not run — and a turn that spent its budget on tools has no answer at all, so without the
+  note it is indistinguishable from a turn that never ran. `history::Note` carries `round`: how many
+  responses the turn had recorded when the note landed, in `Call::round`'s numbering, with `0` for a
+  note written **before** the first request. That zero is the whole point — a compaction happens
+  before the turn starts, and a note without a position was collected under five hundred batches and
+  read as the last thing that happened.
+- **A call is read by its intent and audited by its arguments.** Every tool's schema makes `intent`
+  a required argument, so the row leads with the model's own sentence about what it was trying to
+  reach; the raw arguments — a command line, a path — sit behind the second disclosure with the
+  answer, and on the row's `title` for the one fact a row has no width for. The seam that adds that
+  field is `registry::definitions`, and **a request assembled anywhere else never sends it**: the
+  loop once read definitions straight off the tools and no model was ever asked, so every row fell
+  back to a bare argument while the registry's own tests passed against a list nothing used.
+- **The window is the conversation's** (`#85`, `#112`, `#117`, `#118`). The panel is 22rem wide and
+  `78vh` tall at most, and one exchange — an answer with a code block, the calls that produced it,
+  the question after it — came to 365 px against the 280 px window it had. `Expand` gives it the
+  window: `100vw` and `100vh` rather than `inset: 0`, because a classic scrollbar takes 15 px of the
+  layout viewport and a sheet sized by offsets stopped exactly that far short on every Windows
+  build, leaving a strip of the app down its right-hand edge. The page underneath is held still
+  while the sheet is up — a page scrolling under an opaque sheet is a page being moved where nobody
+  can see it — by a class on the document element, taken and released from both halves of the state
+  (expanded, and on screen), so a closed panel always hands it back. The reading measure did not go
+  away, it moved: every child of the sheet sits in one centred 44rem column, so prose still breaks
+  where it broke before while wide windows buy the height a table or a code block needs. Measured at
+  1400×900 and 390×844: the sheet's box is the viewport's in all four directions, the column stays
+  704 px and 390 px, and the scroll position survives the lock and the unlock. `Esc` backs out one
+  level at a time — the expansion, then the dialog.
+
+**The rest of the panel's furniture** (`decided in implementation`, 2026-10-31 → 2026-11-02), each
+one a fact the person needs while a turn is running or after it ended:
+
+- **`Stop` exists only while a turn is running**, because a permanent button that says stop is a
+  button with no object. It says so at the press rather than when the reply arrives: the control
+  turns into `Stopping…` and stays disabled, with a line naming what the stop will reach, because
+  the interesting moment is the one where nothing has happened yet.
+- **`Conversations`** opens the app's conversations above the transcript rather than replacing it,
+  so a person can see what they are leaving before they leave it; the row they are on is marked. The
+  transcript is read back from `GET /history` rather than remembered in the page, so a reload shows
+  the same turn — and the window only ever grows, because a fixed last twenty was not a view of the
+  conversation but the conversation with its beginning silently gone.
+- **The attach button and the screen capture** are two ways to the same picture: a file, or
+  `POST /api/apps/<slug>/capture` for the person with nothing to paste from. The grab happens in
+  this process, not in the browser — `getDisplayMedia` costs a browser picker and a system prompt per
+  capture, and deepnest is already a native process. It is deliberately **not** a tool the agent may
+  call (`crates/deepnest/src/capture.rs`): a screen grab is the person pointing at something.
+- **The cost line** sits under the answer and quieter than it — `This turn: N tokens in, M out`,
+  with the cached share when the endpoint reports one. It is drawn from the reply's own `usage`, and
+  cleared rather than guessed when there is none.
+- **Seven routes, seven cookies.** `chat`, `escalation`, `build`, `history`, `cancel`, `sessions`,
+  `capture` — each with a value the server minted when it served this page, scoped to that one path.
+  A capability therefore names *a route*, not an API, and the residual is stated where it is made:
+  an app's own script can make the same request and so spend its own agent turns, and cannot spend
+  another app's, reach the config, start or stop anything, or read the token.
+
 ### `crates/packaging` — the single file
 
 zstd-compressed toolchain payload unpacked on first run **atomically** — into a temp directory, then renamed, so a half-unpacked toolchain can never be mistaken for a complete one. C toolchain is not bundled: check for Xcode CLT / VS C++ Build Tools before the first build and guide the install.
