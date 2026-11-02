@@ -1677,6 +1677,15 @@ impl Router {
         // turn is the one `GET`/`POST .../escalation` reads and answers on another connection.
         let terms = chat::Terms {
             approver: Some(self.requests.approver(slug.as_str())),
+            // The app this turn is for, reached through the supervisor this process already owns:
+            // an app's port is allocated per start and never leaves this process, so a second
+            // supervisor would start a second copy of the app the page is being served from.
+            apps: Some(Arc::new(crate::appcontrol::DialogAppControl::new(
+                Arc::clone(&lifecycle.supervisor),
+                lifecycle.home.clone(),
+                dir.to_path_buf(),
+                slug.clone(),
+            ))),
             // A build that failed last time is part of what the model must know before it writes
             // again: without it the next turn adds code on top of a tree that does not compile.
             build_note: lifecycle.rebuild.note(slug),

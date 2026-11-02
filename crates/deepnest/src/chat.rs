@@ -7,8 +7,9 @@
 //! - **One agent per app, and its state lives in the app's own directory** ([`AgentPaths`]), so
 //!   deleting an app deletes its conversation and backing an app up backs the conversation up.
 //! - **Every tool call goes through the fence.** The tools are `crates/tools`' six leaves plus the
-//!   two seams this crate is the only one that can wire — `subagent`, whose child loop belongs to
-//!   `crates/agent`, and `install_skill`, whose catalog and publisher are [`crate::install`]'s —
+//!   three seams this crate is the only one that can wire — `subagent`, whose child loop belongs to
+//!   `crates/agent`, `install_skill`, whose catalog and publisher are [`crate::install`]'s, and
+//!   `app`, whose supervisor is [`crate::appcontrol`]'s —
 //!   and the policy is `crates/sandbox`'s for this app: the app directory, the toolchain and temp —
 //!   the three roots `writable_roots` already derives, so the file tools and the shell agree because
 //!   they are reading the same answer.
@@ -58,6 +59,7 @@ use deepnest_agent::{
 use deepnest_apps::{manifest, Slug};
 use deepnest_llm::ToolDefinition;
 use deepnest_sandbox::{roots::writable_roots, Mode, Policy};
+use deepnest_tools::app::AppControl;
 use deepnest_tools::{registry, StdSpawner, Tool, ToolContext, ToolResult};
 use serde_json::{json, Value};
 
@@ -403,6 +405,12 @@ pub struct Terms {
     /// `None` is a real answer and not a degraded one: an agent with nobody to ask refuses to widen
     /// and says so, which is what a test and any caller without a page behind it should get.
     pub approver: Option<Arc<dyn Approver>>,
+    /// What this turn may do to the app it is for, when the caller has a supervisor to do it with.
+    ///
+    /// `None` is a real answer and not a degraded one: a caller with no supervisor — a test, or an
+    /// agent answering with no lifecycle behind it — gets a turn whose tool set has no `app` in it,
+    /// rather than one that offers a tool and refuses when it is called.
+    pub apps: Option<Arc<dyn AppControl>>,
     /// Why the last rebuild failed, when it did: the agent's next turn is told before it writes.
     pub build_note: Option<String>,
     /// What another request cancels this turn through.
@@ -539,15 +547,16 @@ pub fn watched(
     // model log goes is a fact about this app, not about the runner.
     let llm_log = paths.llm_log();
     let runner = Arc::new(LoopRunner::new(Arc::clone(&model), paths, context.clone()));
-    let tools: Vec<Box<dyn Tool>> = registry::with_seams(Some(runner), Some(installer))
-        .into_iter()
-        .map(|tool| {
-            Box::new(Recorder {
-                changed: Arc::clone(&changed),
-                inner: tool,
-            }) as Box<dyn Tool>
-        })
-        .collect();
+    let tools: Vec<Box<dyn Tool>> =
+        registry::with_seams(Some(runner), Some(installer), terms.apps.clone())
+            .into_iter()
+            .map(|tool| {
+                Box::new(Recorder {
+                    changed: Arc::clone(&changed),
+                    inner: tool,
+                }) as Box<dyn Tool>
+            })
+            .collect();
 
     // The tool section names this exact vector — the one the agent below dispatches with — so the
     // prompt and the request's schema cannot come apart.
@@ -1485,6 +1494,84 @@ mod tests {
                 "{expected} is missing from {offered:?}"
             );
         }
+        assert_eq!(offered.len(), 8, "{offered:?}");
+    }
+
+    struct StubAppControl;
+
+    impl deepnest_tools::app::AppControl for StubAppControl {
+        fn act(&self, _request: &deepnest_tools::AppRequest, _ctx: &ToolContext) -> ToolResult {
+            ToolResult::ok("app", "stub")
+        }
+    }
+
+    #[test]
+    fn a_turn_that_can_reach_the_supervisor_is_offered_the_app_tool() {
+        // The design promised the per-app agent could start and stop its app and read its log;
+        // before this seam the set it was handed had no tool that could, and the prompt was
+        // therefore right to say nothing about one. Both sides move together here.
+        let scratch = Scratch::new("app-seam");
+        let model = Arc::new(Scripted::new(vec![Ok(AssistantTurn {
+            content: Some("ok".to_string()),
+            tool_calls: Vec::new(),
+            finish_reason: FinishReason::Stop,
+            usage: deepnest_llm::Usage::default(),
+        })]));
+
+        let reply = answer(
+            Arc::clone(&model) as Arc<dyn Model>,
+            &scratch.home,
+            &scratch.app_dir(),
+            &scratch.slug(),
+            &ask_of("hello"),
+            &Terms {
+                apps: Some(Arc::new(StubAppControl)),
+                ..Terms::default()
+            },
+        );
+        assert_eq!(reply.status, 200, "{}", reply.body);
+
+        let seen = model.seen.lock().unwrap();
+        let system = seen[0][0].content.clone().unwrap_or_default();
+        let offered: Vec<String> = model.offered.lock().unwrap()[0]
+            .iter()
+            .map(|definition| definition.function.name.clone())
+            .collect();
+
+        assert!(offered.iter().any(|name| name == "app"), "{offered:?}");
+        assert_eq!(offered.len(), 9, "{offered:?}");
+        assert_eq!(
+            advertised(&system),
+            offered,
+            "the prompt names the set the dispatcher has, seams included"
+        );
+    }
+
+    #[test]
+    fn a_turn_with_no_supervisor_is_offered_no_app_tool_at_all() {
+        // `None` is a real answer: a caller with no process table gets a set without the tool,
+        // rather than one that offers it and refuses when it is called.
+        let scratch = Scratch::new("no-app-seam");
+        let model = Arc::new(Scripted::new(vec![Ok(AssistantTurn {
+            content: Some("ok".to_string()),
+            tool_calls: Vec::new(),
+            finish_reason: FinishReason::Stop,
+            usage: deepnest_llm::Usage::default(),
+        })]));
+        let reply = answer(
+            Arc::clone(&model) as Arc<dyn Model>,
+            &scratch.home,
+            &scratch.app_dir(),
+            &scratch.slug(),
+            &ask_of("hello"),
+            &Terms::default(),
+        );
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        let offered: Vec<String> = model.offered.lock().unwrap()[0]
+            .iter()
+            .map(|definition| definition.function.name.clone())
+            .collect();
+        assert!(!offered.iter().any(|name| name == "app"), "{offered:?}");
         assert_eq!(offered.len(), 8, "{offered:?}");
     }
 

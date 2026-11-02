@@ -98,9 +98,11 @@ Windows 后端在体量上远超其它两个（EMRG：ACL、FFI、受限令牌�
 
 ### `crates/tools` —— agent 的手 `（宿主 20:20）`
 
-`bash`、`read`、`write`、`edit`、`glob`、`grep`、`subagent`、`install_skill`。不是精简子集：宿主定的是每应用 agent 具备接近完整的 EMRG 能力，包括启停这个应用、看日志、操作浏览器、截图。浏览器操作与截图**来自 browser-harness skill，不由核心内建**（`宿主 20:23`，`宿主 20:48` 再确认）—— 核心只负责在默认浏览器里打开应用页。
+`bash`、`read`、`write`、`edit`、`glob`、`grep`、`subagent`、`install_skill`、`app`。不是精简子集：宿主定的是每应用 agent 具备接近完整的 EMRG 能力，包括启停这个应用、看日志、操作浏览器、截图。后两条**来自 browser-harness skill，不由核心内建**（`宿主 20:23`，`宿主 20:48` 再确认）—— 核心只负责在默认浏览器里打开应用页。
 
-其中两个是**缝而不是叶子**，理由都是它们委托的那件事住在它不能依赖的 crate 里：`subagent` 要一个子循环（`crates/agent`），`install_skill` 要目录、状态文件和发布器（`crates/deepnest`，只有它知道 home 在哪）。没人注入就不提供 —— `registry::all` 是六个叶子，`with_runner` 与 `with_installer` 各加一个 —— 所以模型被告知的集合，永远是调度器跑得动的集合。
+**应用自己的生命周期就是 `app`**（`实现中决定`，2026-11-02）：一个工具带 `status`、`start`、`stop`、`restart`、`logs`，最后那个读应用的日志或上一次构建的日志。上面那段在集合里还没有它的时候就先许下了这项能力，而补上这个缺口的不是 skill：skill 是一份 `SKILL.md`，描述的是已经存在的工具，而进程表是守护进程的。绕道也能到，但是错的那种到法：面板自己那些生命周期路由由控制 token 把守，而那份文件是任何模式都**不能写**的三份之一 —— 不能写，不等于不能读 —— 所以 agent 可以 `read` 它，再用 `bash` 去调那些路由。可那时到手的只是 shell 的输出：一次拒绝、一次超时、一次成功的启动，看上去都是需要解读的文本，这一轮汇报的是它推断出来的东西，而不是监管器知道的东西。**这次调用不点名应用**：工具是为某一应用的某一轮构造的，它握着的监管器已经绑死那个 slug，所以没有可以指错对象参数。读（`status`、`logs`）在每个模式下都放行；改（`start`、`stop`、`restart`）在 `read-only` 下按围栏一贯的说法被拒，并点名该申请哪个模式。
+
+其中三个是**缝而不是叶子**，理由都是它们委托的那件事住在它不能依赖的 crate 里：`subagent` 要一个子循环（`crates/agent`），`install_skill` 要目录、状态文件和发布器（`crates/deepnest`，只有它知道 home 在哪），`app` 要一张进程表和那个 `logs/` 在它底下的 home（`crates/deepnest` 与 `crates/apps`）。没人注入就不提供 —— `registry::all` 是六个叶子，`registry::with_seams` 每个缝能兑现哪个就加哪个，都不给就一个不加 —— 所以模型被告知的集合，永远是调度器跑得动的集合。
 
 shell 结果明确携带沙箱判定，区分「runner 没起来」与「沙箱拒绝」，超时杀进程组，被拒时追加提权提示（`实现自决, ref: emrg/tools/bash_tool_v2.py`）。
 

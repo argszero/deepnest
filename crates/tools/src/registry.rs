@@ -4,13 +4,14 @@
 //! *told about* and the set the dispatcher *can run* must be the same set. Two lists that agree
 //! today is a feature that breaks silently the day one of them gains a member.
 //!
-//! One constructor, and the difference between its arguments is the whole reason `subagent` and
-//! `install_skill` are seams: [`all`] is the six leaf tools, which need nothing but a
+//! One constructor, and the difference between its arguments is the whole reason `subagent`,
+//! `install_skill` and `app` are seams: [`all`] is the six leaf tools, which need nothing but a
 //! [`crate::ToolContext`], and [`with_seams`] adds `subagent` once the caller supplies the agent
-//! loop it delegates to, `install_skill` once the caller supplies the catalog it installs from, or
-//! both. A caller that has not built a loop — or found a home to read a catalog under — gets a set
-//! the model is told about and that runs, not a set with a hole in it, which is what a `subagent`
-//! tool with no runner or an `install_skill` with no catalog would be.
+//! loop it delegates to, `install_skill` once the caller supplies the catalog it installs from,
+//! `app` once the caller supplies the supervisor that owns the app's process, or any of them. A
+//! caller that has not built a loop — or found a home to read a catalog under, or a process table
+//! to ask — gets a set the model is told about and that runs, not a set with a hole in it, which is
+//! what a `subagent` tool with no runner would be.
 //!
 //! The prompt names its tools from the set it was handed ([`names`]), so the sentence in front of
 //! the model and the schema sent beside it cannot drift apart: there is one list, and it is the
@@ -24,6 +25,7 @@ use std::sync::Arc;
 
 use deepnest_llm::ToolDefinition;
 
+use crate::app::{AppControl, AppTool};
 use crate::files::{EditTool, ReadTool, WriteTool};
 use crate::search::{GlobTool, GrepTool};
 use crate::shell::BashTool;
@@ -49,13 +51,18 @@ pub fn all() -> Vec<Box<dyn Tool>> {
 /// The set a caller with these seams can run: the six leaves, plus each seam it can honour.
 ///
 /// `None` is a real answer rather than a degraded one — a caller with no child loop has no
-/// `subagent`, a caller with no catalog has no `install_skill` — and the two are independent
-/// because they are wired by different things: the loop is `crates/agent`'s and the catalog is
-/// `crates/deepnest`'s, so a crate that has one and not the other is the ordinary case. Supplying
-/// both is what the dialog does.
+/// `subagent`, a caller with no catalog has no `install_skill`, a caller with no supervisor has no
+/// `app` — and they are independent because they are wired by different things: the loop is
+/// `crates/agent`'s, the catalog and the process table are `crates/deepnest`'s, so a crate that has
+/// one and not the others is the ordinary case. Supplying all three is what the dialog does.
+///
+/// The order is the order the model is offered them, and it is the leaves first on purpose: a seam
+/// is reached for when a leaf cannot do the job, and the leaves are what a model that is new to the
+/// set should try first.
 pub fn with_seams(
     runner: Option<Arc<dyn SubagentRunner>>,
     installer: Option<Arc<dyn SkillInstaller>>,
+    app: Option<Arc<dyn AppControl>>,
 ) -> Vec<Box<dyn Tool>> {
     let mut tools = all();
     if let Some(runner) = runner {
@@ -64,17 +71,25 @@ pub fn with_seams(
     if let Some(installer) = installer {
         tools.push(Box::new(InstallSkillTool::new(installer)));
     }
+    if let Some(app) = app {
+        tools.push(Box::new(AppTool::new(app)));
+    }
     tools
 }
 
 /// The same set with `subagent` added, once the caller can run a child agent.
 pub fn with_runner(runner: Arc<dyn SubagentRunner>) -> Vec<Box<dyn Tool>> {
-    with_seams(Some(runner), None)
+    with_seams(Some(runner), None, None)
 }
 
 /// The same set with `install_skill` added, once the caller can install from a catalog.
 pub fn with_installer(installer: Arc<dyn SkillInstaller>) -> Vec<Box<dyn Tool>> {
-    with_seams(None, Some(installer))
+    with_seams(None, Some(installer), None)
+}
+
+/// The same set with `app` added, once the caller can reach a supervisor.
+pub fn with_app(app: Arc<dyn AppControl>) -> Vec<Box<dyn Tool>> {
+    with_seams(None, None, Some(app))
 }
 
 /// The definitions to send with a request, for one built set.
@@ -182,8 +197,20 @@ mod tests {
         }
     }
 
+    struct StubApp;
+
+    impl AppControl for StubApp {
+        fn act(&self, _request: &crate::AppRequest, _ctx: &ToolContext) -> ToolResult {
+            ToolResult::ok("app", "stub")
+        }
+    }
+
     fn installer() -> Arc<dyn SkillInstaller> {
         Arc::new(StubInstaller)
+    }
+
+    fn app() -> Option<Arc<dyn AppControl>> {
+        Some(Arc::new(StubApp))
     }
 
     fn runner() -> Option<Arc<dyn SubagentRunner>> {
@@ -218,7 +245,7 @@ mod tests {
             all(),
             with_runner(Arc::new(StubRunner)),
             with_installer(installer()),
-            with_seams(runner(), Some(installer())),
+            with_seams(runner(), Some(installer()), None),
         ] {
             for definition in definitions(&tools) {
                 let name = &definition.function.name;
@@ -286,7 +313,7 @@ mod tests {
             all(),
             with_runner(Arc::new(StubRunner)),
             with_installer(installer()),
-            with_seams(runner(), Some(installer())),
+            with_seams(runner(), Some(installer()), None),
         ] {
             let mut seen = HashSet::new();
             for tool in &tools {
@@ -328,7 +355,7 @@ mod tests {
         // The dialog is the caller that has both: a child loop from `crates/agent` and a catalog
         // from `crates/deepnest`. Before this set existed it had to pick one, so `subagent` was
         // never offered in the page the whole product is built around.
-        let named = names(&with_seams(runner(), Some(installer())));
+        let named = names(&with_seams(runner(), Some(installer()), None));
         assert_eq!(
             named,
             vec![
@@ -345,9 +372,47 @@ mod tests {
         );
         // Either seam alone still yields the seven it yielded before, so nothing that supplied one
         // changed shape under it.
-        assert_eq!(names(&with_seams(runner(), None)).len(), 7);
-        assert_eq!(names(&with_seams(None, Some(installer()))).len(), 7);
-        assert_eq!(names(&with_seams(None, None)), names(&all()));
+        assert_eq!(names(&with_seams(runner(), None, None)).len(), 7);
+        assert_eq!(names(&with_seams(None, Some(installer()), None)).len(), 7);
+        assert_eq!(names(&with_seams(None, None, None)), names(&all()));
+    }
+
+    #[test]
+    fn all_three_seams_compose_into_the_set_the_dialog_runs() {
+        // What the dialog builds: a child loop from `crates/agent`, a catalog and a process table
+        // from `crates/deepnest`. `app` is last because the leaves are what a model new to this set
+        // should reach for first, and a seam answers a question a leaf cannot.
+        let named = names(&with_seams(runner(), Some(installer()), app()));
+        assert_eq!(
+            named,
+            vec![
+                "bash",
+                "read",
+                "write",
+                "edit",
+                "glob",
+                "grep",
+                "subagent",
+                "install_skill",
+                "app",
+            ],
+            "{named:?}"
+        );
+        // Each seam alone is still one tool, so a caller that supplies one is not silently handed
+        // the others.
+        assert_eq!(names(&with_app(Arc::new(StubApp))).len(), 7);
+        assert!(names(&with_seams(runner(), Some(installer()), None))
+            .iter()
+            .all(|name| name != "app"));
+    }
+
+    #[test]
+    fn app_is_absent_until_a_supervisor_is_supplied() {
+        // The same rule as the other two seams: a caller with no process table gets no `app`, not
+        // one that refuses when it is finally called.
+        assert!(!names(&all()).iter().any(|name| name == "app"));
+        assert!(find(&all(), "app").is_none());
+        assert!(find(&with_app(Arc::new(StubApp)), "app").is_some());
     }
 
     #[test]
@@ -398,7 +463,7 @@ mod tests {
         for (definition, name) in leaf_definitions.iter().zip(names(&leaves)) {
             assert_eq!(definition.function.name, name);
         }
-        let both = definitions(&with_seams(runner(), Some(installer())));
+        let both = definitions(&with_seams(runner(), Some(installer()), None));
         assert_eq!(both.len(), 8);
         assert_eq!(both[6].function.name, "subagent");
         assert_eq!(both[7].function.name, "install_skill");

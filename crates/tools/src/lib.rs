@@ -29,8 +29,12 @@
 //! crate underneath that one instead of beside it. `install_skill` is the same shape for the same
 //! reason ([`skill::InstallSkillTool`]): the tool's words live here, and the catalog, the state
 //! file and the publisher a skill install needs are injected by the binary, which is the only
-//! crate that knows where the home is.
+//! crate that knows where the home is. `app` is the third of that shape ([`app::AppTool`]): what a
+//! call may ask about the app — its state, starting and stopping it, the end of its log — is
+//! written here, and the supervisor that answers is the binary's, because a process table is not
+//! something this crate may hold one of.
 
+pub mod app;
 pub mod args;
 pub mod files;
 pub mod path;
@@ -45,6 +49,7 @@ use std::path::PathBuf;
 use deepnest_llm::ToolDefinition;
 use serde_json::Value;
 
+pub use app::{AppAction, AppControl, AppRequest, AppTool, LogKind};
 pub use args::{boolean_argument, count_argument, optional_string_argument, string_argument};
 pub use path::{resolve_target, special_file_kind, SpecialFile};
 pub use shell::{BashTool, ShellOutcome, ShellResult, Spawner, StdSpawner};
