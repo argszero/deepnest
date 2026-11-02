@@ -106,7 +106,7 @@ impl SubagentRunner for LoopRunner {
             Err(result) => return result,
         };
         match outcome {
-            TurnOutcome::Answered { text, rounds } => ToolResult::ok(
+            TurnOutcome::Answered { text, rounds, .. } => ToolResult::ok(
                 "subagent",
                 format!(
                     "{text}\n\n[the child finished in {rounds} round(s); its conversation is at {}]",
@@ -114,7 +114,7 @@ impl SubagentRunner for LoopRunner {
                 ),
             )
             .truncate(MAX_RESULT_CHARS),
-            TurnOutcome::RoundLimit { text, rounds } => ToolResult::error(
+            TurnOutcome::RoundLimit { text, rounds, .. } => ToolResult::error(
                 "subagent",
                 format!(
                     "{text}\n\n[the child hit its round budget of {rounds} and did not finish; \
@@ -122,7 +122,7 @@ impl SubagentRunner for LoopRunner {
                 ),
             )
             .truncate(MAX_RESULT_CHARS),
-            TurnOutcome::Cancelled { note } => ToolResult::error(
+            TurnOutcome::Cancelled { note, .. } => ToolResult::error(
                 "subagent",
                 format!(
                     "{note}. The child stopped at {}; nothing further ran.",

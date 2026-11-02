@@ -603,6 +603,13 @@ pub fn watched(
         TurnOutcome::Cancelled { .. } => "cancelled",
         TurnOutcome::RoundLimit { .. } => "round_limit",
     };
+    // What the turn cost, in the provider's own counts summed over its rounds. Serialised from the
+    // same `Usage` the log writes, so the number a page shows and the number `llm.jsonl` records
+    // answer to the same names — a reader comparing the two is doing subtraction, not translation.
+    // A provider that reported nothing leaves the object at zero rather than the field absent: an
+    // absent field cannot be told from a server that does not report cost at all, and
+    // `Usage::reported` is the one test for the difference.
+    let usage = outcome.usage();
     Reply {
         status: 200,
         body: json!({
@@ -611,6 +618,7 @@ pub fn watched(
             "rounds": rounds,
             "cancelled": matches!(outcome, TurnOutcome::Cancelled { .. }),
             "changed": changed.load(Ordering::SeqCst),
+            "usage": usage,
         }),
     }
 }
@@ -1286,6 +1294,102 @@ mod tests {
             "bread\n",
             "the tool ran inside the fence and wrote where it was told"
         );
+    }
+
+    /// What the page shows is what the log recorded, added up over the turn.
+    ///
+    /// Two readings of one number, because either alone is passed by a wrong answer: the reply is
+    /// what the page has, and `llm.jsonl` is the record. A reply that summed nothing, or summed the
+    /// wrong rounds, still looks like a number to a caller who reads only the reply — so the reply
+    /// is compared against the file, not against a total typed into this test. The arithmetic that
+    /// fills the file and the arithmetic that fills the reply cannot then drift apart quietly.
+    #[test]
+    fn the_reply_reports_what_the_turn_cost_and_the_log_adds_up_to_it() {
+        let scratch = Scratch::new("usage");
+        let target = scratch.app_dir().join("list.txt");
+        std::fs::write(&target, "bread\n").unwrap();
+        let model = Scripted::new(vec![
+            Ok(AssistantTurn {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call-1".to_string(),
+                    kind: "function".to_string(),
+                    function: deepnest_llm::FunctionCall {
+                        name: "read".to_string(),
+                        arguments: json!({ "file_path": target.display().to_string() }).to_string(),
+                    },
+                }],
+                finish_reason: FinishReason::ToolCalls,
+                usage: deepnest_llm::Usage {
+                    prompt_tokens: 900,
+                    completion_tokens: 30,
+                    total_tokens: 930,
+                    cached_tokens: Some(450),
+                },
+            }),
+            Ok(AssistantTurn {
+                content: Some("It says bread.".to_string()),
+                tool_calls: Vec::new(),
+                finish_reason: FinishReason::Stop,
+                usage: deepnest_llm::Usage {
+                    prompt_tokens: 1_200,
+                    completion_tokens: 40,
+                    total_tokens: 1_240,
+                    cached_tokens: Some(600),
+                },
+            }),
+        ]);
+
+        let reply = answer(
+            Arc::new(model),
+            &scratch.home,
+            &scratch.app_dir(),
+            &scratch.slug(),
+            &ask_of("what is on the list?"),
+            &Terms::default(),
+        );
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        assert_eq!(reply.body["rounds"], 2, "{}", reply.body);
+        assert_eq!(
+            reply.body["usage"]["prompt_tokens"], 2_100,
+            "{}",
+            reply.body
+        );
+        assert_eq!(
+            reply.body["usage"]["completion_tokens"], 70,
+            "{}",
+            reply.body
+        );
+        assert_eq!(
+            reply.body["usage"]["cached_tokens"], 1_050,
+            "{}",
+            reply.body
+        );
+
+        // The same turn read from the file, summed the way anyone reading `llm.jsonl` would.
+        let log = std::fs::read_to_string(AgentPaths::for_app(scratch.app_dir()).llm_log())
+            .expect("the turn logs what it sent and what it cost");
+        let mut prompts = 0u64;
+        let mut completions = 0u64;
+        let mut cached = 0u64;
+        let mut rounds = 0usize;
+        for line in log.lines() {
+            let record: serde_json::Value = serde_json::from_str(line).unwrap();
+            if record["type"] != "response" {
+                continue;
+            }
+            rounds += 1;
+            prompts += record["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
+            completions += record["usage"]["completion_tokens"].as_u64().unwrap_or(0);
+            cached += record["usage"]["cached_tokens"].as_u64().unwrap_or(0);
+        }
+        assert_eq!(rounds, 2, "{log}");
+        assert_eq!(reply.body["usage"]["prompt_tokens"], prompts, "{log}");
+        assert_eq!(
+            reply.body["usage"]["completion_tokens"], completions,
+            "{log}"
+        );
+        assert_eq!(reply.body["usage"]["cached_tokens"], cached, "{log}");
     }
 
     #[test]

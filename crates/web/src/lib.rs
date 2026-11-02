@@ -1143,6 +1143,40 @@ mod tests {
         assert!(!page.contains("dialog"), "{page}");
     }
 
+    /// What a turn cost is drawn under the answer it paid for.
+    ///
+    /// Three readings, because the number has three ways to go missing and only one of them is a
+    /// refusal: the script can stop reading `usage` out of the reply, the element can stop being
+    /// appended to the panel, or the element can be created further down the file than the block
+    /// that appends it — where `var` hoists the name but not the value, so the panel is assembled
+    /// with `undefined` and `appendChild` throws. Measured in Chrome on the first draft of this
+    /// line: that throw took the whole dialog off the page, not just the number.
+    #[test]
+    fn the_dialog_draws_what_the_turn_cost_under_the_answer() {
+        let created = DIALOG_SCRIPT
+            .find(r#"var spend = document.createElement("p")"#)
+            .expect("the cost line is never created");
+        let appended = DIALOG_SCRIPT
+            .find("panel.appendChild(spend)")
+            .expect("the cost line is created but never drawn");
+        assert!(
+            created < appended,
+            "the element is created after the block that appends it, which throws at page load"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("showSpend(result.body)"),
+            "the reply's usage is never handed to the line"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("body.usage") || DIALOG_SCRIPT.contains("body && body.usage"),
+            "the line does not read the reply's usage"
+        );
+        assert!(
+            DIALOG_STYLE.contains("#deepnest-dialog-spend"),
+            "the line has no style of its own, so it draws as body text"
+        );
+    }
+
     #[test]
     fn the_dialog_sends_a_message_and_holds_no_credential_of_its_own() {
         // The box exists, and the one route it calls is the chat route whose path the server scopes
