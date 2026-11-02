@@ -1845,7 +1845,7 @@ mod tests {
             .find("function readHistory() {")
             .expect("the history read exists");
         let body = &DIALOG_SCRIPT[read..];
-        let body = &body[..body.find("\n  }\n").expect("the read ends")];
+        let body = &body[..body.find("\n  }").expect("the read ends")];
         assert!(
             body.contains("seedFromTheFile(turns);"),
             "the file is read without the box learning what it holds"
