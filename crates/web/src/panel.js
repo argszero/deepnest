@@ -239,9 +239,13 @@
       open.rel = "noopener";
       actions.appendChild(open);
     } else {
-      // The same word in the same place, so the row does not change shape between states — but not
-      // a link, because following it answers `503` with a page whose text says to start the app.
-      var shut = element("span", "btn off small", "Open");
+      // The same word in the same place, so the row does not change shape between states — but a
+      // disabled button rather than a link: following one answers `503` with a page whose text says
+      // to start the app. Disabled is the shape the rest of the page already uses for a control that
+      // is not available, and it is what makes the row say so without being pressed.
+      var shut = element("button", "btn off small", "Open");
+      shut.type = "button";
+      shut.disabled = true;
       shut.title = "not running — start it first";
       actions.appendChild(shut);
     }
