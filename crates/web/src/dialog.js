@@ -91,14 +91,15 @@
   // most, and an exchange does not fit in that at any window size: an answer with a code block, the
   // calls that produced it and the question after it came to 365 px on its own once the block folded
   // (#85), against the 280 px window it has. Reading a conversation a few lines at a time out of a
-  // box that small is not reading it. This button gives the conversation the room the window has,
-  // and the same button, saying Restore, gives the room back — a second control to undo the first
-  // would be one more thing to find.
+  // box that small is not reading it. This button gives the conversation the whole window — the
+  // panel becomes the page, and the conversation keeps a reading measure inside it — and the same
+  // button, saying Restore, gives the window back: a second control to undo the first would be one
+  // more thing to find.
   var expand = document.createElement("button");
   expand.type = "button";
   expand.id = "deepnest-dialog-expand";
   expand.textContent = "Expand";
-  expand.title = "Fill the window with this conversation (Esc)";
+  expand.title = "Fill the window with this conversation, full screen (Esc)";
   expand.setAttribute("aria-pressed", "false");
 
   var head = document.createElement("div");
@@ -1018,7 +1019,7 @@
     expand.textContent = next ? "Restore" : "Expand";
     expand.title = next
       ? "Back to the small window (Esc)"
-      : "Fill the window with this conversation (Esc)";
+      : "Fill the window with this conversation, full screen (Esc)";
   }
 
   expand.addEventListener("click", function () {

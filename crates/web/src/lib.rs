@@ -1233,12 +1233,40 @@ mod tests {
             "the 78vh ceiling is still there, so the expanded panel is no taller than the small one"
         );
         assert!(
-            rule.contains("min(38rem"),
-            "the width is not capped, so on a wide window the prose runs the full screen"
+            rule.contains("inset: 0"),
+            "the sheet stops short of the window it was just given, so the app shows through \
+             around a box that is already asking to be a page"
         );
         assert!(
-            rule.contains("top:") && rule.contains("bottom:"),
-            "the height is not taken from the window, so expanding only widens the panel"
+            rule.contains("max-height: none"),
+            "a ceiling survived into the expanded rule"
+        );
+
+        // The measure the sheet gave up did not disappear: it moved to the column inside it, which
+        // is where it belongs — a full-screen sheet whose text ran edge to edge on a 1400 px window
+        // is a paragraph the eye loses its place in.
+        let column = DIALOG_STYLE
+            .split(r#"#deepnest-dialog-panel[data-expanded="yes"] > * {"#)
+            .nth(1)
+            .expect(
+                "the expanded sheet has no column, so its text runs the full width of the window",
+            );
+        let column = &column[..column.find('}').expect("the column rule is never closed")];
+        assert!(
+            column.contains("max-width"),
+            "the column has no ceiling, so the prose runs the width of the window"
+        );
+        assert!(
+            column.contains("margin-left: auto") && column.contains("margin-right: auto"),
+            "the column is not centred in the sheet"
+        );
+
+        // And the ball does not float on top of the sheet it opened.
+        assert!(
+            DIALOG_STYLE.contains(
+                r#"#deepnest-dialog-panel[data-expanded="yes"]:not([hidden]) ~ #deepnest-dialog-ball"#
+            ),
+            "the ball paints over the full-screen sheet's bottom corner"
         );
     }
 
