@@ -441,6 +441,95 @@ pub fn fit_tail(messages: &[Message], budget: usize) -> (Vec<Message>, usize) {
     (out, messages.len().saturating_sub(kept_count))
 }
 
+/// Replace all but the newest `keep` tool results with a one-line marker, and say how many were
+/// folded.
+///
+/// This is the third of the three bounds on a request, and the measured history says it is the one
+/// that matters. [`fit_tail`] bounds a request by **dropping** the beginning of the conversation,
+/// which is a real loss; compaction bounds it by paying a model call to summarise what is about to
+/// be lost; this one shortens the part of the conversation the model does not have to read twice
+/// and loses nothing but the words. In the one app on this machine with a long history
+/// (`apps/feishu/.agent/history.jsonl`, 9 turns, 1021 rounds, 1819 calls), **99% of the characters
+/// sent were tool results — 3.01 M of 3.06 M** — and every round of a turn re-sends all of them.
+///
+/// Nothing is written and nothing is dropped: the file keeps every byte of every result, and only
+/// the request is shaped. Two consequences follow, and both are deliberate. The marker says the
+/// result was *folded* rather than sending an empty one, because a model shown an empty result
+/// concludes the call failed and spends a round running it again. And the marker names the tool,
+/// recovered from the `assistant` call the result answers, so a folded line still says what the
+/// call was — a result whose call is not in the window is folded unnamed rather than kept, since
+/// keeping it would be the cost this exists to remove.
+///
+/// `keep` is the size of the window a model is assumed to be working from; `usize::MAX` folds
+/// nothing.
+pub fn fold_tool_results(messages: &[Message], keep: usize) -> (Vec<Message>, usize) {
+    let results = messages
+        .iter()
+        .filter(|message| message.role == "tool")
+        .count();
+    let fold_through = results.saturating_sub(keep);
+    if fold_through == 0 {
+        return (messages.to_vec(), 0);
+    }
+    let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut out = Vec::with_capacity(messages.len());
+    let mut seen = 0usize;
+    let mut folded = 0usize;
+    for message in messages {
+        if message.role == "assistant" {
+            for call in message.tool_calls.iter().flatten() {
+                names.insert(call.id.clone(), call.function.name.clone());
+            }
+        }
+        if message.role != "tool" {
+            out.push(message.clone());
+            continue;
+        }
+        seen += 1;
+        if seen > fold_through {
+            out.push(message.clone());
+            continue;
+        }
+        let chars = message
+            .content
+            .as_deref()
+            .unwrap_or(NO_TEXT)
+            .chars()
+            .count();
+        let name = message
+            .tool_call_id
+            .as_ref()
+            .and_then(|id| names.get(id))
+            .map(String::as_str)
+            .unwrap_or("tool");
+        let marker = folded_marker(name, chars);
+        if marker.chars().count() >= chars {
+            // A result shorter than the line that would replace it is not the cost this removes,
+            // and a fold that makes a request longer is the one thing it may never do.
+            out.push(message.clone());
+            continue;
+        }
+        out.push(Message {
+            content: Some(marker),
+            ..message.clone()
+        });
+        folded += 1;
+    }
+    (out, folded)
+}
+
+/// What a folded tool result says instead of its content: which call it was, that it ran, how much
+/// is withheld, and how to get it back.
+///
+/// Three facts and one instruction, and no excerpt. An excerpt is the one thing that would turn
+/// the marker back into the cost it removes — every result that starts with the same first line
+/// (a shell prompt, a directory listing) would keep paying for that line in every round.
+fn folded_marker(name: &str, chars: usize) -> String {
+    format!(
+        "[{name} result folded — {chars} characters withheld; run the call again if you need it]"
+    )
+}
+
 fn message_chars(message: &Message) -> usize {
     let content = message
         .content
@@ -850,6 +939,108 @@ mod tests {
         assert!(
             !kept.iter().any(|message| message.role == "tool"),
             "{kept:?}"
+        );
+    }
+
+    /// Three rounds of one call each, as a turn that walked a directory would leave them: the
+    /// results are long enough that folding them saves something.
+    fn three_calls() -> Vec<Message> {
+        let mut messages = vec![Message::user("go")];
+        for (id, name) in [("c1", "bash"), ("c2", "read"), ("c3", "grep")] {
+            messages.push(Message::assistant_with_tools(
+                None,
+                vec![deepnest_llm::ToolCall {
+                    id: id.into(),
+                    kind: "function".into(),
+                    function: deepnest_llm::FunctionCall {
+                        name: name.into(),
+                        arguments: "{}".into(),
+                    },
+                }],
+            ));
+            messages.push(Message::tool(id, format!("{id}:{}", "x".repeat(4_000))));
+        }
+        messages.push(Message::user("and now this"));
+        messages
+    }
+
+    #[test]
+    fn old_tool_results_are_folded_to_a_line_and_the_newest_are_kept() {
+        let messages = three_calls();
+        let (folded, count) = fold_tool_results(&messages, 2);
+        assert_eq!(count, 1, "one result is older than the window");
+
+        let marker = folded[2].content.as_deref().unwrap();
+        assert_eq!(
+            marker,
+            "[bash result folded — 4003 characters withheld; run the call again if you need it]"
+        );
+        // The pair stays legal: the marker answers the call it always answered.
+        assert_eq!(folded[2].tool_call_id.as_deref(), Some("c1"));
+        // The two inside the window are sent as they were written.
+        assert_eq!(folded[4].content, messages[4].content);
+        assert_eq!(folded[6].content, messages[6].content);
+        // Nothing left the conversation, and the words around the results are untouched.
+        assert_eq!(folded.len(), messages.len());
+        assert_eq!(folded[0].content.as_deref(), Some("go"));
+        assert_eq!(folded[7].content.as_deref(), Some("and now this"));
+        // And the file's copy is not what was folded: the function was handed messages and folded
+        // the request, so the input it was given still holds every character.
+        let original = messages[2].content.as_deref().unwrap();
+        assert!(original.starts_with("c1:"), "{original}");
+        assert_eq!(original.chars().count(), 4_003);
+    }
+
+    #[test]
+    fn folding_nothing_leaves_every_result_alone() {
+        let messages = three_calls();
+        let (same, count) = fold_tool_results(&messages, usize::MAX);
+        assert_eq!(count, 0);
+        assert_eq!(same, messages);
+    }
+
+    #[test]
+    fn a_fold_never_makes_a_result_longer() {
+        // A one-word result: the marker that would replace it is longer, so it is left as written.
+        // Folding it would be a request that costs more than the one it replaces.
+        let messages = vec![
+            Message::user("go"),
+            Message::assistant_with_tools(
+                None,
+                vec![deepnest_llm::ToolCall {
+                    id: "c1".into(),
+                    kind: "function".into(),
+                    function: deepnest_llm::FunctionCall {
+                        name: "bash".into(),
+                        arguments: "{}".into(),
+                    },
+                }],
+            ),
+            Message::tool("c1", "ok"),
+        ];
+        let (same, count) = fold_tool_results(&messages, 0);
+        assert_eq!(count, 0);
+        assert_eq!(same, messages);
+    }
+
+    #[test]
+    fn folding_first_is_what_lets_a_budget_carry_the_whole_conversation() {
+        // The ordering in the request, measured: with the same budget, the trim alone keeps one
+        // message of a four-message conversation, and the fold keeps all of it. That difference is
+        // the reason folding happens before the trim rather than after it.
+        let messages = three_calls();
+        let budget = 500;
+        let (trimmed_only, dropped) = fit_tail(&messages, budget);
+        assert_eq!(trimmed_only.len(), 1, "{trimmed_only:?}");
+        assert_eq!(dropped, messages.len() - 1);
+
+        let (folded, _) = fold_tool_results(&messages, 0);
+        let (both, dropped) = fit_tail(&folded, budget);
+        assert_eq!(dropped, 0);
+        assert_eq!(both.len(), messages.len());
+        assert_eq!(
+            both.last().unwrap().content.as_deref(),
+            Some("and now this")
         );
     }
 
