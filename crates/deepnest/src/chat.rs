@@ -534,6 +534,9 @@ pub fn watched(
     // `<app>/.agent/subagents/<NNNN>/history.jsonl` and never appends to the parent's file. The
     // child gets the six leaves and neither seam, so a subagent cannot start a subagent, and it has
     // no approver, so it cannot widen the policy its parent is fenced by.
+    // Read before `paths` is handed to the child loop below, which takes it by value: where the
+    // model log goes is a fact about this app, not about the runner.
+    let llm_log = paths.llm_log();
     let runner = Arc::new(LoopRunner::new(Arc::clone(&model), paths, context.clone()));
     let tools: Vec<Box<dyn Tool>> = registry::with_seams(Some(runner), Some(installer))
         .into_iter()
@@ -561,7 +564,11 @@ pub fn watched(
         ToolContext::new(policy, app_dir),
         session,
         system,
-    );
+    )
+    // Every request this turn sends and what came back, in the app's own directory. The
+    // conversation says what was said; this file says what it cost, and what the endpoint answered
+    // when it answered with a failure. Neither question can be read out of the other.
+    .with_llm_log(llm_log);
     if let Some(approver) = &terms.approver {
         agent = agent.with_approver(Arc::clone(approver));
     }
@@ -750,6 +757,7 @@ mod tests {
                     },
                 }],
                 finish_reason: FinishReason::ToolCalls,
+                usage: deepnest_llm::Usage::default(),
             })
         }
     }
@@ -1070,6 +1078,7 @@ mod tests {
             content: Some("The totals column is empty.".to_string()),
             tool_calls: Vec::new(),
             finish_reason: FinishReason::Stop,
+            usage: deepnest_llm::Usage::default(),
         })]));
         let ask = ask_from(
             format!(
@@ -1113,6 +1122,7 @@ mod tests {
             content: Some("A white pixel.".to_string()),
             tool_calls: Vec::new(),
             finish_reason: FinishReason::Stop,
+            usage: deepnest_llm::Usage::default(),
         })]));
         let ask =
             ask_from(format!(r#"{{"message":"what is this?","images":["{PIXEL}"]}}"#).as_bytes())
@@ -1149,6 +1159,7 @@ mod tests {
             content: Some("Bread, milk.".to_string()),
             tool_calls: Vec::new(),
             finish_reason: FinishReason::Stop,
+            usage: deepnest_llm::Usage::default(),
         })]);
 
         let reply = answer(
@@ -1245,11 +1256,13 @@ mod tests {
                     },
                 }],
                 finish_reason: FinishReason::ToolCalls,
+                usage: deepnest_llm::Usage::default(),
             }),
             Ok(AssistantTurn {
                 content: Some("Saved it.".to_string()),
                 tool_calls: Vec::new(),
                 finish_reason: FinishReason::Stop,
+                usage: deepnest_llm::Usage::default(),
             }),
         ]);
 
@@ -1330,6 +1343,7 @@ mod tests {
             content: Some("ok".to_string()),
             tool_calls: Vec::new(),
             finish_reason: FinishReason::Stop,
+            usage: deepnest_llm::Usage::default(),
         })]));
 
         let reply = answer(
@@ -1375,6 +1389,7 @@ mod tests {
             content: Some("ok".to_string()),
             tool_calls: Vec::new(),
             finish_reason: FinishReason::Stop,
+            usage: deepnest_llm::Usage::default(),
         })]));
 
         answer(

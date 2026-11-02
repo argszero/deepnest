@@ -51,6 +51,10 @@ impl Endpoint {
 }
 
 impl Model for Endpoint {
+    fn model_name(&self) -> Option<&str> {
+        Some(self.client.model())
+    }
+
     fn turn(
         &self,
         messages: &[Message],
