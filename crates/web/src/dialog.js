@@ -57,6 +57,17 @@
   ball.setAttribute("aria-expanded", "false");
   ball.textContent = "d";
 
+  // The one place on the page that says how to get here without a mouse. A silent shortcut is a
+  // shortcut only the person who wrote it knows.
+  //
+  // The glyph is the reader's, not this file's: `Ctrl+K` on a Mac sends the wrong key, and a hint
+  // that names the wrong modifier is worse than no hint. `navigator.platform` is deprecated and
+  // still the only field every browser this ships in answers the same way; a browser that does not
+  // answer at all falls back to the `Ctrl` spelling, which is true on everything that is not a Mac.
+  var appleKeyboard = /Mac|iPhone|iPad|iPod/.test(navigator.platform || "");
+  ball.setAttribute("aria-keyshortcuts", "Control+K Meta+K");
+  ball.title = "deepnest — " + (appleKeyboard ? "⌘K" : "Ctrl+K");
+
   var panel = document.createElement("div");
   panel.id = "deepnest-dialog-panel";
   panel.hidden = true;
@@ -2672,6 +2683,45 @@
   // The page a finished rebuild reloads onto has no memory of the turn that started it, so this
   // is where the conversation comes back from: the file, not the tab.
   readHistory();
+
+  // The way in that does not start at the top of the app's page.
+  //
+  // The dialog's root is appended to `body` last, so the ball is the *last* tab stop in the
+  // document: measured in Chrome through the browser's own key pipeline, reaching it took seven
+  // presses of Tab on a page with six app controls and twenty-nine on one with twenty-eight — the
+  // app's own count, plus one, every time. Everything after that worked: Enter on the ball opened
+  // the panel and put the caret in the message box, Escape closed it and gave the ball its focus
+  // back. Walking the app was the whole of the difficulty, so this is a way past it rather than a
+  // repair of anything downstream.
+  //
+  // `Cmd`/`Ctrl`+`K` rather than a bare letter: the app owns its page, and a single key would take
+  // typing away from every field in it. It is what the agent products this dialog follows put the
+  // conversation on, so it is the chord a person is likely to try first.
+  //
+  // In the bubble phase, and behind `defaultPrevented`: an app that binds the same chord for a
+  // command palette of its own gets the first word and keeps it, because its handler runs first
+  // and `preventDefault` is how it says so. Taking a chord away from the page this is injected
+  // into is worse than missing one — Escape above is confined the same way, to a panel that is
+  // actually open, so a closed dialog claims no key at all.
+  //
+  // `isComposing` is the other guard: an input method turns a `k` into half a character while it
+  // is composing, and the panel opening on that would eat the one letter the person was typing.
+  document.addEventListener("keydown", function (event) {
+    if (event.key.toLowerCase() !== "k") {
+      return;
+    }
+    if (!event.metaKey && !event.ctrlKey) {
+      return;
+    }
+    if (event.altKey || event.shiftKey || event.defaultPrevented || event.isComposing) {
+      return;
+    }
+    // One meaning for the chord whether the panel is open or shut: the caret belongs in the
+    // message box. Opening it only when it was shut would make a second press do nothing at all,
+    // and a dialog the person can already see is still three Tab stops from its own input.
+    event.preventDefault();
+    show(true);
+  });
 
   document.addEventListener("keydown", function (event) {
     if (event.key === "Escape" && !panel.hidden) {

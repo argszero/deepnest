@@ -1079,6 +1079,68 @@ mod tests {
     }
 
     #[test]
+    fn a_dialog_can_be_opened_without_walking_the_page() {
+        // The dialog's root is appended to `body` last, so its ball is the *last* tab stop in the
+        // document. Measured in Chrome through the browser's own key pipeline: seven presses of Tab
+        // reached it on a page with six app controls, twenty-nine on a page with twenty-eight —
+        // the app's own count, plus one, every time. Nothing downstream was broken: Enter on the
+        // ball opened the panel with the caret in the message box, Escape closed it and gave the
+        // ball its focus back.
+        assert!(
+            DIALOG_SCRIPT.contains(r#"if (event.key.toLowerCase() !== "k") {"#),
+            "nothing on the page answers to a chord"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("if (!event.metaKey && !event.ctrlKey) {"),
+            "a bare `k` would open the panel, taking that letter from every field in the app"
+        );
+        // Each of these is a case where the panel must stay shut, and every one of them was
+        // measured from a closed panel — the first run of that probe read `Ctrl+Shift+K` as
+        // opening the panel, which was the earlier chord still holding it open.
+        assert!(
+            DIALOG_SCRIPT
+                .contains("if (event.altKey || event.shiftKey || event.defaultPrevented || event.isComposing) {"),
+            "the chord is taken even from the app that had already claimed it"
+        );
+        // The guard only means something if it runs before the panel opens: an app's own handler
+        // runs first and `preventDefault` is how it says the chord is its own. Measured on a page
+        // that binds the same chord for a palette: the app's handler fired on every press and the
+        // panel never opened.
+        let chord = DIALOG_SCRIPT
+            .find(r#"if (event.key.toLowerCase() !== "k") {"#)
+            .expect("the chord is wired");
+        let body = &DIALOG_SCRIPT[chord..];
+        let body = &body[..body.find("\n  });").expect("the handler ends")];
+        assert!(
+            body.find("event.preventDefault();")
+                .expect("the chord claims the key")
+                < body.find("show(true);").expect("the chord opens the panel"),
+            "the panel opens before the key is claimed: {body}"
+        );
+        assert!(
+            !body.contains("\"Escape\""),
+            "the chord handler swallows the key that closes the panel"
+        );
+        // A shortcut only the person who wrote it knows is not a way in: the ball names it, to a
+        // screen reader through `aria-keyshortcuts` and to everyone else through its tooltip.
+        assert!(
+            DIALOG_SCRIPT
+                .contains(r#"ball.setAttribute("aria-keyshortcuts", "Control+K Meta+K");"#),
+            "the shortcut is not declared to assistive technology"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#""deepnest — " + (appleKeyboard ? "⌘K" : "Ctrl+K")"#),
+            "the ball does not say how to reach it, or says it in the wrong modifier"
+        );
+        // The dialog gets no say over a panel that is closed — the rule the Escape handler above
+        // already followed, and the reason a bare `/` or `j` reaches the app's own fields.
+        assert!(
+            DIALOG_SCRIPT.contains(r#"if (event.key === "Escape" && !panel.hidden) {"#),
+            "Escape is taken from the app while the panel is shut"
+        );
+    }
+
+    #[test]
     fn the_conversation_takes_the_height_the_panel_has_left() {
         // The panel and the conversation each carried a ceiling, and the pair of them kept a single
         // exchange out of sight. Measured in Chrome at 840, 1100 and 1400 px viewports: the panel
