@@ -2655,7 +2655,7 @@ mod tests {
             .to_string();
         let page = body(&router.respond(&get("/", "127.0.0.1:4270")).complete());
         assert!(page.contains(&format!("1 skill in {root}")), "{page}");
-        assert!(page.contains("<code>notes</code>"), "{page}");
+        assert!(page.contains(r#"<div class="nm">notes</div>"#), "{page}");
         assert!(page.contains("Use when writing a note"), "{page}");
         assert!(!page.contains("apponly"), "{page}");
     }
@@ -2676,7 +2676,7 @@ mod tests {
             "{page}"
         );
         assert!(page.contains("broken"), "{page}");
-        assert!(page.contains("<code>notes</code>"), "{page}");
+        assert!(page.contains(r#"<div class="nm">notes</div>"#), "{page}");
     }
 
     #[test]

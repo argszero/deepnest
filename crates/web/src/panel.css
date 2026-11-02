@@ -583,9 +583,16 @@ input:focus-visible {
   display: none;
 }
 
+/* Turned rather than swapped: the caret is one character in the markup, so the open state costs a
+ * rule instead of a second glyph the script has to remember to write. */
 .skill-sum .caret {
   font-size: var(--dn-text-micro);
   color: var(--dn-ink-4);
+  transition: transform 120ms ease;
+}
+
+details[open] > .skill-sum .caret {
+  transform: rotate(90deg);
 }
 
 .skill-sum .t {
@@ -599,9 +606,109 @@ input:focus-visible {
   color: var(--dn-ink-4);
 }
 
+/* ---- the skills expansion: rows, then the prose -------------------------------------------- */
+
+/* The expansion is the app list at a smaller size: one line between rows, the press on the right
+ * where every other press on this page sits. Installed skills come first, then what the catalog
+ * offers, and they share one list because both answer the same question — what this machine has,
+ * and what it could have. */
 .skills-body {
-  padding: 0 var(--dn-space-m) var(--dn-space-m);
   border-top: 1px solid var(--dn-line-soft);
+}
+
+.skill-rows {
+  border-top: 1px solid var(--dn-line-soft);
+}
+
+.skill-rows:first-child {
+  border-top: 0;
+}
+
+.skill-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--dn-space-4xl);
+  padding: var(--dn-space-xl) var(--dn-space-m);
+  border-top: 1px solid var(--dn-line-soft);
+}
+
+.skill-rows > .skill-row:first-child {
+  border-top: 0;
+}
+
+/* Deepnest will not fetch it. The tint is the whole of the warning — the reason is in the row and
+ * in words — and it says it about the catalog's entry, not about a skill nobody installed. */
+.skill-row.off {
+  background: var(--dn-warn-tint);
+}
+
+.skill-row .what {
+  min-width: 0;
+}
+
+.skill-row .nm {
+  font: var(--dn-text-ui) / var(--dn-leading-tight) var(--dn-mono);
+  color: var(--dn-ink);
+}
+
+.skill-row .ds {
+  margin-top: var(--dn-space-s);
+  font-size: var(--dn-text-body);
+  line-height: var(--dn-leading);
+  color: var(--dn-ink-2);
+  max-width: 56ch;
+}
+
+/* The one fact that decides whether the press beside it is worth making. Written by the script,
+ * because it costs one request per skill to somebody else's server; absent rather than guessed
+ * while that request is out. */
+.skill-row .st {
+  margin-top: var(--dn-space-s);
+  font: var(--dn-text-meta) / var(--dn-leading) var(--dn-mono);
+  color: var(--dn-ink-4);
+}
+
+.skill-row .st.warn {
+  color: var(--dn-warn-ink);
+}
+
+.skill-row .acts {
+  display: flex;
+  align-items: center;
+  gap: var(--dn-space-s);
+}
+
+.skill-row .refresh-outcome {
+  display: block;
+  margin-top: var(--dn-space-xs);
+  font-size: var(--dn-text-meta);
+}
+
+/* What a skill is, under the list rather than over it: it is read once, and the path beside it is
+ * the one a reader acts on. */
+.skill-foot {
+  padding: var(--dn-space-xl) var(--dn-space-m) var(--dn-space-m);
+  border-top: 1px solid var(--dn-line-soft);
+}
+
+.skill-foot .note {
+  margin: 0 0 var(--dn-space-s);
+}
+
+.skill-foot .note:last-child {
+  margin-bottom: 0;
+}
+
+/* The diagnostics that are not rows: one sentence about the whole root, then what it names. */
+.skills-body > .note,
+.skills-body > ul {
+  margin-left: var(--dn-space-m);
+  margin-right: var(--dn-space-m);
+}
+
+.skills-body > .note {
+  margin-top: var(--dn-space-xl);
 }
 
 /* ---- text --------------------------------------------------------------------------------- */
@@ -677,6 +784,13 @@ noscript p {
 
   .verbs {
     justify-content: flex-start;
+  }
+
+  /* A skill row at 390 px: the press drops under the fact it acts on rather than being squeezed
+   * beside a description that then has nowhere to go. */
+  .skill-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--dn-space-s);
   }
 
   /* The architecture is the one fact on this row that nothing acts on, and it is the first thing

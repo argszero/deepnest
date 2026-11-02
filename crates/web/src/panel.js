@@ -355,51 +355,89 @@
     }
     api("/api/skills/updates")
       .then(function (report) {
-        var lines = [];
-        // The rows a person can act on: a published release, or a skill whose installed version
-        // nobody recorded. Each gets its own button below, because a refresh runs a program on this
-        // machine and one press that ran several would act on a set the user never saw.
-        var actionable = [];
+        var published = 0;
         (report.skills || []).forEach(function (skill) {
+          var row = skillRow(skill.name);
+          if (!row) {
+            return;
+          }
           if (skill.state === "newer") {
-            lines.push(skill.name + ": release " + skill.version + " is published.");
-            actionable.push(skill);
+            published += 1;
+            sayState(row, "release " + skill.version + " published", "warn");
+            addPress(row, "Refresh", "btn small", "Refresh");
           } else if (skill.state === "unknown") {
-            lines.push(
-              skill.name + ": " + skill.version + " is published; no installed version is recorded, " +
-                "so there is nothing to compare it with yet."
-            );
-            actionable.push(skill);
+            published += 1;
+            sayState(row, skill.version + " published; no installed version is recorded", "warn");
+            addPress(row, "Refresh", "btn small", "Refresh");
+          } else if (skill.state === "current") {
+            sayState(row, "up to date \u00b7 " + skill.version, "");
           } else if (skill.state === "unchecked") {
             // Said out loud rather than left blank: a missing line and "up to date" would look the
             // same, which is the reading the four-state check exists to prevent.
-            lines.push(skill.name + ": could not check — " + (skill.detail || "no reason given") + ".");
+            sayState(row, "could not check \u2014 " + (skill.detail || "no reason given"), "");
           }
         });
-        if (!lines.length) {
-          return;
+        if (published) {
+          countUpdates(published);
         }
-        var note = element("p", "note", lines.join(" "));
-        note.id = "skills-updates";
-        section.appendChild(note);
-        actionable.forEach(function (skill) {
-          if (document.getElementById("refresh-" + skill.name)) {
-            return;
-          }
-          var row = element("p", "note");
-          row.id = "refresh-" + skill.name;
-          var press = button("Refresh " + skill.name, "btn quiet small", function () {
-            return askRefresh(skill.name, row, press);
-          });
-          row.appendChild(press);
-          section.appendChild(row);
-        });
       })
       .catch(function () {
         // The check is a courtesy, and a page that reported its failure in red would be shouting
-        // about the least important thing on it. The skills themselves are already listed above,
-        // read from disk with no network at all.
+        // about the least important thing on it. The skills themselves are listed above, read from
+        // disk with no network at all.
       });
+  }
+
+  // A skill's row, looked up by comparing names rather than by building a selector out of one: the
+  // name comes from a file on disk, and a name carrying a quote or a bracket would otherwise be a
+  // selector that matched another row or threw.
+  function skillRow(name) {
+    var rows = document.querySelectorAll("[data-skill]");
+    for (var i = 0; i < rows.length; i += 1) {
+      if (rows[i].getAttribute("data-skill") === name) {
+        return rows[i];
+      }
+    }
+    return null;
+  }
+
+  function sayState(row, text, kind) {
+    var said = row.querySelector(".st");
+    if (!said) {
+      return;
+    }
+    said.className = kind ? "st " + kind : "st";
+    said.textContent = text;
+  }
+
+  function addPress(row, label, className, verb) {
+    var acts = row.querySelector(".acts");
+    if (!acts || acts.querySelector("button")) {
+      return;
+    }
+    var press = button(label, className, function () {
+      return askRefresh(row.getAttribute("data-skill"), row, press, verb);
+    });
+    acts.appendChild(press);
+  }
+
+  // How many updates the check found, appended to the line the server wrote. The server's half is
+  // kept as it arrived — read back into `data-base` before the first append — so a second check
+  // appends to the same base instead of to its own last answer, and a page whose script never runs
+  // still says how many skills are installed.
+  function countUpdates(n) {
+    var count = document.getElementById("skills-count");
+    if (!count) {
+      return;
+    }
+    if (count.getAttribute("data-base") === null) {
+      count.setAttribute("data-base", count.textContent);
+    }
+    count.textContent =
+      count.getAttribute("data-base") +
+      " \u00b7 " +
+      n +
+      (n === 1 ? " update published" : " updates published");
   }
 
   // ---- skill refresh -------------------------------------------------------------------------
@@ -420,10 +458,10 @@
       .then(function () {
         // Enabled again either way: a refresh that failed can be asked for again, and one that
         // worked is cheap to repeat.
-        press.textContent = verb + " " + name;
+        press.textContent = verb;
       })
       .catch(function (error) {
-        press.textContent = verb + " " + name;
+        press.textContent = verb;
         throw error;
       });
   }
@@ -473,19 +511,21 @@
 
   function bindOffer(row) {
     var name = row.getAttribute("data-offer");
-    var press = button("Install " + name, "btn quiet small", function () {
+    var acts = row.querySelector(".acts") || row;
+    var press = button("Install", "btn small", function () {
       return askRefresh(name, row, press, "Install");
     });
-    row.appendChild(press);
+    acts.appendChild(press);
   }
 
   // Replaced rather than appended: a second press must not leave the previous answer standing
   // beside the new one.
   function reportRefresh(row, text, kind) {
-    var said = row.querySelector(".refresh-outcome");
+    var where = row.querySelector(".what") || row;
+    var said = where.querySelector(".refresh-outcome");
     if (!said) {
       said = element("span", "");
-      row.appendChild(said);
+      where.appendChild(said);
     }
     said.className = kind + " refresh-outcome";
     said.textContent = " " + text;

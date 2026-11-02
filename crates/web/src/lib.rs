@@ -267,51 +267,88 @@ fn skills_fact(panel: &Panel) -> String {
 /// and which are text.
 fn skill_markup(panel: &Panel) -> String {
     let mut out = String::new();
-    if !panel.skill_list.is_empty() {
-        out.push_str("    <ul class=\"skills\">\n");
+
+    // One row per skill, the shape the app list uses: what it is, the one fact that decides whether
+    // anything is worth pressing, then the press. Installed and offered entries share the list
+    // because they answer the same question — what this machine has, and what it could have — and a
+    // reader scanning it should not have to notice which paragraph a name fell under.
+    if !panel.skill_list.is_empty() || !panel.skill_offered.is_empty() {
+        out.push_str("        <div class=\"skill-rows\">\n");
         for (name, description) in &panel.skill_list {
+            let name = escape(name);
             out.push_str(&format!(
-                "      <li><code>{}</code> <span class=\"note\">{}</span></li>\n",
-                escape(name),
+                "          <div class=\"skill-row\" data-skill=\"{name}\">\
+\n            <div class=\"what\">\
+\n              <div class=\"nm\">{name}</div>\
+\n              <div class=\"ds\">{}</div>\
+\n              <div class=\"st\"></div>\
+\n            </div>\
+\n            <div class=\"acts\"></div>\
+\n          </div>\n",
                 escape(description)
             ));
         }
-        out.push_str("    </ul>\n");
-    }
-    if !panel.skill_offered.is_empty() {
-        out.push_str(
-            "    <p class=\"note\">The catalog that ships with deepnest offers these too:</p>\n",
-        );
-        out.push_str("    <ul class=\"skills\">\n");
         for offered in &panel.skill_offered {
-            out.push_str("      <li");
-            if offered.why_not.is_none() {
-                // The hook the page's script binds a press to. An entry deepnest cannot fetch gets
-                // none: the reason under it is the whole of what there is to do about it.
-                out.push_str(&format!(" data-offer=\"{}\"", escape(&offered.name)));
-            }
+            let blocked = offered.why_not.is_some();
             out.push_str(&format!(
-                "><code>{}</code> <span class=\"note\">{}</span>",
-                escape(&offered.name),
+                "          <div class=\"skill-row{}\"{}>\n",
+                if blocked { " off" } else { "" },
+                match &offered.why_not {
+                    // The hook the page's script binds a press to. An entry deepnest cannot fetch
+                    // gets none: the reason under it is all there is to do about it.
+                    Some(_) => String::new(),
+                    None => format!(" data-offer=\"{}\"", escape(&offered.name)),
+                }
+            ));
+            out.push_str("            <div class=\"what\">\n");
+            out.push_str(&format!(
+                "              <div class=\"nm\">{}</div>\n",
+                escape(&offered.name)
+            ));
+            out.push_str(&format!(
+                "              <div class=\"ds\">{}</div>\n",
                 escape(&offered.description)
             ));
-            if let Some(why) = &offered.why_not {
-                out.push_str(&format!(" <span class=\"note\">{}</span>", escape(why)));
+            match &offered.why_not {
+                Some(why) => out.push_str(&format!(
+                    "              <div class=\"st warn\">{}</div>\n",
+                    escape(why)
+                )),
+                None => out.push_str(
+                    "              <div class=\"st\">in the catalog, not installed here</div>\n",
+                ),
             }
-            out.push_str("</li>\n");
+            out.push_str("            </div>\n");
+            if blocked {
+                // A disabled press rather than no press: the row already says the catalog carries
+                // this skill, and a row with no control at all would read as a fact about the
+                // catalog rather than as something this page will not do.
+                out.push_str(
+                    "            <div class=\"acts\"><button class=\"btn small off\" type=\"button\" disabled>Install</button></div>\n",
+                );
+            } else {
+                out.push_str("            <div class=\"acts\"></div>\n");
+            }
+            out.push_str("          </div>\n");
         }
-        out.push_str("    </ul>\n");
+        out.push_str("        </div>\n");
     }
+
+    // The diagnostics stay prose: each is one sentence about the whole root, and giving a single
+    // broken header a row with verbs would promise an action where the only thing to do is open the
+    // file and fix it.
     if !panel.catalog_problems.is_empty() {
-        out.push_str("    <p class=\"note\">The catalog has lines deepnest could not read:</p>\n");
-        out.push_str("    <ul class=\"skills\">\n");
+        out.push_str(
+            "        <p class=\"note\">The catalog has lines deepnest could not read:</p>\n",
+        );
+        out.push_str("        <ul class=\"skills\">\n");
         for problem in &panel.catalog_problems {
             out.push_str(&format!(
-                "      <li><span class=\"bad\">{}</span></li>\n",
+                "          <li><span class=\"bad\">{}</span></li>\n",
                 escape(problem)
             ));
         }
-        out.push_str("    </ul>\n");
+        out.push_str("        </ul>\n");
     }
     if !panel.skill_problems.is_empty() {
         let count = panel.skill_problems.len();
@@ -321,18 +358,19 @@ fn skill_markup(panel: &Panel) -> String {
             ("entries", "are", "skills")
         };
         out.push_str(&format!(
-            "    <p class=\"note\">{count} {entry} under the skills root {verb} not {thing}:</p>\n"
+            "        <p class=\"note\">{count} {entry} under the skills root {verb} not {thing}:</p>\n"
         ));
-        out.push_str("    <ul class=\"skills\">\n");
+        out.push_str("        <ul class=\"skills\">\n");
         for (path, reason) in &panel.skill_problems {
             out.push_str(&format!(
-                "      <li><code>{}</code> <span class=\"note\">{}</span></li>\n",
+                "          <li><code>{}</code> <span class=\"note\">{}</span></li>\n",
                 escape(path),
                 escape(reason)
             ));
         }
-        out.push_str("    </ul>\n");
+        out.push_str("        </ul>\n");
     }
+
     out
 }
 
@@ -450,12 +488,17 @@ const PAGE: &str = r#"<!doctype html>
     <details id="skills-box" class="box">
       <summary id="skills-summary" class="skill-sum"><span class="caret">▸</span><span class="t">Skills</span><span id="skills-count" class="d">@@SKILLS_FACT@@</span></summary>
       <div class="skills-body">
-        <p class="note">A skill is instructions the agent may choose to follow, installed at
-        <code>~/.deepnest/skills/&lt;name&gt;/SKILL.md</code> or as one Markdown file beside it. A skill
-        an <em>app</em> carries at <code>&lt;app&gt;/.agent/skills/</code> is not in this list: this page
-        belongs to no app, and one list of every app's skills would say each of them applies everywhere.</p>
-        <p id="skills-detail" class="note">@@SKILLS@@</p>
 @@SKILL_LIST@@
+        <!-- The prose sits under the list, not over it: what a skill is gets read once, and the
+             path a reader acts on belongs beside the sentence that explains it. -->
+        <div class="skill-foot">
+          <p id="skills-detail" class="note">@@SKILLS@@</p>
+          <p class="note">A skill is instructions the agent may choose to follow, installed at
+          <code>~/.deepnest/skills/&lt;name&gt;/SKILL.md</code> or as one Markdown file beside it. A skill
+          an <em>app</em> carries at <code>&lt;app&gt;/.agent/skills/</code> is not in this list: this
+          page belongs to no app, and one list of every app's skills would say each of them applies
+          everywhere.</p>
+        </div>
       </div>
     </details>
   </section>
@@ -543,6 +586,58 @@ mod tests {
         assert!(
             page.contains(r#"<span id="skills-count" class="d">1 installed</span>"#),
             "{page}"
+        );
+    }
+
+    /// The expansion is a list of rows, and the prose about what a skill is sits under it.
+    ///
+    /// The order is the point, and it is why this is a test rather than a sentence: what a skill is
+    /// gets read once, while the list is what a reader comes back to. The previous page put three
+    /// paragraphs between the summary line and the first skill's name.
+    #[test]
+    fn the_skills_expansion_is_rows_with_the_prose_underneath() {
+        let page = page(&panel());
+        let rows = page.find(r#"<div class="skill-rows">"#).expect("no rows");
+        let foot = page.find(r#"<div class="skill-foot">"#).expect("no foot");
+        assert!(
+            rows < foot,
+            "the explanation is above the list it explains: {page}"
+        );
+        // The prose is still there, and still says the one thing the list cannot: that this page
+        // belongs to no app.
+        assert!(page.contains("is not in this list"), "{page}");
+        assert!(page.contains(".agent/skills/"), "{page}");
+        // A row carries three positions, and only one of them is written by the server.
+        assert!(
+            page.contains(r#"<div class="st"></div>"#),
+            "the state line is not reserved for the script: {page}"
+        );
+        assert!(
+            page.contains(r#"<div class="acts"></div>"#),
+            "the press has nowhere to go: {page}"
+        );
+        // The row is addressable by name, without the name being interpolated into a selector.
+        assert!(
+            page.contains(r#"<div class="skill-row" data-skill="notes">"#),
+            "{page}"
+        );
+    }
+
+    /// A skill's name is a directory or a header line, so the script must never build a selector
+    /// out of one.
+    ///
+    /// `querySelectorAll("[data-skill=\"" + name + "\"]")` is a name with a quote in it away from
+    /// selecting another row or throwing, and the name is input like any other. The lookup compares
+    /// attribute values instead, which cannot be escaped wrong because nothing is parsed.
+    #[test]
+    fn the_script_finds_a_skill_row_by_comparing_names_not_by_building_a_selector() {
+        assert!(
+            SCRIPT.contains(r#"rows[i].getAttribute("data-skill") === name"#),
+            "the row lookup does not compare the attribute: {SCRIPT}"
+        );
+        assert!(
+            !SCRIPT.contains(r#"[data-skill=""#),
+            "a skill name is being interpolated into a selector: {SCRIPT}"
         );
     }
 
@@ -743,7 +838,7 @@ mod tests {
             page.contains("1 skill in /home/u/.deepnest/skills"),
             "{page}"
         );
-        assert!(page.contains("<code>notes</code>"), "{page}");
+        assert!(page.contains(r#"<div class="nm">notes</div>"#), "{page}");
         assert!(page.contains("Use when writing a note"), "{page}");
     }
 
@@ -772,7 +867,7 @@ mod tests {
         assert!(page.contains("the header has no description"), "{page}");
         // And the one that did load is still there: a fault in one skill is not a reason to hide
         // the others.
-        assert!(page.contains("<code>notes</code>"), "{page}");
+        assert!(page.contains(r#"<div class="nm">notes</div>"#), "{page}");
     }
 
     #[test]
@@ -783,10 +878,7 @@ mod tests {
             skill_list: vec![("odd".to_string(), "@@APPS@@".to_string())],
             ..panel()
         });
-        assert!(
-            page.contains(r#"<span class="note">@@APPS@@</span>"#),
-            "{page}"
-        );
+        assert!(page.contains(r#"<div class="ds">@@APPS@@</div>"#), "{page}");
     }
 
     #[test]
@@ -801,9 +893,17 @@ mod tests {
             }],
             ..panel()
         });
-        assert!(page.contains("offers these too"), "{page}");
-        assert!(page.contains(r#"data-offer="browser-harness""#), "{page}");
+        // One list for both: a reader scanning it should not have to notice which paragraph a
+        // name fell under, and the row's own state line is what says which of the two it is.
+        assert!(
+            page.contains(r#"<div class="skill-row" data-offer="browser-harness">"#),
+            "{page}"
+        );
         assert!(page.contains("Drive the browser"), "{page}");
+        assert!(
+            page.contains("in the catalog, not installed here"),
+            "{page}"
+        );
     }
 
     #[test]
@@ -820,6 +920,13 @@ mod tests {
         });
         assert!(!page.contains("data-offer"), "{page}");
         assert!(page.contains("it names no `repo`"), "{page}");
+        // Tinted, and carrying a press that cannot be made: a row with no control at all would
+        // read as a fact about the catalog rather than as something this page will not do.
+        assert!(page.contains(r#"<div class="skill-row off">"#), "{page}");
+        assert!(
+            page.contains(r#"class="btn small off" type="button" disabled"#),
+            "{page}"
+        );
     }
 
     #[test]
