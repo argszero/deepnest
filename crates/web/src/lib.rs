@@ -194,7 +194,7 @@ pub fn page(panel: &Panel) -> String {
         .replace("@@VERDICT@@", if configured { "ok" } else { "warn" })
         .replace(
             "@@VERDICT_TEXT@@",
-            if configured { "Ready" } else { "No model" },
+            if configured { "Configured" } else { "No model" },
         )
         // The form is behind the model row, and it starts closed only when there is something to
         // close it about. With no model configured the page opens on the thing that has to happen
@@ -563,7 +563,7 @@ mod tests {
         assert!(page.contains(r#"<p class="ready">"#), "{page}");
         assert!(page.contains(r#"class="verdict ok""#), "{page}");
         assert!(
-            page.contains(r#"<span id="verdict-text">Ready</span>"#),
+            page.contains(r#"<span id="verdict-text">Configured</span>"#),
             "{page}"
         );
         // The model as a state with one button, rather than as a form standing open.
@@ -586,6 +586,47 @@ mod tests {
         assert!(
             page.contains(r#"<span id="skills-count" class="d">1 installed</span>"#),
             "{page}"
+        );
+    }
+
+    /// A saved endpoint is not a working one, and the page does not say it is.
+    ///
+    /// The panel holds one fact about the endpoint — whether `config.toml` names a model — because
+    /// that is the fact the design gives it: "the model endpoint that is configured or is not".
+    /// Whether anything answers at that address is the transport's question, asked on a turn: the
+    /// binary starts on a config it never probed, and `POST /api/config` runs the checks a start
+    /// runs and no more. So the verdict is *Configured*, and what a save confirms is the save.
+    ///
+    /// It used to read *Ready*, over a message saying deepnest was using an endpoint nothing had
+    /// sent a byte to. A format-valid but dead address — `http://127.0.0.1:9/v1` — was saved,
+    /// called *Ready*, and the form closed behind it, so the next thing the user knew was a turn
+    /// failing at an endpoint the page had already told them worked.
+    #[test]
+    fn a_saved_endpoint_is_not_reported_as_a_ready_one() {
+        let page = page(&panel());
+        assert!(
+            page.contains(r#"<span id="verdict-text">Configured</span>"#),
+            "{page}"
+        );
+        // The script draws the same word, and it is the half that answers a save.
+        assert!(
+            SCRIPT.contains(r#"configured ? "Configured" : "No model""#),
+            "the script's verdict is not the page's word"
+        );
+        // Neither half claims a readiness or a use that never happened: a word that means "tested"
+        // and a sentence that means "in use" are the two shapes this defect had.
+        assert!(
+            !page.contains("Ready"),
+            "the page claims a readiness it never measured: {page}"
+        );
+        assert!(
+            !SCRIPT.contains("Ready") && !SCRIPT.contains("is using it now"),
+            "the script claims a readiness or a use it never measured: {SCRIPT}"
+        );
+        // What a save may say is what it proved, and where the rest is found out.
+        assert!(
+            SCRIPT.contains("Saved. The first turn is what finds out whether it answers."),
+            "the save message does not name what it left untested: {SCRIPT}"
         );
     }
 

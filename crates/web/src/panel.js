@@ -100,9 +100,11 @@
 
   // ---- the model endpoint -------------------------------------------------------------------
 
-  // The verdict is one word and one colour, and both come from the same fact: whether a model is
-  // configured. "Ready" is a claim this page is allowed to make because it is the claim the answer
-  // depends on — an app list is readable without a model, and nothing can be *written* without one.
+  // The verdict is one word and one colour, and both come from the single fact this page has:
+  // whether `config.toml` names a model. It is not a verdict about whether the endpoint answers —
+  // nothing on this page has asked it anything, and the design leaves that question to the first
+  // turn, because a config the binary starts on is a config it never probed. "Configured" is the
+  // whole of what a save proves.
   function setVerdict(kind, text) {
     verdict.className = "verdict " + kind;
     verdictText.textContent = text;
@@ -111,7 +113,7 @@
   function renderEndpoint(state) {
     var configured = !!(state && state.configured);
     var model = configured ? state.model || "unnamed model" : "none yet";
-    setVerdict(configured ? "ok" : "warn", configured ? "Ready" : "No model");
+    setVerdict(configured ? "ok" : "warn", configured ? "Configured" : "No model");
     modelFact.textContent = "";
     modelFact.appendChild(element("code", "", model));
     modelValue.textContent = model;
@@ -147,7 +149,7 @@
         // The key's own field is cleared: it is in `config.toml` now, and a password input that
         // still holds it is one screenshot away from being a leak.
         document.getElementById("api-key").value = "";
-        say("Saved. deepnest is using it now.", "good");
+        say("Saved. The first turn is what finds out whether it answers.", "good");
         return renderEndpoint(saved);
       })
       .catch(function (error) {
