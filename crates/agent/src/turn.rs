@@ -26,7 +26,9 @@ use deepnest_tools::{Tool, ToolContext, ToolResult};
 use serde_json::Value;
 
 use crate::approve::{self, Approver};
-use crate::session::{fit_tail, fold, fold_start, Record, Session, SUMMARY_PREFIX};
+use crate::session::{
+    fit_tail, fold, fold_start, fold_tool_results, Record, Session, SUMMARY_PREFIX,
+};
 
 /// The model, as this loop needs it.
 ///
@@ -159,6 +161,19 @@ pub struct Limits {
     /// old, and the history is bounded the way it was before this existed — by leaving the oldest
     /// records out of the request, silently.
     pub compact_keep: usize,
+    /// Tool results a request keeps in full, when it carries more than this many.
+    ///
+    /// Not a measured optimum but a reading of how a turn is shaped: the model runs about two
+    /// calls per round, so six leaves this round and the two before it intact — the results a model
+    /// is still working from — and folds everything older to a line.
+    ///
+    /// The bound this frees is the one the budget was really spent on. In the same measured app 99%
+    /// of the characters sent over 1021 rounds were tool output, and every round re-sent all of it.
+    /// Folding shortens the conversation without losing it, which the trim cannot do, so it runs
+    /// first and the trim then finds room for more of the real conversation.
+    ///
+    /// `usize::MAX` turns folding off.
+    pub fold_keep: usize,
 }
 
 impl Default for Limits {
@@ -167,6 +182,7 @@ impl Default for Limits {
             max_rounds: 360,
             max_history_chars: 120_000,
             compact_keep: 6,
+            fold_keep: 6,
         }
     }
 }
@@ -647,6 +663,9 @@ impl Agent {
             reason: err.to_string(),
         })?;
         history.insert(0, Message::system(self.system.clone()));
+        // Fold before the trim, not after: a folded result costs a line instead of a page, so the
+        // budget then reaches further back into the conversation instead of cutting more of it off.
+        let (history, _folded) = fold_tool_results(&history, self.limits.fold_keep);
         let (mut messages, dropped) = fit_tail(&history, budget);
         // `fit_tail` keeps a leading system message that was in the input; with several it keeps
         // them all, and one prompt is what this loop sends.
@@ -1060,6 +1079,96 @@ mod tests {
             compact_keep: 2,
             ..Limits::default()
         }
+    }
+
+    /// A history as a turn that walked an app's directory leaves it: long tool results the model
+    /// has already read, re-sent with every round that follows.
+    fn already_ran(scratch: &Scratch, calls: usize) {
+        let session = Session::open(scratch.base.join("history.jsonl")).unwrap();
+        session
+            .append_message(&Message::user("walk the app"))
+            .unwrap();
+        for index in 0..calls {
+            let id = format!("call_{index}");
+            session
+                .append_message(&Message::assistant_with_tools(
+                    None,
+                    vec![ToolCall {
+                        id: id.clone(),
+                        kind: "function".into(),
+                        function: FunctionCall {
+                            name: "bash".into(),
+                            arguments: format!("{{\"command\":\"ls {index}\"}}"),
+                        },
+                    }],
+                ))
+                .unwrap();
+            session
+                .append_message(&Message::tool(
+                    id,
+                    format!("result {index}: {}", "x".repeat(2_000)),
+                ))
+                .unwrap();
+        }
+    }
+
+    /// What the fold is for, at the loop's own seam: the request carries the conversation, and the
+    /// tool output in it costs a line instead of the page it was. The file is untouched — the next
+    /// turn, and anyone reading the app afterwards, still sees what the call returned.
+    #[test]
+    fn a_request_folds_tool_output_the_model_has_finished_with() {
+        let scratch = Scratch::new("fold-request");
+        already_ran(&scratch, 8);
+        let model = ScriptedModel::new(vec![Ok(answer("done"))]);
+        let agent = scratch.agent(model.clone());
+
+        let outcome = agent
+            .run_turn("and now this", &Cancellation::new())
+            .unwrap();
+        assert_eq!(outcome.text(), "done");
+
+        let seen = model.seen.lock().unwrap();
+        let sent = &seen[0];
+        let markers: Vec<&str> = sent
+            .iter()
+            .filter(|message| message.role == "tool")
+            .map(|message| message.content.as_deref().unwrap_or(""))
+            .filter(|content| content.starts_with("[bash result folded"))
+            .collect();
+        // Eight results, the newest six of which the default limit keeps in full.
+        assert_eq!(markers.len(), 2, "{sent:?}");
+        assert!(
+            markers[0].contains("2010 characters withheld"),
+            "{}",
+            markers[0]
+        );
+        let whole = sent
+            .iter()
+            .filter(|message| {
+                message.role == "tool"
+                    && message
+                        .content
+                        .as_deref()
+                        .unwrap_or("")
+                        .starts_with("result ")
+            })
+            .count();
+        assert_eq!(whole, 6, "{sent:?}");
+
+        // The file keeps all eight exactly as the calls returned them.
+        let recorded = agent.session().messages().unwrap();
+        let kept = recorded
+            .iter()
+            .filter(|message| {
+                message.role == "tool"
+                    && message
+                        .content
+                        .as_deref()
+                        .unwrap_or("")
+                        .starts_with("result ")
+            })
+            .count();
+        assert_eq!(kept, 8);
     }
 
     /// What compaction is for: what does not fit is summarised instead of never being mentioned.
