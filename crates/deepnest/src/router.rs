@@ -420,6 +420,13 @@ impl Router {
                 "text/javascript; charset=utf-8",
                 deepnest_web::SCRIPT.as_bytes().to_vec(),
             )),
+            // The panel's stylesheet, for the reason the script is a route: the policy says
+            // `style-src 'self'`, so the page may load a stylesheet and may not carry one.
+            "/panel.css" => Answer::Full(Response::new(
+                200,
+                "text/css; charset=utf-8",
+                deepnest_web::STYLE.as_bytes().to_vec(),
+            )),
             // The app page's dialog, from `crates/web`. Both are named by the markup
             // `deepnest_gateway::dialog` injects, and both are served without the token: the page
             // that loads them cannot carry one, because the app's own script shares the origin.
@@ -2294,6 +2301,23 @@ mod tests {
     fn a_request_without_host_is_refused() {
         let request = parse("GET / HTTP/1.1\r\n").unwrap();
         assert_eq!(router().respond(&request).complete().status, 400);
+    }
+
+    #[test]
+    fn the_panel_stylesheet_is_served_from_here() {
+        // The page's href is the path this router answers, and what answers it is the same file the
+        // crate embeds. Both halves are pinned: a href nobody answers is a page with no styles at
+        // all, and `style-src 'self'` gives it no way back to an inline block.
+        let router = router();
+        let answered = router
+            .respond(&get(deepnest_web::STYLE_PATH, "127.0.0.1:4270"))
+            .complete();
+        assert_eq!(answered.status, 200);
+        assert_eq!(answered.content_type, "text/css; charset=utf-8");
+        let css = body(&answered);
+        assert!(css.contains(".app .path"), "{css}");
+        // No token, like the script: nothing about a stylesheet needs one.
+        assert!(!css.contains("deepnest-token"), "{css}");
     }
 
     #[test]
