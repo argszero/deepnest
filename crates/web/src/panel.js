@@ -141,29 +141,87 @@
 
   // ---- the app list -------------------------------------------------------------------------
 
+  // What each state may be offered. This is the server's own rule rather than a preference:
+  // `start` on a running app is refused with `409`, and `Open` on one that is not running answers
+  // `503` in plain text, so a row that drew both for every app was offering presses whose only
+  // possible outcome was an error.
+  //
+  // A restart is a stop then a start, so once the app is down it means what Start means and is not
+  // drawn beside it. A build is what makes a stopped app startable at all; on a running app it
+  // replaces a binary the live process will not pick up until it is restarted, which is why it
+  // belongs with Start rather than with Open.
+  var VERBS = {
+    running: ["stop", "restart"],
+    stopped: ["start", "build"],
+    failed: ["start", "build"]
+  };
+
+  // Offered when the process cannot be asked at all: `/api/apps` answers null in every process
+  // field then, and none of the four is refused in that state, so drawing only some of them would
+  // be a guess in the one case where guessing is wrong.
+  var VERBS_UNKNOWN = ["build", "start", "stop", "restart"];
+
+  // The chip, or nothing at all.
+  //
+  // Null means the listing could not reach a supervisor, and that is deliberately *not* drawn as
+  // "stopped": a chip is a claim, and the wrong claim here sends someone to start an app that may
+  // be answering requests already.
+  function stateChip(app) {
+    if (app.state !== "running" && app.state !== "stopped" && app.state !== "failed") {
+      return null;
+    }
+    var text = app.state;
+    if (app.state === "running" && app.port) {
+      text = "running :" + app.port;
+    }
+    return element("span", "chip " + app.state, text);
+  }
+
   function renderApp(app) {
-    var card = element("div", "app");
+    var running = app.state === "running";
+    var failed = app.state === "failed";
+    var known = running || app.state === "stopped" || failed;
+
+    var card = element("div", failed ? "app broken" : "app");
     var head = element("div", "row");
     head.appendChild(element("h3", "", app.name || app.slug));
     head.appendChild(element("span", "slug", app.slug));
     if (app.template) {
       head.appendChild(element("span", "slug", app.template));
     }
+    var chip = stateChip(app);
+    if (chip) {
+      head.appendChild(chip);
+    }
     card.appendChild(head);
     if (app.path) {
       card.appendChild(element("div", "note mono", app.path));
     }
 
-    var actions = element("div", "actions");
-    var open = element("a", "", "Open");
-    open.href = "/app/" + encodeURIComponent(app.slug) + "/";
-    open.target = "_blank";
-    open.rel = "noopener";
-    actions.appendChild(open);
+    // A failed app says why on its own row. That reason is the one fact deciding whether the next
+    // press is Start or a look at the log, and it used to arrive only after a press that failed.
+    if (failed && app.reason) {
+      card.appendChild(element("div", "reason bad", app.reason));
+    }
 
-    // The four verbs the API has. Each names the route it calls, so a failure reports which one
-    // failed rather than "something went wrong".
-    ["build", "start", "stop", "restart"].forEach(function (action) {
+    var actions = element("div", "actions");
+    if (running || !known) {
+      var open = element("a", "", "Open");
+      open.href = "/app/" + encodeURIComponent(app.slug) + "/";
+      open.target = "_blank";
+      open.rel = "noopener";
+      actions.appendChild(open);
+    } else {
+      // The same word in the same place, so the row does not change shape between states — but not
+      // a link, because following it answers `503` with a page whose text says to start the app.
+      var shut = element("span", "note", "Open");
+      shut.title = "not running — start it first";
+      actions.appendChild(shut);
+    }
+
+    // Each verb names the route it calls, so a failure reports which one failed rather than
+    // "something went wrong".
+    (known ? VERBS[app.state] : VERBS_UNKNOWN).forEach(function (action) {
       actions.appendChild(
         button(action, function () {
           say("Requesting " + action + " for " + app.slug + "…");
