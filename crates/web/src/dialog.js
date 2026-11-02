@@ -1630,6 +1630,17 @@
   // message separates one batch of calls from the next.
   //
   // `null` when the turn has neither words nor calls, so the caller draws nothing at all.
+  // The agent's own note: why a turn ended early, what it could not run. It is the line a person
+  // needed and could not see — a turn that spent its budget on tools has no answer, and without
+  // the note it is indistinguishable from a turn that never ran — so it keeps its own weight, and
+  // it is drawn where it happened rather than collected at the end of the turn.
+  function renderNote(text) {
+    var noteLine = document.createElement("p");
+    noteLine.className = "deepnest-note";
+    noteLine.textContent = text;
+    return noteLine;
+  }
+
   function renderStream(turn, live) {
     var calls = turn.calls || [];
     var byRound = {};
@@ -1647,6 +1658,12 @@
     });
     calls.forEach(function (call) {
       numbered[typeof call.round === "number" ? call.round : 0] = true;
+    });
+    // A note is something the agent wrote down at a moment in the turn, and the moment is what
+    // places it. Without this a compaction — written before the turn's first request — was drawn
+    // under every call the turn went on to make, and read as the last thing that happened.
+    (turn.notes || []).forEach(function (note) {
+      numbered[typeof note.round === "number" ? note.round : 0] = true;
     });
     var order = Object.keys(numbered)
       .map(Number)
@@ -1671,6 +1688,12 @@
       if (mine.length > 0) {
         box.appendChild(renderCalls(turn, mine, live));
       }
+      (turn.notes || []).forEach(function (note) {
+        var of = typeof note.round === "number" ? note.round : 0;
+        if (of === round && String(note.text || "").trim()) {
+          box.appendChild(renderNote(note.text));
+        }
+      });
     });
     return box;
   }
@@ -2520,15 +2543,6 @@
       );
       line.appendChild(said);
     }
-    // The agent's own notes: why a turn ended early, what it could not run. This is the line the
-    // user needed and could not see — a turn that spent its budget on tools has no answer, and
-    // without the note it is indistinguishable from a turn that never ran.
-    (turn.notes || []).forEach(function (text) {
-      var noteLine = document.createElement("p");
-      noteLine.className = "deepnest-note";
-      noteLine.textContent = text;
-      line.appendChild(noteLine);
-    });
     return line;
   }
 
@@ -2567,7 +2581,11 @@
   // phrase a person can see is a phrase this finds — a search narrower than the page would report
   // "no exchange matches" about words on the screen.
   function matches(turn, needle) {
-    var fields = [turn.user || "", turn.reply || ""].concat(turn.notes || []);
+    var fields = [turn.user || "", turn.reply || ""].concat(
+      (turn.notes || []).map(function (note) {
+        return String(note.text || "");
+      })
+    );
     (turn.calls || []).forEach(function (call) {
       fields.push(call.name || "");
       fields.push(call.what || "");

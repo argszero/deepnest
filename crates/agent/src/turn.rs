@@ -332,8 +332,14 @@ impl Agent {
     }
 
     /// The tool definitions, in the order the tools were given.
+    ///
+    /// Through `registry::definitions` and not through `tool.definition()`, because that function is
+    /// where the one field every call must state is added: `intent`. Reading the definitions
+    /// straight off the tools was one line shorter and silently wrong — the schema sent to the model
+    /// had no `intent` property, so no model ever wrote one, and the dialog's rows fell back to the
+    /// raw arguments while the registry's own tests went on passing against a list nothing used.
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools.iter().map(|tool| tool.definition()).collect()
+        deepnest_tools::registry::definitions(&self.tools)
     }
 
     /// Run one turn for this user message.
@@ -411,7 +417,7 @@ impl Agent {
             // measurement — the same characters, the same budget the request is about to be sent
             // under — so a folding and a trimming can never disagree about what fits.
             let messages = if dropped > 0 && !compaction_failed {
-                match self.compact(round, budget)? {
+                match self.compact(budget)? {
                     Compacted::Rewritten(spent) => {
                         // Counted in the cost and not in the rounds, which is the distinction #105
                         // drew and this keeps: the summary is not a step of the work, so the caller
@@ -707,7 +713,7 @@ impl Agent {
     /// again on the next round — one model call per round, spent to make no difference. Refusing
     /// here leaves exactly the behaviour that existed before compaction, which is the honest
     /// answer for a conversation whose *recent* messages are the problem.
-    fn compact(&self, round: usize, budget: usize) -> Result<Compacted, AgentError> {
+    fn compact(&self, budget: usize) -> Result<Compacted, AgentError> {
         let keep = self.limits.compact_keep;
         let records = self.session.records().map_err(|err| AgentError::Session {
             reason: err.to_string(),
@@ -765,9 +771,8 @@ impl Agent {
                 reason: err.to_string(),
             })?;
         self.note(format!(
-            "the conversation was compacted before round {round}: {replaced} earlier message(s) \
-             became one summary, and the newest {keep} are still sent as they were. The summary is \
-             in the file as an ordinary message, so this turn and every later one read it back."
+            "the conversation outgrew one request, so {replaced} earlier message(s) were folded \
+             into a summary; the newest {keep} are still sent in full."
         ))?;
         Ok(Compacted::Rewritten(spent))
     }
@@ -964,6 +969,8 @@ mod tests {
     struct ScriptedModel {
         replies: Mutex<VecDeque<Result<AssistantTurn, LlmError>>>,
         seen: Mutex<Vec<Vec<Message>>>,
+        /// What each request offered, in the order the requests were made.
+        offered: Mutex<Vec<Vec<ToolDefinition>>>,
     }
 
     impl ScriptedModel {
@@ -971,6 +978,7 @@ mod tests {
             Arc::new(Self {
                 replies: Mutex::new(replies.into()),
                 seen: Mutex::new(Vec::new()),
+                offered: Mutex::new(Vec::new()),
             })
         }
 
@@ -983,9 +991,10 @@ mod tests {
         fn turn(
             &self,
             messages: &[Message],
-            _tools: &[ToolDefinition],
+            tools: &[ToolDefinition],
         ) -> Result<AssistantTurn, LlmError> {
             self.seen.lock().unwrap().push(messages.to_vec());
+            self.offered.lock().unwrap().push(tools.to_vec());
             self.replies
                 .lock()
                 .unwrap()
@@ -1135,6 +1144,40 @@ mod tests {
         }
     }
 
+    /// Every definition a request carries asks for `intent`, and asks for it in `required`.
+    ///
+    /// This is the test that would have caught the wiring gap: `crates/tools` injected the field in
+    /// `registry::definitions` and pinned it there, and the loop was sending `tool.definition()`
+    /// instead — so the sentence the dialog draws had nothing to draw, and every existing test still
+    /// passed because each of them read the list the other side produced.
+    #[test]
+    fn the_request_asks_every_tool_for_the_intent_behind_its_call() {
+        let scratch = Scratch::new("intent-in-request");
+        let model = ScriptedModel::new(vec![Ok(answer("done"))]);
+        let agent = scratch.agent(model.clone());
+
+        agent.run_turn("hello", &Cancellation::new()).unwrap();
+
+        let offered = model.offered.lock().unwrap();
+        assert_eq!(offered.len(), 1, "one request was made");
+        assert!(!offered[0].is_empty(), "no tools were offered at all");
+        for definition in &offered[0] {
+            let name = &definition.function.name;
+            let parameters = &definition.function.parameters;
+            assert_eq!(
+                parameters["properties"]["intent"]["type"], "string",
+                "{name} does not offer an intent"
+            );
+            let required = parameters["required"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{name} requires nothing"));
+            assert!(
+                required.contains(&serde_json::json!("intent")),
+                "{name} offers an intent and does not ask for it: {required:?}"
+            );
+        }
+    }
+
     /// What the fold is for, at the loop's own seam: the request carries the conversation, and the
     /// tool output in it costs a line instead of the page it was. The file is untouched — the next
     /// turn, and anyone reading the app afterwards, still sees what the call returned.
@@ -1254,7 +1297,7 @@ mod tests {
         assert!(
             notes
                 .iter()
-                .any(|note| note.contains("compacted before round 0")),
+                .any(|note| note.contains("were folded into a summary")),
             "{notes:?}"
         );
     }
