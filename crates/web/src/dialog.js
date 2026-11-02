@@ -911,11 +911,72 @@
 
   // When a conversation was last used, as a row in a list can show it: the day and the minute, and
   // nothing finer. The server sends the file's own clock, so this prints rather than decides.
-  function whenOf(at) {
+  // A time as a person reads a clock, not as a file records one.
+  //
+  // The record stores UTC with a trailing `Z`, and this page used to print its digits unchanged —
+  // so measured at UTC+8, a conversation held at 15:10 was listed as `07:10`, and an exchange asked
+  // at 23:40Z was dated to the *previous day*. The panel is read by the person who was there, in the
+  // zone they were in, so the conversion is the browser's job and the record keeps its own precision
+  // in the `datetime` attribute.
+  var MONTHS = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+  ];
+
+  function padded(value) {
+    return value < 10 ? "0" + value : String(value);
+  }
+
+  function instantOf(at) {
     if (!at || at.length < 16) {
+      return null;
+    }
+    var instant = new Date(at);
+    // An unreadable record is a record with no time, not a page that draws `NaN`.
+    return isNaN(instant.getTime()) ? null : instant;
+  }
+
+  // `15:10` — the reading a transcript repeats, where the day is already the reader's today.
+  function clockOf(instant) {
+    return padded(instant.getHours()) + ":" + padded(instant.getMinutes());
+  }
+
+  // `2 Nov`, with the year only when it is not this one: a conversation from last year read as
+  // `2 Nov` would be a conversation dated wrongly.
+  function dayOf(instant) {
+    var day =
+      instant.getDate() +
+      " " +
+      MONTHS[instant.getMonth()];
+    return instant.getFullYear() === new Date().getFullYear()
+      ? day
+      : day + " " + instant.getFullYear();
+  }
+
+  function sameLocalDay(left, right) {
+    return (
+      left.getFullYear() === right.getFullYear() &&
+      left.getMonth() === right.getMonth() &&
+      left.getDate() === right.getDate()
+    );
+  }
+
+  // The whole stamp, `2026-11-02 15:10`, for the places that name a conversation rather than repeat
+  // it — the drawer already spends a line on how many exchanges there are.
+  function whenOf(at) {
+    var instant = instantOf(at);
+    if (instant === null) {
       return "";
     }
-    return at.slice(0, 10) + " " + at.slice(11, 16);
+    return (
+      instant.getFullYear() +
+      "-" +
+      padded(instant.getMonth() + 1) +
+      "-" +
+      padded(instant.getDate()) +
+      " " +
+      clockOf(instant)
+    );
   }
 
   // One row per conversation. Built as nodes, never as markup: a conversation's title is the
@@ -1745,8 +1806,30 @@
     var files = turn.files || 0;
     // The file's contents are in the record because the model was given them; they are not what
     // the person typed, and the route reads them back as a count for exactly that reason.
-    asked.textContent =
+    //
+    // The words get an element of their own because the time shares this row: a transcript of a
+    // conversation held over days said nothing about when any of it happened, so two exchanges
+    // that read the same were told apart by nothing. The row rather than a line of its own, because
+    // height in this panel is what #85 and #86 were spent on.
+    var words = document.createElement("span");
+    words.className = "deepnest-asked-words";
+    words.textContent =
       turn.user || (pictures + files > 0 ? withWhat(pictures, files) : "");
+    asked.appendChild(words);
+
+    var instant = instantOf(turn.at);
+    if (instant !== null) {
+      var when = document.createElement("time");
+      when.className = "deepnest-turn-time";
+      // The record's own instant, unchanged: the text is one reading of it, and the file is the
+      // thing another reader — or a machine — has to be able to agree with.
+      when.setAttribute("datetime", turn.at);
+      when.textContent = sameLocalDay(instant, new Date())
+        ? clockOf(instant)
+        : dayOf(instant) + " " + clockOf(instant);
+      when.setAttribute("title", whenOf(turn.at));
+      asked.appendChild(when);
+    }
 
     var calls = turn.calls || [];
     var did = document.createElement("p");

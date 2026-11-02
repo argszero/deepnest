@@ -695,13 +695,43 @@
   border-top: 0;
 }
 
+/* The question and the time it was asked share a row. The words take what is left and wrap there;
+ * the time keeps its own width, because a time broken across two lines reads as two times. */
 #deepnest-dialog-transcript .deepnest-asked {
-  display: block;
+  display: flex;
   box-sizing: border-box;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.4rem;
   margin: 0;
   font: 600 12px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   color: #ffffff;
+}
+
+#deepnest-dialog-transcript .deepnest-asked-words {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow-wrap: anywhere;
+}
+
+/* When the exchange happened. Dim and a size below the question, because it is a bearing rather
+ * than something to read: the eye should find it when it looks for it and not before.
+ *
+ * `all: initial` first, then what this rule means — it resets `display` to `inline` and the font and
+ * colour to the page's own, which inside this panel is 16 px black on a dark box. */
+#deepnest-dialog-transcript .deepnest-turn-time {
+  all: initial;
+  /* `initial` is `inline`, and this is a flex item, so the browser blockifies it to `block` anyway.
+   * Named here so the rule does not depend on its parent staying a flex container. */
+  display: block;
+  flex: none;
+  box-sizing: border-box;
+  font: 10px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: rgba(244, 244, 246, 0.45);
+  white-space: nowrap;
+  /* Read in the reader's zone, so the digits are the ones on their own clock; the full stamp stays
+   * in `title` for anyone who needs the day as well as the hour. */
+  font-variant-numeric: tabular-nums;
 }
 
 #deepnest-dialog-transcript .deepnest-did {
