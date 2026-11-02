@@ -98,6 +98,16 @@ pub struct Call {
     pub state: String,
     /// What the tool answered, cut to what a page polling once a second can carry.
     pub output: String,
+    /// Which of this turn's responses asked for this call, counting from 1.
+    ///
+    /// The transcript drew every call of a turn as one flat list, so a response that asked for six
+    /// things was six rows with nothing saying they were one thought — and a turn of twenty calls
+    /// was twenty rows to read past. What a person wants first is that a batch happened at all.
+    ///
+    /// Two calls share this number when **one response asked for both**, which is the boundary the
+    /// file already has (`rounds` counts these records) and is not the same as "asked near in
+    /// time": a round with no calls is a number no call carries.
+    pub round: usize,
     /// The id that ties this row to the answer it is waiting for. The page has no use for it.
     #[serde(skip)]
     pub id: String,
@@ -288,13 +298,16 @@ fn push(turns: &mut Vec<Turn>, record: &Record) {
             turn.rounds += 1;
             turn.tools += record.tool_calls.as_ref().map_or(0, Vec::len);
             // The calls this round asked for, in the order it asked: a row each, waiting for the
-            // answer that will give it its ending.
+            // answer that will give it its ending. Every one of them carries this round's number,
+            // which is what lets the page draw one batch as one thing.
+            let round = turn.rounds;
             for asked in record.tool_calls.iter().flatten() {
                 turn.calls.push(Call {
                     name: asked.function.name.clone(),
                     what: what_of(&asked.function.arguments),
                     state: String::new(),
                     output: String::new(),
+                    round,
                     id: asked.id.clone(),
                 });
             }
@@ -677,6 +690,39 @@ mod tests {
         assert_eq!(calls[0].what, "cargo test");
         assert!(calls[0].state.is_empty(), "{:?}", calls[0].state);
         assert!(calls[0].output.is_empty());
+    }
+
+    #[test]
+    fn the_calls_of_one_response_share_a_number() {
+        // What lets the page draw one batch as one thing. The boundary is the one the file already
+        // has — a response asked for these — and it is not "asked near in time".
+        let scratch = Scratch::new("call-rounds");
+        let first = asking(&[
+            ("c1".to_string(), "read", r#"{"path":"a.rs"}"#),
+            ("c2".to_string(), "read", r#"{"path":"b.rs"}"#),
+        ]);
+        // A response that asked for nothing: still a round, carrying no calls.
+        let thinking = serde_json::json!({
+            "type": "message",
+            "role": "assistant",
+            "content": "both files, then the tests",
+            "at": "2026-11-01T01:00:02Z",
+        })
+        .to_string();
+        let second = asking(&[("c3".to_string(), "bash", r#"{"command":"cargo test"}"#)]);
+        scratch.write(&[SYSTEM, ASK, &first, &thinking, &second]);
+
+        let calls = &read(&scratch.base)[0].calls;
+        assert_eq!(calls.len(), 3, "{calls:?}");
+        assert_eq!(calls[0].round, 1, "the first response is 1");
+        assert_eq!(calls[1].round, 1, "one response, one number");
+        // 3 and not 2: the number says *which response*, not *how many batches so far*. A response
+        // that asked for nothing still happened, and the page groups by what the file recorded
+        // rather than renumbering it.
+        assert_eq!(
+            calls[2].round, 3,
+            "the round with no calls still took its number"
+        );
     }
 
     #[test]

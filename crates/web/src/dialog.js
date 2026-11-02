@@ -1536,61 +1536,154 @@
     return live ? "running" : "no result";
   }
 
+  // The batches, and whether one is open — kept apart from the calls' own disclosures because a
+  // group and a call inside it are two different folds, both of which have to survive a poll.
+  var openedGroups = {};
+
   // What the agent ran, one row each: the tool, the argument that says what it was about, and how
   // it ended. The count this replaced — "ran 12 tools" — was the one thing a person could not
   // check, and the file had every call in it.
   //
   // The output sits behind a disclosure: a turn that read four files is four lines to scan and a
   // great deal not to scroll past, and the whole of it is one press away.
+  //
+  // Grouping is by the response that asked. A model that asks six things in one answer made one
+  // decision, not six, and six equal rows said otherwise; a turn of twenty calls was twenty rows
+  // to read past before reaching the answer. A batch of one keeps its bare row — a fold around a
+  // single line is a press that hides nothing.
   function renderCalls(turn, live) {
     var box = document.createElement("div");
     box.className = "deepnest-calls";
-    (turn.calls || []).forEach(function (call, index) {
-      var row = document.createElement("div");
-      row.className = "deepnest-call deepnest-call-" + (call.state || "waiting");
-
-      var name = document.createElement("span");
-      name.className = "deepnest-call-name";
-      name.textContent = call.name;
-      row.appendChild(name);
-
-      if (call.what) {
-        var what = document.createElement("span");
-        what.className = "deepnest-call-what";
-        what.textContent = call.what;
-        row.appendChild(what);
+    groupsOf(turn.calls || []).forEach(function (group) {
+      if (group.calls.length === 1) {
+        box.appendChild(renderCall(turn, group.calls[0], group.index, live));
+        return;
       }
-
-      var state = document.createElement("span");
-      state.className = "deepnest-call-state";
-      state.textContent = stateWord(call.state, live);
-      row.appendChild(state);
-
-      if (call.output) {
-        // Keyed by the turn's own timestamp rather than by position: the list is rebuilt on every
-        // poll and an index would move under the row that was open.
-        var key = turn.at + "\u0000" + index + "\u0000" + call.name;
-        var more = document.createElement("details");
-        more.className = "deepnest-call-out";
-        var summary = document.createElement("summary");
-        summary.textContent = "output";
-        var pre = document.createElement("pre");
-        pre.textContent = call.output;
-        more.appendChild(summary);
-        more.appendChild(pre);
-        more.open = !!openedCalls[key];
-        more.addEventListener("toggle", function () {
-          if (more.open) {
-            openedCalls[key] = true;
-          } else {
-            delete openedCalls[key];
-          }
-        });
-        row.appendChild(more);
-      }
-      box.appendChild(row);
+      box.appendChild(renderGroup(turn, group, live));
     });
     return box;
+  }
+
+  // The calls of one turn, split where the response changed. `index` is the group's first call's
+  // position in the turn, so a disclosure key still names one place across a poll.
+  function groupsOf(calls) {
+    var groups = [];
+    calls.forEach(function (call, index) {
+      // A record written before this field existed has no number; every one of those lands in the
+      // same group rather than each becoming its own, which is the shape that file had anyway.
+      var round = typeof call.round === "number" ? call.round : 0;
+      var last = groups.length > 0 ? groups[groups.length - 1] : null;
+      if (last !== null && last.round === round) {
+        last.calls.push(call);
+      } else {
+        groups.push({ round: round, calls: [call], index: index });
+      }
+    });
+    return groups;
+  }
+
+  // What one batch was, in one line: how many calls, and how they ended. Endings counted rather
+  // than summed up as a verdict, because a batch that read four files and failed one is both, and
+  // the words are the same ones the rows use.
+  function groupWord(calls, live) {
+    var counted = {};
+    var order = [];
+    calls.forEach(function (call) {
+      var word = stateWord(call.state, live);
+      if (!counted[word]) {
+        counted[word] = 0;
+        order.push(word);
+      }
+      counted[word] += 1;
+    });
+    var head =
+      calls.length + (calls.length === 1 ? " tool call" : " tool calls");
+    if (order.length === 0) {
+      return head;
+    }
+    return (
+      head +
+      " \u00b7 " +
+      order
+        .map(function (word) {
+          return counted[word] + " " + word;
+        })
+        .join(", ")
+    );
+  }
+
+  // The batch, shut. It opens onto the same rows a lone call gets, so nothing is reachable only
+  // one way — and it stays open across a poll for the same reason a call's output does: while a
+  // turn runs the transcript is rebuilt every round.
+  function renderGroup(turn, group, live) {
+    var more = document.createElement("details");
+    more.className = "deepnest-calls-group";
+    var summary = document.createElement("summary");
+    summary.textContent = groupWord(group.calls, live);
+    more.appendChild(summary);
+    var rows = document.createElement("div");
+    rows.className = "deepnest-calls-group-rows";
+    group.calls.forEach(function (call, offset) {
+      rows.appendChild(renderCall(turn, call, group.index + offset, live));
+    });
+    more.appendChild(rows);
+    var key = turn.at + "\u0000group\u0000" + group.round;
+    more.open = !!openedGroups[key];
+    more.addEventListener("toggle", function () {
+      if (more.open) {
+        openedGroups[key] = true;
+      } else {
+        delete openedGroups[key];
+      }
+    });
+    return more;
+  }
+
+  // One call: the tool, the argument that says what it was about, and how it ended.
+  function renderCall(turn, call, index, live) {
+    var row = document.createElement("div");
+    row.className = "deepnest-call deepnest-call-" + (call.state || "waiting");
+
+    var name = document.createElement("span");
+    name.className = "deepnest-call-name";
+    name.textContent = call.name;
+    row.appendChild(name);
+
+    if (call.what) {
+      var what = document.createElement("span");
+      what.className = "deepnest-call-what";
+      what.textContent = call.what;
+      row.appendChild(what);
+    }
+
+    var state = document.createElement("span");
+    state.className = "deepnest-call-state";
+    state.textContent = stateWord(call.state, live);
+    row.appendChild(state);
+
+    if (call.output) {
+      // Keyed by the turn's own timestamp rather than by position: the list is rebuilt on every
+      // poll and an index would move under the row that was open.
+      var key = turn.at + "\u0000" + index + "\u0000" + call.name;
+      var more = document.createElement("details");
+      more.className = "deepnest-call-out";
+      var summary = document.createElement("summary");
+      summary.textContent = "output";
+      var pre = document.createElement("pre");
+      pre.textContent = call.output;
+      more.appendChild(summary);
+      more.appendChild(pre);
+      more.open = !!openedCalls[key];
+      more.addEventListener("toggle", function () {
+        if (more.open) {
+          openedCalls[key] = true;
+        } else {
+          delete openedCalls[key];
+        }
+      });
+      row.appendChild(more);
+    }
+    return row;
   }
 
   // ---- The answer, as the model wrote it ----------------------------------------------------

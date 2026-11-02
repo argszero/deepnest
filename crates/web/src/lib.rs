@@ -1653,6 +1653,53 @@ mod tests {
     }
 
     #[test]
+    fn the_calls_of_one_response_are_one_group() {
+        // A model that asks six things in one answer made one decision, not six. Six equal rows
+        // said otherwise, and a turn of twenty calls was twenty rows to read past before the
+        // answer underneath them.
+        assert!(
+            DIALOG_SCRIPT.contains("groupsOf"),
+            "the calls are not split by the response that asked"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("call.round"),
+            "a row carries no number to group by"
+        );
+        // A batch of one keeps its bare row: a fold around a single line hides nothing and costs
+        // the person a press.
+        assert!(
+            DIALOG_SCRIPT.contains("group.calls.length === 1"),
+            "a lone call is wrapped in a fold anyway"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("deepnest-calls-group"),
+            "a batch has no group to be drawn into"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("tool calls"),
+            "a closed batch does not say how much is inside it"
+        );
+        // The rule the calls' own disclosures already follow: while a turn runs the transcript is
+        // rebuilt every round, and a batch that shut itself would be one nobody could read.
+        assert!(
+            DIALOG_SCRIPT.contains("openedGroups"),
+            "a batch shuts itself on the next poll"
+        );
+        assert!(
+            !DIALOG_SCRIPT.contains("innerHTML =")
+                && !DIALOG_SCRIPT.contains("insertAdjacentHTML("),
+            "the batch builds markup instead of nodes"
+        );
+        for selector in [
+            "#deepnest-dialog-transcript .deepnest-calls-group > summary",
+            "#deepnest-dialog-transcript .deepnest-calls-group > summary::before",
+            "#deepnest-dialog-transcript .deepnest-calls-group-rows",
+        ] {
+            assert!(DIALOG_STYLE.contains(selector), "{selector} is unstyled");
+        }
+    }
+
+    #[test]
     fn the_answer_is_drawn_as_markdown_without_turning_it_into_markup() {
         // The model answers in Markdown; the transcript showed the source. Rendering it is the
         // fix, and rendering it by building HTML from a model's words would be a hole in the page.
