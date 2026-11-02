@@ -3210,13 +3210,28 @@ mod tests {
     fn a_stop_is_said_when_it_is_pressed_and_not_when_the_reply_arrives() {
         // The reported defect: "pressing stop does not stop". The handler was wired — the press
         // reached `POST .../cancel` and the server set the flag — but the route's whole answer is
-        // "the turn was asked to stop; it ends before its next request or tool call", and the page
+        // "the turn was asked to stop; it ends before its next request or tool call" (the wording
+        // then — a running command is killed now, see `crates/tools::shell`), and the page
         // waited for that reply before saying anything while the button went on reading "Stop".
         // For the tens of seconds a model call takes, the page said nothing at all.
         let press = &DIALOG_SCRIPT[DIALOG_SCRIPT
             .find(r#"stop.addEventListener("click""#)
             .expect("the control has no press handler")..];
         let press = &press[..press.find("fetch(stoppingRoute()").expect("it posts")];
+        // What the button says is the second half of the defect, and this is the first: the
+        // request itself. `POST .../cancel` reads no body, and this router refuses a body on a
+        // route that reads none — so the `body: "{}"` this call once carried turned every press
+        // into a `400`, the flag was never set, and the turn went on spending. Nothing in the
+        // page could notice: the reply was a refusal the control reset itself from, which looks
+        // exactly like a stop that was asked for and is still in flight.
+        let request = &DIALOG_SCRIPT[DIALOG_SCRIPT
+            .find("fetch(stoppingRoute(),")
+            .expect("the stop is posted somewhere")..];
+        let request = &request[..request.find("})").expect("the call ends")];
+        assert!(
+            !request.contains("body"),
+            "the stop posts a body to a route that reads none, so it is refused: {request}"
+        );
         assert!(
             press.contains("STOPPING_LABEL"),
             "the control does not say it is stopping: {press}"

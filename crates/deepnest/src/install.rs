@@ -450,6 +450,7 @@ browser over CDP.\"\n---\n\nOpen a page and read it.\n";
                 stdout: String::new(),
                 stderr: "fetching".to_string(),
                 timed_out: true,
+                cancelled: false,
                 signal: None,
             })
         }
@@ -501,6 +502,7 @@ browser over CDP.\"\n---\n\nOpen a page and read it.\n";
                     stdout: "---\nname: x\n---\n".to_string(),
                     stderr: String::new(),
                     timed_out: false,
+                    cancelled: false,
                     signal: None,
                 })
             }

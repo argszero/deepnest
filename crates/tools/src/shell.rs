@@ -54,6 +54,13 @@ pub struct ShellResult {
     pub timed_out: bool,
     /// The signal that ended the child, where the platform reports one.
     pub signal: Option<i32>,
+    /// The turn this call belongs to was told to stop while it was running, and the child was
+    /// killed rather than waited for.
+    ///
+    /// Beside `timed_out` rather than folded into it: both end in a kill, and a person reading the
+    /// row needs to know which one happened — a command that ran too long is the command's
+    /// problem, and one that was abandoned is theirs.
+    pub cancelled: bool,
 }
 
 /// The seam between the tool's logic and the operating system, so the logic is testable
@@ -66,6 +73,24 @@ pub trait Spawner: Send + Sync {
         cwd: &Path,
         timeout: Duration,
     ) -> io::Result<ShellResult>;
+
+    /// Run, and abandon the child if `stop` says so before it ends.
+    ///
+    /// Defaulted, and the default ignores the signal: a spawner that does not know how to end its
+    /// child early is a test double or a publisher, and inventing a kill it cannot perform would
+    /// be worse than reporting the command whole. [`StdSpawner`] is the one that overrides it,
+    /// because it is the one holding a child.
+    fn run_stoppable(
+        &self,
+        program: &str,
+        args: &[String],
+        cwd: &Path,
+        timeout: Duration,
+        stop: Option<&(dyn Fn() -> bool + Send + Sync)>,
+    ) -> io::Result<ShellResult> {
+        let _ = stop;
+        self.run(program, args, cwd, timeout)
+    }
 }
 
 /// The real spawner.
@@ -87,6 +112,24 @@ impl Spawner for StdSpawner {
         cwd: &Path,
         timeout: Duration,
     ) -> io::Result<ShellResult> {
+        self.run_stoppable(program, args, cwd, timeout, None)
+    }
+
+    /// The same loop, with one more way out.
+    ///
+    /// The child is already polled every twenty milliseconds, so the flag costs one atomic load on
+    /// a tick that was happening anyway. The order of the three exits is the design: a command that
+    /// ended on its own is left alone even if a stop arrived in the same tick — it did finish, and
+    /// throwing away its output would report an ending that did not happen — and a stop is checked
+    /// before the timeout because the person acted.
+    fn run_stoppable(
+        &self,
+        program: &str,
+        args: &[String],
+        cwd: &Path,
+        timeout: Duration,
+        stop: Option<&(dyn Fn() -> bool + Send + Sync)>,
+    ) -> io::Result<ShellResult> {
         let serial = SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed);
         let stem =
             std::env::temp_dir().join(format!("deepnest-bash-{}-{serial}", std::process::id()));
@@ -104,9 +147,16 @@ impl Spawner for StdSpawner {
         let started = Instant::now();
         let mut child = command.spawn()?;
         let mut timed_out = false;
+        let mut cancelled = false;
         let status = loop {
             if let Some(status) = child.try_wait()? {
                 break Some(status);
+            }
+            if stop.is_some_and(|stop| stop()) {
+                cancelled = true;
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
             }
             if started.elapsed() >= timeout {
                 timed_out = true;
@@ -122,6 +172,7 @@ impl Spawner for StdSpawner {
             status: status.and_then(|status| status.code()),
             signal: status.and_then(signal_of),
             timed_out,
+            cancelled,
             stdout,
             stderr,
         })
@@ -326,11 +377,12 @@ impl Tool for BashTool {
             Err(reason) => return ToolResult::refused("bash", reason),
         };
         // Rule 3: the spawn.
-        let result = match self.spawner.run(
+        let result = match self.spawner.run_stoppable(
             &plan.program,
             &plan.args,
             &ctx.workdir,
             Duration::from_secs(seconds),
+            ctx.stop.as_deref(),
         ) {
             Ok(result) => result,
             Err(err) => {
@@ -360,7 +412,14 @@ fn render(
     fence: &dyn SandboxBackend,
 ) -> ToolResult {
     let mut notes: Vec<String> = Vec::new();
-    let status_line = if result.timed_out {
+    let status_line = if result.cancelled {
+        notes.push(
+            "the turn was stopped while this command was running, so it was abandoned rather \
+             than waited for. Nothing it printed after the stop is here"
+                .to_string(),
+        );
+        "stopped and the process was killed".to_string()
+    } else if result.timed_out {
         notes.push(format!(
             "timed out after {seconds}s and the process was killed; give it a longer timeout, or \
              run something narrower"
@@ -419,7 +478,10 @@ fn render(
     if stdout.is_empty() && stderr.is_empty() && !result.timed_out {
         body.push_str("\n(no output)");
     }
-    if result.timed_out || runner_failed {
+    // A stopped call is an error and not a result: the command did not do what it was asked, and
+    // the model must not read a half-written line as the whole answer. The turn's own ending says
+    // the same thing a level up, and this is what a replay of the record shows.
+    if result.timed_out || result.cancelled || runner_failed {
         ToolResult::error("bash", body)
     } else {
         ToolResult::ok("bash", body)
@@ -570,8 +632,127 @@ mod tests {
             stdout: stdout.to_string(),
             stderr: stderr.to_string(),
             timed_out: false,
+            cancelled: false,
             signal: None,
         }
+    }
+
+    /// The whole point of the stop handle: the child is killed, not waited for.
+    ///
+    /// A `sleep` of a minute and a stop that flips after 150ms. The reading is the clock — a call
+    /// that waited would take a minute and a call that abandoned it takes about the poll interval —
+    /// and the flag, which says which of the two endings happened.
+    #[test]
+    fn a_stop_kills_the_running_child_instead_of_waiting_for_it() {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = stop.clone();
+        let armed = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        let result = StdSpawner
+            .run_stoppable(
+                "sh",
+                &["-c".to_string(), "sleep 60".to_string()],
+                &std::env::temp_dir(),
+                Duration::from_secs(120),
+                Some(&|| stop.load(std::sync::atomic::Ordering::SeqCst)),
+            )
+            .expect("the shell starts");
+        armed.join().unwrap();
+        assert!(
+            result.cancelled,
+            "the call reports being abandoned: {result:?}"
+        );
+        assert!(!result.timed_out, "it did not run out of time: {result:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "it ended soon after the stop, not after the command: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// And the default: a spawner that was given no stop signal runs the command whole.
+    #[test]
+    fn a_run_with_no_stop_signal_is_not_cancelled() {
+        let result = StdSpawner
+            .run(
+                "sh",
+                &["-c".to_string(), "echo hi".to_string()],
+                &std::env::temp_dir(),
+                Duration::from_secs(30),
+            )
+            .expect("the shell starts");
+        assert!(!result.cancelled, "{result:?}");
+        assert_eq!(result.stdout.trim(), "hi");
+    }
+
+    /// What the model is told, in the words it is told them.
+    #[test]
+    fn a_stopped_command_says_it_was_abandoned() {
+        let scratch = Scratch::new("stopped");
+        let mut result = exiting(0, "half a line", "");
+        result.cancelled = true;
+        let tool = BashTool::with_parts(
+            Box::new(RecordingSpawner::new(result)),
+            stub(Confinement::Unconfined, true),
+        );
+        let answer = tool.call(
+            &json!({"command": "ls", "intent": "look"}),
+            &scratch.ctx(Mode::WorkspaceWrite),
+        );
+        assert!(answer.is_error, "{}", answer.content);
+        assert!(
+            answer
+                .content
+                .contains("stopped and the process was killed"),
+            "{}",
+            answer.content
+        );
+        assert!(answer.content.contains("abandoned"), "{}", answer.content);
+    }
+
+    /// The tool hands the signal it was given to the spawner, and no signal when there is none.
+    #[test]
+    fn the_tool_passes_the_turns_stop_signal_to_the_spawner() {
+        let scratch = Scratch::new("passes-stop");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        struct Watching(std::sync::Arc<Mutex<Option<bool>>>);
+        impl Spawner for Watching {
+            fn run(
+                &self,
+                _p: &str,
+                _a: &[String],
+                _c: &Path,
+                _t: Duration,
+            ) -> io::Result<ShellResult> {
+                *self.0.lock().unwrap() = Some(false);
+                Ok(exiting(0, "", ""))
+            }
+            fn run_stoppable(
+                &self,
+                _p: &str,
+                _a: &[String],
+                _c: &Path,
+                _t: Duration,
+                stop: Option<&(dyn Fn() -> bool + Send + Sync)>,
+            ) -> io::Result<ShellResult> {
+                *self.0.lock().unwrap() = Some(stop.is_some_and(|stop| stop()));
+                Ok(exiting(0, "", ""))
+            }
+        }
+        let seen = std::sync::Arc::new(Mutex::new(None));
+        let tool = BashTool::with_parts(
+            Box::new(Watching(seen.clone())),
+            stub(Confinement::Unconfined, true),
+        );
+        let ctx = scratch.ctx(Mode::WorkspaceWrite).with_stop({
+            let stop = stop.clone();
+            move || stop.load(std::sync::atomic::Ordering::SeqCst)
+        });
+        let _ = tool.call(&json!({"command": "ls", "intent": "look"}), &ctx);
+        assert_eq!(*seen.lock().unwrap(), Some(true), "the spawner was told");
     }
 
     #[test]
@@ -697,6 +878,7 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             timed_out: true,
+            cancelled: false,
             signal: None,
         });
         let tool = BashTool::with_parts(Box::new(spawner), stub(Confinement::Unconfined, true));

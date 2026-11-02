@@ -1436,10 +1436,12 @@ impl Router {
         let stopping = self.turns.stop(slug.as_str());
         let note = match stopping {
             0 => format!("no turn is running for `{slug}`"),
-            1 => "the turn was asked to stop; it ends before its next request or tool call"
+            1 => "the turn was asked to stop; a command it is running is killed, and a model \
+                  call already sent ends when that call returns"
                 .to_string(),
             n => format!(
-                "{n} turns were asked to stop; each ends before its next request or tool call"
+                "{n} turns were asked to stop; each has its running command killed, and a model \
+                 call already sent ends when that call returns"
             ),
         };
         Response::json(
@@ -3402,6 +3404,17 @@ mod tests {
             .complete();
         assert_eq!(chat.status, 412, "{:?}", chat);
 
+        // `cancel` is one of them, and it is the one a page got wrong: the dialog's Stop button
+        // posted `{}` here, and the refusal is what "pressing stop does not stop" was made of.
+        let cancel = router
+            .respond(&post_body("/api/apps/notes/cancel", r#"{}"#))
+            .complete();
+        assert_eq!(cancel.status, 400, "{:?}", cancel);
+        assert!(
+            error_text(&cancel).contains("takes no request body"),
+            "{}",
+            error_text(&cancel)
+        );
         // The same body on a route that does not read one is refused by name — answering "done"
         // to content nobody looked at is the answer a server must not give.
         let start = router
