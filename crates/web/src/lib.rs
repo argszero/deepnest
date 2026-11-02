@@ -1660,6 +1660,74 @@ mod tests {
         );
     }
 
+    /// A turn read as one list of calls with the answer under it says nothing about why the agent
+    /// changed what it was doing. The record has a line per round that spoke, and the host reading
+    /// the transcript set the rule on 2026-11-02T21:14: every message separates one batch of calls
+    /// from the next. So the body of a turn is the rounds in order — words, calls, words, calls —
+    /// and only the answer comes last.
+    #[test]
+    fn the_words_between_the_calls_are_drawn_between_them() {
+        assert!(
+            DIALOG_SCRIPT.contains("turn.said"),
+            "the page never reads the prose the record kept between the calls"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("renderStream(turn, live)"),
+            "the body of the turn is not drawn as one ordered stream"
+        );
+
+        // The order inside the stream: a round's words before that round's calls, because a
+        // sentence that introduces what it is about to do belongs above it.
+        let stream = DIALOG_SCRIPT
+            .split("function renderStream(turn, live)")
+            .nth(1)
+            .expect("the stream is never built");
+        let said = stream
+            .find("renderNarrated(turn, round, text)")
+            .expect("a round's words are never drawn");
+        let calls = stream
+            .find("renderCalls(turn, mine, live)")
+            .expect("a round's calls are never drawn");
+        assert!(
+            said < calls,
+            "the calls are drawn before the sentence that introduced them"
+        );
+        assert!(
+            stream.contains("sort(function (a, b)"),
+            "the rounds are not drawn in the order they happened"
+        );
+
+        // And the answer after all of it: it is what the turn ended with.
+        let turn = DIALOG_SCRIPT
+            .split("function renderTurn(turn, live, number)")
+            .nth(1)
+            .expect("nothing draws a turn");
+        let body = turn
+            .find("renderStream(turn, live)")
+            .expect("the turn's body is never drawn");
+        let answer = turn
+            .find(r#"said.className = "deepnest-said""#)
+            .expect("the answer is never drawn");
+        assert!(
+            body < answer,
+            "the answer is drawn before the calls that led to it"
+        );
+
+        // The line is the answer's own renderer, dimmed — not a second renderer of Markdown.
+        assert!(
+            DIALOG_SCRIPT.contains(r#"box.className = "deepnest-said deepnest-narrated""#),
+            "the words between the calls are drawn by something other than the answer's renderer"
+        );
+        assert!(
+            DIALOG_STYLE.contains("#deepnest-dialog .deepnest-narrated"),
+            "the line has no style of its own, so it reads as the answer and only looks misordered"
+        );
+        assert!(
+            DIALOG_STYLE.contains("#deepnest-dialog-transcript .deepnest-stream"),
+            "`all: initial` leaves the stream inline, so its rounds would share one line"
+        );
+    }
+
     #[test]
     fn the_transcript_shows_each_call_and_not_only_how_many_there_were() {
         // The defect: the transcript said "ran 12 tools" and nothing else, so which file was read,
