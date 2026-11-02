@@ -133,11 +133,18 @@ pub struct Limits {
     /// `find` and `glob`, reported "I'll start by looking at the app as it stands", and stopped
     /// before it had written a line.
     ///
-    /// 540 is the owner's number. It is safe to be far larger than the guard this used to be
-    /// because the budget is not the only stop any more: a turn is bounded by the reader pressing
-    /// stop (the cancellation registry in `crates/deepnest`), by a subagent's wall-clock deadline,
-    /// and by the spend ceiling above. A runaway loop is cut by those whether the budget is 24 or
-    /// 540, so the budget is free to be a number that lets a turn finish.
+    /// 540 was the owner's number, chosen to let a long turn finish. It is kept, but as a bound
+    /// read off a real turn instead of a round number: in the one app on this machine with a long
+    /// history (`apps/feishu/.agent/history.jsonl`, 9 turns, 1021 rounds), those 9 turns ran 24,
+    /// 24, 24, 24, 24, 24, 24, 313 and 540 rounds — seven cut off by the old 24, one cut off by
+    /// 540, and exactly one that ended on its own at **313**. So the ceiling has to sit above the
+    /// only measured need and as close to it as prudence allows: 360 leaves a turn of that size
+    /// about 15% headroom, and bounds a turn that would otherwise spend another 180 rounds
+    /// re-sending its own conversation.
+    ///
+    /// What this number is **not**: a real bound on money. A round's cost is the conversation it
+    /// re-sends, and in that same app 99% of it was tool output — which is why the rounds a turn
+    /// needs is the thing to fix, and this ceiling only decides when to stop paying.
     pub max_rounds: usize,
     /// Characters of conversation sent per request, system prompt included.
     pub max_history_chars: usize,
@@ -157,7 +164,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_rounds: 540,
+            max_rounds: 360,
             max_history_chars: 120_000,
             compact_keep: 6,
         }
@@ -1966,9 +1973,14 @@ mod tests {
     #[test]
     fn the_default_round_budget_stays_above_the_floor_a_long_task_needed() {
         let limits = Limits::default();
+        // 313 is measured, not chosen: it is the one turn in `apps/feishu/.agent/history.jsonl`
+        // that ended on its own rather than being cut off, out of nine. A budget under it would
+        // truncate the only kind of turn that has been observed to finish, which is the failure
+        // this ceiling exists to avoid — the ceiling bounds spend, it does not decide how much
+        // work fits.
         assert!(
-            limits.max_rounds >= 270,
-            "the round budget fell to {}, under the 270 a long task needed elsewhere",
+            limits.max_rounds >= 313,
+            "the round budget fell to {}, under the 313 a real turn needed",
             limits.max_rounds
         );
     }

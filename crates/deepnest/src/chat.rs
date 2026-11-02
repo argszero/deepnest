@@ -620,7 +620,7 @@ pub fn watched(
 /// A turn the round budget stopped is the one ending that was silent: `TurnOutcome::text` hands back
 /// the model's last words, and the model asked for a tool instead of writing any, so the answer
 /// arrived empty with nothing to explain it. The loop already records why it stopped — "the round
-/// budget of 540 ran out with the model still asking for work" is a `note` in `history.jsonl` — and
+/// budget of <n> ran out with the model still asking for work" is a `note` in `history.jsonl` — and
 /// [`crate::chat::Reply`] handed the caller none of it. Read on a transcript that note is an
 /// explanation; read in the dialog it is a page that answered nothing at all.
 ///
@@ -1213,13 +1213,17 @@ mod tests {
 
         assert_eq!(reply.status, 200, "{}", reply.body);
         assert_eq!(reply.body["outcome"], "round_limit", "{}", reply.body);
-        assert_eq!(reply.body["rounds"], 540, "{}", reply.body);
+        let budget = deepnest_agent::Limits::default().max_rounds;
+        assert_eq!(reply.body["rounds"], budget, "{}", reply.body);
         // `cancelled` stays false, and that is not a lie: nobody pressed stop. It was never the
         // field that could carry this ending, which is why the body needed one that can.
         assert_eq!(reply.body["cancelled"], false, "{}", reply.body);
 
         let text = reply.body["text"].as_str().unwrap();
-        assert!(text.contains("hit its round budget of 540"), "{text}");
+        assert!(
+            text.contains(&format!("hit its round budget of {budget}")),
+            "{text}"
+        );
         assert!(text.contains("did not finish"), "{text}");
         // The model wrote nothing, so the answer is the note rather than a blank line above it.
         assert!(
@@ -1232,7 +1236,7 @@ mod tests {
         let history = AgentPaths::for_app(scratch.app_dir()).history();
         let recorded = std::fs::read_to_string(&history).unwrap();
         assert!(
-            recorded.contains("the round budget of 540 ran out"),
+            recorded.contains(&format!("the round budget of {budget} ran out")),
             "{recorded}"
         );
     }
