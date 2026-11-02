@@ -26,7 +26,7 @@ use deepnest_tools::{Tool, ToolContext, ToolResult};
 use serde_json::Value;
 
 use crate::approve::{self, Approver};
-use crate::session::{fit_tail, Record, Session};
+use crate::session::{fit_tail, fold, fold_start, Record, Session, SUMMARY_PREFIX};
 
 /// The model, as this loop needs it.
 ///
@@ -141,6 +141,17 @@ pub struct Limits {
     pub max_rounds: usize,
     /// Characters of conversation sent per request, system prompt included.
     pub max_history_chars: usize,
+    /// Messages a compaction keeps as they were, when the conversation outgrows the budget.
+    ///
+    /// It is the size of the window the summary has to describe everything outside of, and the
+    /// number is a judgement rather than a measurement: too small and the agent loses the thread of
+    /// what it was doing, too large and folding frees nothing. Six is one user turn with its tool
+    /// round-trip and the answer, which is the shape a turn usually has.
+    ///
+    /// `usize::MAX` turns compaction off. Nothing can then be folded, because nothing counts as
+    /// old, and the history is bounded the way it was before this existed — by leaving the oldest
+    /// records out of the request, silently.
+    pub compact_keep: usize,
 }
 
 impl Default for Limits {
@@ -148,6 +159,7 @@ impl Default for Limits {
         Self {
             max_rounds: 540,
             max_history_chars: 120_000,
+            compact_keep: 6,
         }
     }
 }
@@ -332,13 +344,33 @@ impl Agent {
         let definitions = self.definitions();
         let mut budget = self.limits.max_history_chars;
         let mut shrinks = 0usize;
+        // One compaction attempt per turn that fails. A summariser that is unreachable is
+        // unreachable on every round of this turn too, and re-asking it 540 times spends the
+        // turn's budget learning the same thing.
+        let mut compaction_failed = false;
         let mut last_text = String::new();
 
         for round in 0..self.limits.max_rounds {
             if cancel.is_cancelled() {
                 return Ok(self.cancel_note(round));
             }
-            let messages = self.request_messages(budget)?;
+            let (messages, dropped) = self.request_messages(budget)?;
+            // The moment a request has to leave records out is the moment this exists for: what
+            // does not fit can be summarised rather than never mentioned. `fit_tail` is the
+            // measurement — the same characters, the same budget the request is about to be sent
+            // under — so a folding and a trimming can never disagree about what fits.
+            let messages = if dropped > 0 && !compaction_failed {
+                match self.compact(round, budget)? {
+                    Compacted::Rewritten => self.request_messages(budget)?.0,
+                    Compacted::Skipped => messages,
+                    Compacted::Failed => {
+                        compaction_failed = true;
+                        messages
+                    }
+                }
+            } else {
+                messages
+            };
             // What was sent is recorded before the answer is acted on: a request that is then
             // answered with a failure is exactly the one somebody comes to this file to read.
             self.record_request(&messages, &definitions)?;
@@ -561,19 +593,158 @@ impl Agent {
         }
     }
 
-    /// The messages for one request: the system prompt, then as much conversation as fits.
-    fn request_messages(&self, budget: usize) -> Result<Vec<Message>, AgentError> {
+    /// The messages for one request — the system prompt, then as much conversation as fits — and
+    /// how many records the budget left out.
+    ///
+    /// The count is not a diagnostic: it is the signal that a request is about to be sent with a
+    /// hole in its beginning, which is what [`Self::compact`] acts on.
+    fn request_messages(&self, budget: usize) -> Result<(Vec<Message>, usize), AgentError> {
         let mut history = self.session.messages().map_err(|err| AgentError::Session {
             reason: err.to_string(),
         })?;
         history.insert(0, Message::system(self.system.clone()));
-        let (mut messages, _dropped) = fit_tail(&history, budget);
+        let (mut messages, dropped) = fit_tail(&history, budget);
         // `fit_tail` keeps a leading system message that was in the input; with several it keeps
         // them all, and one prompt is what this loop sends.
         if messages.first().map(|message| message.role.as_str()) != Some("system") {
             messages.insert(0, Message::system(self.system.clone()));
         }
-        Ok(messages)
+        Ok((messages, dropped))
+    }
+
+    /// Replace the older part of the conversation with a summary of it.
+    ///
+    /// Called when the next request would have to leave records out. The model is asked once, with
+    /// no tools and nothing but the part of the conversation that is about to be dropped, and what
+    /// it answers is written into the file as an ordinary message ahead of the messages that
+    /// survive — so every later turn replays the summary from the file too, and none of this lives
+    /// in memory.
+    ///
+    /// Three things it deliberately does not do. It does not fail the turn: a summary that cannot
+    /// be written costs the summary, and the request then goes out trimmed exactly as it would have
+    /// without this. It does not spend a round: `rounds` counts the caller's requests, and the
+    /// summariser is a cost of staying inside the budget rather than a step of the work. And it
+    /// drops no note: those are the agent's own record of what happened, they are never sent to the
+    /// model, and the fold keeps every one of them.
+    ///
+    /// It also refuses a fold that cannot help. If the messages the cut would keep do not fit the
+    /// budget on their own, summarising what came before them frees nothing: the request would be
+    /// trimmed inside the window anyway, and the summary would be written, dropped, and written
+    /// again on the next round — one model call per round, spent to make no difference. Refusing
+    /// here leaves exactly the behaviour that existed before compaction, which is the honest
+    /// answer for a conversation whose *recent* messages are the problem.
+    fn compact(&self, round: usize, budget: usize) -> Result<Compacted, AgentError> {
+        let keep = self.limits.compact_keep;
+        let records = self.session.records().map_err(|err| AgentError::Session {
+            reason: err.to_string(),
+        })?;
+        let Some(at) = fold_start(&records, keep) else {
+            return Ok(Compacted::Skipped);
+        };
+        let window: usize = records[at..]
+            .iter()
+            .filter(|record| record.kind == "message")
+            .map(Record::chars)
+            .sum();
+        if window + self.system.chars().count() > budget {
+            return Ok(Compacted::Skipped);
+        }
+        let request = vec![
+            Message::system(SUMMARISER),
+            Message::user(self.transcript(&records[..at])),
+        ];
+        self.record_request(&request, &[])?;
+        let turn = match self.model.turn(&request, &[]) {
+            Ok(turn) => {
+                self.record_answer(&turn)?;
+                turn
+            }
+            Err(error) => {
+                self.record_failure(&error)?;
+                self.note(format!(
+                    "the conversation was not compacted: the summary call failed: {}",
+                    error.body
+                ))?;
+                return Ok(Compacted::Failed);
+            }
+        };
+        let summary = turn.content.as_deref().unwrap_or("").trim();
+        if summary.is_empty() {
+            self.note(
+                "the conversation was not compacted: the summary call answered with no text",
+            )?;
+            return Ok(Compacted::Failed);
+        }
+        let replaced = records[..at]
+            .iter()
+            .filter(|record| record.kind == "message")
+            .count();
+        let Some(folded) = fold(&records, keep, &format!("{SUMMARY_PREFIX}\n{summary}")) else {
+            return Ok(Compacted::Skipped);
+        };
+        self.session
+            .replace(&folded)
+            .map_err(|err| AgentError::Session {
+                reason: err.to_string(),
+            })?;
+        self.note(format!(
+            "the conversation was compacted before round {round}: {replaced} earlier message(s) \
+             became one summary, and the newest {keep} are still sent as they were. The summary is \
+             in the file as an ordinary message, so this turn and every later one read it back."
+        ))?;
+        Ok(Compacted::Rewritten)
+    }
+
+    /// The records a compaction is about to drop, as text for the summariser, capped at one
+    /// request's worth.
+    ///
+    /// The **end** of that region is what survives the cap, not its beginning: it is the part
+    /// nearest the messages the model can still see, so the summary joins up with the conversation
+    /// instead of describing a prehistory that nothing connects to. The summariser is told nothing
+    /// about the cap, because it is summarising what it is given.
+    fn transcript(&self, dropped: &[Record]) -> String {
+        let cap = self.limits.max_history_chars;
+        let lines: Vec<String> = dropped
+            .iter()
+            .filter(|record| record.kind == "message")
+            .map(|record| {
+                let text = record.content.as_deref().unwrap_or("");
+                let calls: String = record
+                    .tool_calls
+                    .as_ref()
+                    .map(|calls| {
+                        calls
+                            .iter()
+                            .map(|call| format!(" [called {}]", call.function.name))
+                            .collect::<Vec<_>>()
+                            .join("")
+                    })
+                    .unwrap_or_default();
+                format!("{}: {text}{calls}", record.role)
+            })
+            .collect();
+        let mut budget = cap;
+        let mut kept: Vec<&str> = Vec::new();
+        for line in lines.iter().rev() {
+            let cost = line.chars().count() + 1;
+            if cost > budget {
+                break;
+            }
+            budget -= cost;
+            kept.push(line);
+        }
+        kept.reverse();
+        let transcript = kept.join("\n");
+        if transcript.is_empty() {
+            // One record can be larger than a whole request — a single `bash` output, a directory
+            // listing of a whole tree. Its beginning is then what the summariser sees, because a
+            // truncated account of it beats asking a model about an empty string.
+            return lines
+                .last()
+                .map(|line| line.chars().take(cap).collect())
+                .unwrap_or_default();
+        }
+        transcript
     }
 
     /// Write the request half of an exchange, when a log was asked for.
@@ -660,6 +831,38 @@ impl Agent {
         }
     }
 }
+
+/// What a compaction attempt did.
+///
+/// Three answers rather than a bool, because the caller acts differently on each: a rewrite means
+/// the request is rebuilt from the file, a skip means leaving records out was the answer and no
+/// model call was spent finding that out, and a failure means this turn stops asking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Compacted {
+    /// The older messages were replaced by a summary on disk.
+    Rewritten,
+    /// There was nothing to fold, so no model call was made.
+    Skipped,
+    /// The fold was attempted and did not happen. The file is untouched.
+    Failed,
+}
+
+/// What the summariser is told to produce.
+///
+/// It is an assistant with no tools and no history: it sees one transcript and answers with a
+/// summary, so everything it needs to know about the job has to be said here. What it is asked to
+/// keep is what a coding turn cannot recover afterwards — the person's goal and their constraints,
+/// what was changed where, and what is left — and what it is asked to drop is what made the
+/// conversation too long in the first place: raw output.
+const SUMMARISER: &str = "You compact the older part of a long conversation between a user and a \
+coding agent, so that the agent can carry on inside a smaller context. Answer with the summary and \
+nothing else: no preamble, no description of what you are doing. Keep what the agent still needs — \
+what the user asked for and any decision or constraint they stated, which files were read or \
+written and what changed in them, which commands were run and what they established, what was \
+tried and failed and why, and what is left to do. Drop raw tool output, whole file listings and \
+dead ends that led nowhere; if a dead end still matters, say in one line what not to retry. Write \
+it as prose the agent can read as its own memory of the earlier work, in at most 400 words, and \
+never state anything the transcript does not contain.";
 
 #[cfg(test)]
 mod tests {
@@ -782,6 +985,218 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.base);
         }
+    }
+
+    /// A conversation already written to the file, as a previous turn would have left it.
+    fn already_said(scratch: &Scratch, turns: usize) -> Session {
+        let session = Session::open(scratch.base.join("history.jsonl")).unwrap();
+        for index in 0..turns {
+            session
+                .append_message(&Message::user(format!(
+                    "question {index}: {}",
+                    "ask ".repeat(12)
+                )))
+                .unwrap();
+            session
+                .append_message(&Message::assistant(format!(
+                    "answer {index}: {}",
+                    "say ".repeat(12)
+                )))
+                .unwrap();
+        }
+        session
+    }
+
+    /// The tight limits these tests need: a budget the conversation above cannot fit in, and a
+    /// window small enough that the fold has to move the cut.
+    fn folding_limits() -> Limits {
+        Limits {
+            max_history_chars: 300,
+            compact_keep: 2,
+            ..Limits::default()
+        }
+    }
+
+    /// What compaction is for: what does not fit is summarised instead of never being mentioned.
+    #[test]
+    fn a_history_that_does_not_fit_is_folded_into_a_summary() {
+        let scratch = Scratch::new("compact");
+        already_said(&scratch, 8);
+        let model = ScriptedModel::new(vec![
+            Ok(answer(
+                "eight questions were asked; question 7 was the last",
+            )),
+            Ok(answer("done")),
+        ]);
+        let agent = scratch.agent(model.clone()).with_limits(folding_limits());
+
+        let outcome = agent
+            .run_turn("and now this", &Cancellation::new())
+            .unwrap();
+
+        // Two calls and not three: the summary, then the request it made room for. The summariser
+        // is asked before the request goes out, not after the provider complains.
+        assert_eq!(outcome.text(), "done");
+        assert_eq!(model.calls(), 2);
+        let seen = model.seen.lock().unwrap();
+        assert!(
+            seen[0][0]
+                .content
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("You compact"),
+            "the first call is the summariser: {:?}",
+            seen[0][0]
+        );
+        let sent = seen[1][1].content.as_deref().unwrap_or("");
+        assert!(sent.starts_with(SUMMARY_PREFIX), "{sent}");
+
+        let messages = agent.session().messages().unwrap();
+        assert!(
+            messages[0]
+                .content
+                .as_deref()
+                .unwrap_or("")
+                .starts_with(SUMMARY_PREFIX),
+            "{messages:?}"
+        );
+        // The newest messages are still sent as they were, the person's own words included.
+        assert!(messages
+            .iter()
+            .any(|message| message.content.as_deref() == Some("and now this")));
+        assert_eq!(messages.last().unwrap().content.as_deref(), Some("done"));
+
+        let notes: Vec<String> = agent
+            .session()
+            .records()
+            .unwrap()
+            .into_iter()
+            .filter(|record| record.kind == "note")
+            .filter_map(|record| record.content)
+            .collect();
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("compacted before round 0")),
+            "{notes:?}"
+        );
+    }
+
+    /// A summariser that cannot be reached costs the summary and nothing else: the request goes out
+    /// trimmed, exactly as it did before compaction existed, and the file is not touched.
+    #[test]
+    fn a_summary_that_fails_leaves_the_history_alone_and_the_turn_still_answers() {
+        let scratch = Scratch::new("compact-fail");
+        let before = already_said(&scratch, 8).messages().unwrap();
+        let model = ScriptedModel::new(vec![
+            Err(LlmError {
+                status: None,
+                body: "connection refused".into(),
+                kind: FailureKind::Other,
+            }),
+            Ok(answer("done anyway")),
+        ]);
+        let agent = scratch.agent(model.clone()).with_limits(folding_limits());
+
+        let outcome = agent
+            .run_turn("and now this", &Cancellation::new())
+            .unwrap();
+
+        assert_eq!(outcome.text(), "done anyway");
+        // Asked once, not once per round: an unreachable summariser stays unreachable.
+        assert_eq!(model.calls(), 2);
+        let messages = agent.session().messages().unwrap();
+        assert_eq!(messages.len(), before.len() + 2, "nothing was dropped");
+        assert!(
+            !messages.iter().any(|message| message
+                .content
+                .as_deref()
+                .unwrap_or("")
+                .starts_with(SUMMARY_PREFIX)),
+            "no summary was written"
+        );
+        let notes: Vec<String> = agent
+            .session()
+            .records()
+            .unwrap()
+            .into_iter()
+            .filter(|record| record.kind == "note")
+            .filter_map(|record| record.content)
+            .collect();
+        assert!(
+            notes.iter().any(|note| note.contains("was not compacted")),
+            "{notes:?}"
+        );
+    }
+
+    /// Compaction where it can help, and nowhere else. When the messages the cut would keep are
+    /// themselves too big for the request, summarising what came before them frees nothing — the
+    /// summary would be written, dropped, and written again next round, one model call per round to
+    /// make no difference.
+    #[test]
+    fn a_window_too_big_to_help_is_not_summarised() {
+        let scratch = Scratch::new("compact-window");
+        let session = already_said(&scratch, 3);
+        for index in 0..2 {
+            session
+                .append_message(&Message::user(format!(
+                    "a long one {index} {}",
+                    "x".repeat(600)
+                )))
+                .unwrap();
+        }
+        let model = ScriptedModel::new(vec![Ok(answer("done"))]);
+        let agent = scratch.agent(model.clone()).with_limits(folding_limits());
+
+        let outcome = agent.run_turn("and this", &Cancellation::new()).unwrap();
+
+        assert_eq!(outcome.text(), "done");
+        assert_eq!(model.calls(), 1, "the summariser was not asked");
+        let messages = agent.session().messages().unwrap();
+        assert!(
+            !messages.iter().any(|message| message
+                .content
+                .as_deref()
+                .unwrap_or("")
+                .starts_with(SUMMARY_PREFIX)),
+            "nothing was folded"
+        );
+    }
+
+    /// A note is the agent's own record of what happened, never sent to the model — so a fold that
+    /// size was the reason for keeping it out of the request has no reason to delete it.
+    #[test]
+    fn a_fold_keeps_the_notes_that_explain_the_conversation() {
+        let scratch = Scratch::new("compact-notes");
+        let session = already_said(&scratch, 8);
+        session
+            .append(&Record::note("the host refused a widening to read-only"))
+            .unwrap();
+        let model = ScriptedModel::new(vec![Ok(answer("summed up")), Ok(answer("done"))]);
+        let agent = scratch.agent(model).with_limits(folding_limits());
+
+        agent.run_turn("carry on", &Cancellation::new()).unwrap();
+
+        let records = agent.session().records().unwrap();
+        assert!(
+            records.iter().any(|record| record.kind == "note"
+                && record
+                    .content
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("refused a widening")),
+            "{records:?}"
+        );
+        assert!(
+            records.iter().any(|record| record.kind == "message"
+                && record.role == "user"
+                && record
+                    .content
+                    .as_deref()
+                    .unwrap_or("")
+                    .starts_with(SUMMARY_PREFIX)),
+            "the summary is in the file as an ordinary message: {records:?}"
+        );
     }
 
     /// What a turn sent and what it cost, in the app's own file.

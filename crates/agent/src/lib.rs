@@ -8,10 +8,14 @@
 //!   the round it was cancelled to end); it treats a **refusal** as an answer, never as an
 //!   over-long request (a provider's content filter also arrives as a 400, so shrinking and
 //!   retrying turns a refusal into an endless shrink loop); and it bounds the history **by
-//!   characters, not by entries** (four entries can be four sentences or four megabytes).
-//! - **[`session`]** — the conversation, appended to `history.jsonl` one record per line. Append
-//!   rather than rewrite: a rewritten file that fails halfway loses the conversation, and the
-//!   conversation is the only thing the user cannot regenerate.
+//!   characters, not by entries** (four entries can be four sentences or four megabytes). What it
+//!   bounds out of the request, it **compacts** rather than dropping: one summary of the older part
+//!   of the conversation is written back in place of it, so the agent keeps its memory of the work
+//!   instead of losing it a character at a time.
+//! - **[`session`]** — the conversation, appended to `history.jsonl` one record per line. Appending
+//!   is the rule and not a habit: a rewritten file that fails halfway loses the conversation, and
+//!   the conversation is the only thing the user cannot regenerate. The one rewrite is a
+//!   compaction, and it is written beside the old file and renamed over it.
 //! - **[`memory`]** — what the agent keeps beyond the conversation: frontmatter-plus-Markdown
 //!   entries under `memory/`, with `memory/MEMORY.md` as a one-line-per-entry index. Only the
 //!   index enters the prompt; a body is read with the `read` tool when the agent decides it
