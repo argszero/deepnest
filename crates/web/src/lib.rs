@@ -125,6 +125,14 @@ pub struct Panel {
     pub model: Option<String>,
     /// One plain-text line about the apps directory. Escaped here, never trusted.
     pub apps: String,
+    /// How many apps that line counted, and `None` when this process has no apps directory to
+    /// count.
+    ///
+    /// Beside [`Panel::apps`] rather than parsed out of it: the page shows the number twice — once
+    /// in the line of facts at the top, once beside the section's own heading — and a second place
+    /// that has to agree is a second place that has to be told the number, not one that reads it
+    /// back out of a sentence written for a human.
+    pub apps_count: Option<usize>,
     /// One plain-text line about the skills directory. Escaped here, never trusted.
     pub skills: String,
     /// The skills that loaded, as `(name, description)` — text, escaped here.
@@ -168,17 +176,87 @@ pub struct Offered {
 }
 
 /// The panel's HTML.
+///
+/// Two kinds of substitution, and the order between them is the point. The *structural* ones
+/// (`@@VERDICT@@`, `@@MODEL_UNSET@@`, `@@APPS_COUNT@@` and the rest) are computed here out of
+/// fields this crate owns, so no filesystem string can reach them. The *textual* ones
+/// (`@@MODEL@@`, `@@APPS@@`, `@@SKILLS@@`) carry what a file on disk said, and they are applied
+/// last and lowest, each escaped: a model whose name happened to be `@@APPS@@` is then a model
+/// name, not an instruction to this function.
 pub fn page(panel: &Panel) -> String {
+    let configured = panel.model.is_some();
+    let skills_fact = skills_fact(panel);
+    let apps_fact = apps_fact(panel.apps_count);
+
     let page = PAGE
         .replace("@@PORT@@", &panel.port.to_string())
         .replace("@@TOKEN@@", &escape(&panel.token))
-        .replace("@@ENDPOINT@@", &escape(&endpoint_state(panel)))
+        .replace("@@VERDICT@@", if configured { "ok" } else { "warn" })
+        .replace(
+            "@@VERDICT_TEXT@@",
+            if configured { "Ready" } else { "No model" },
+        )
+        // The form is behind the model row, and it starts closed only when there is something to
+        // close it about. With no model configured the page opens on the thing that has to happen
+        // first — which is also the only version of it a reader with script off can act on.
+        .replace(
+            "@@FIRST_RUN_HIDDEN@@",
+            if configured { " hidden" } else { "" },
+        )
+        .replace("@@MODEL_UNSET@@", if configured { "" } else { " unset" })
+        .replace("@@APPS_FACT@@", &escape(&apps_fact))
+        .replace("@@APPS_COUNT@@", &apps_fact_number(panel.apps_count))
+        .replace("@@SKILLS_FACT@@", &escape(&skills_fact))
+        // Text from disk, and therefore last but one.
+        .replace(
+            "@@MODEL@@",
+            &escape(panel.model.as_deref().unwrap_or("none yet")),
+        )
         .replace("@@APPS@@", &escape(&panel.apps))
         .replace("@@SKILLS@@", &escape(&panel.skills));
     // Last, and deliberately. The skills list is markup built below out of labels that came from
     // files on disk; substituting it any earlier would hand a description containing `@@APPS@@` to
     // the replace above, which would then write an app count into a line of a skill.
     page.replace("@@SKILL_LIST@@", &skill_markup(panel))
+}
+
+/// "2 apps" — the app count as the line of facts at the top says it, in words rather than a bare
+/// number, because that line is read as a sentence and a number alone there is a riddle.
+fn apps_fact(count: Option<usize>) -> String {
+    match count {
+        Some(1) => "1 app".to_string(),
+        Some(n) => format!("{n} apps"),
+        None => "no apps directory".to_string(),
+    }
+}
+
+/// The same count where the section heading wants the digits alone, and an em dash rather than a
+/// zero where there is no directory to count: `0` would be a claim about a directory this process
+/// was never given.
+fn apps_fact_number(count: Option<usize>) -> String {
+    match count {
+        Some(n) => n.to_string(),
+        None => "—".to_string(),
+    }
+}
+
+/// What the skills row says before the script asks about updates: how many loaded, and how many
+/// more the catalog offers and this home does not have.
+///
+/// "1 update published" is deliberately not here. It costs one request per installed skill to
+/// somebody else's server, so it is the script's line to append — the server states what it read on
+/// disk and nothing it would have to go and ask.
+fn skills_fact(panel: &Panel) -> String {
+    let installed = panel.skill_list.len();
+    let offered = panel.skill_offered.len();
+    let found = match installed {
+        1 => "1 installed".to_string(),
+        n => format!("{n} installed"),
+    };
+    match offered {
+        0 => found,
+        n => format!("{found} · {n} offered"),
+    }
 }
 
 /// The skills section: what loaded, then what the catalog offers and this home does not have, then
@@ -258,18 +336,6 @@ fn skill_markup(panel: &Panel) -> String {
     out
 }
 
-/// The endpoint line, as text.
-///
-/// Text and not markup: the page's own script renders the same fact as markup a moment later, and
-/// two spellings of one sentence is one more thing to keep in agreement.
-fn endpoint_state(panel: &Panel) -> String {
-    match &panel.model {
-        Some(model) => format!("Model endpoint: configured ({model})."),
-        None => "Model endpoint: not configured — deepnest needs one before it can write anything."
-            .to_string(),
-    }
-}
-
 /// Escape a value for an HTML text position or a double-quoted attribute.
 ///
 /// The token is hex and an app's name is a directory name, so this is about the rule rather than
@@ -290,9 +356,14 @@ fn escape(value: &str) -> String {
     out
 }
 
-/// The page. `@@PORT@@`, `@@TOKEN@@`, `@@ENDPOINT@@`, `@@APPS@@`, `@@SKILLS@@` and
-/// `@@SKILL_LIST@@` are the substitutions — the skills list last, so a description that happens to
-/// contain a placeholder stays a description.
+/// The page. `@@PORT@@`, `@@TOKEN@@`, `@@VERDICT@@`, `@@VERDICT_TEXT@@`, `@@MODEL@@`,
+/// `@@MODEL_UNSET@@`, `@@FIRST_RUN_HIDDEN@@`, `@@APPS_FACT@@`, `@@APPS_COUNT@@`,
+/// `@@SKILLS_FACT@@`, `@@APPS@@`, `@@SKILLS@@` and `@@SKILL_LIST@@` are the substitutions — the
+/// skills list last, so a description that happens to contain a placeholder stays a description.
+///
+/// The markup is server-rendered wherever the server knows the fact, and the script fills in only
+/// what changes without a page load: the app list, the live counts, and what the update check
+/// found. A reader whose script never ran still gets a page that says what deepnest has.
 const PAGE: &str = r#"<!doctype html>
 <html lang="en">
 <head>
@@ -304,19 +375,35 @@ const PAGE: &str = r#"<!doctype html>
 <link rel="stylesheet" href="/panel.css">
 </head>
 <body>
-<main>
-  <h1>deepnest</h1>
-  <p class="sub">local-first app generator — running on <code>127.0.0.1:@@PORT@@</code></p>
+<main class="sheet">
 
-  <p id="endpoint" class="state">@@ENDPOINT@@</p>
+  <div class="brand">
+    <h1>deepnest</h1>
+    <span class="tag">local-first app generator</span>
+  </div>
 
-  <noscript>
-    <p>The panel needs JavaScript to list apps and change anything. Without it the API still
-    answers: <code>GET /api/health</code>, and <code>GET /api/apps</code> with the token from
-    <code>~/.deepnest/deepnest.token</code> as a bearer credential.</p>
-  </noscript>
+  <!-- One line answers "is it ready, and what do I have". It replaces three sentences that said the
+       same thing in prose: a subtitle naming the port, a paragraph naming the model, and a line
+       naming the app count. -->
+  <p class="ready">
+    <span id="verdict" class="verdict @@VERDICT@@"><span class="pip"></span><span id="verdict-text">@@VERDICT_TEXT@@</span></span>
+    <span class="sep">·</span>
+    <span class="fact" id="model-fact"><code>@@MODEL@@</code></span>
+    <span class="sep">·</span>
+    <span class="fact" id="apps-fact">@@APPS_FACT@@</span>
+    <span class="sep">·</span>
+    <span class="fact"><code>127.0.0.1:@@PORT@@</code></span>
+  </p>
 
-  <section id="first-run" hidden>
+  <!-- The model is a state, not a form. Set once, read forever; the form is behind the button. -->
+  <div class="model">
+    <span class="label">Model</span>
+    <span id="model-value" class="value@@MODEL_UNSET@@">@@MODEL@@</span>
+    <span class="spacer"></span>
+    <button id="model-change" class="btn quiet small" type="button">Change</button>
+  </div>
+
+  <section id="first-run" class="first-run"@@FIRST_RUN_HIDDEN@@>
     <h2>Connect a model</h2>
     <p class="note">deepnest ships no model. Your key goes to the endpoint you name and nowhere
     else; it is written to <code>~/.deepnest/config.toml</code> with mode <code>0600</code>.</p>
@@ -327,34 +414,50 @@ const PAGE: &str = r#"<!doctype html>
       <input id="api-key" name="api_key" type="password" autocomplete="off" required>
       <label for="model">Model</label>
       <input id="model" name="model" placeholder="deepseek-flash" autocomplete="off" required>
-      <p class="row submit"><button class="primary" type="submit">Save</button></p>
+      <p class="row submit"><button class="btn primary" type="submit">Save</button></p>
     </form>
   </section>
 
-  <section id="apps-section">
+  <noscript>
+    <p>The panel needs JavaScript to list apps and change anything. Without it the API still
+    answers: <code>GET /api/health</code>, and <code>GET /api/apps</code> with the token from
+    <code>~/.deepnest/deepnest.token</code> as a bearer credential.</p>
+  </noscript>
+
+  <div class="sec-head">
     <h2>Apps</h2>
-    <p id="apps-summary" class="state">Apps: @@APPS@@</p>
+    <span id="apps-count" class="count">@@APPS_COUNT@@</span>
+  </div>
+  <div class="box">
     <div id="apps"><p class="note">Reading the app list…</p></div>
-    <details id="create-box">
-      <summary class="note">New app</summary>
+    <details id="create-box" class="add-row">
+      <summary>+ New app</summary>
       <form id="create-form">
         <label for="new-slug">Name</label>
         <input id="new-slug" name="slug" placeholder="notes" autocomplete="off" required>
         <label for="new-name">Display name</label>
         <input id="new-name" name="name" placeholder="Notes" autocomplete="off">
-        <p class="row submit"><button class="primary" type="submit">Create</button></p>
+        <p class="row submit"><button class="btn primary" type="submit">Create</button></p>
       </form>
     </details>
-  </section>
+  </div>
+  <p id="apps-summary" class="note apps-note">@@APPS@@</p>
 
+  <!-- Skills are read once a month, so they are one row until someone asks for the rest. What it
+       holds is rendered here rather than fetched: a user edits a skill file and then looks at this
+       page, and a listing that arrived a round trip later would hide the edit. -->
   <section id="skills-section">
-    <h2>Skills</h2>
-    <p id="skills-summary" class="state">Skills: @@SKILLS@@</p>
-    <p class="note">A skill is instructions the agent may choose to follow, installed at
-    <code>~/.deepnest/skills/&lt;name&gt;/SKILL.md</code> or as one Markdown file beside it. A skill
-    an <em>app</em> carries at <code>&lt;app&gt;/.agent/skills/</code> is not in this list: this page
-    belongs to no app, and one list of every app's skills would say each of them applies everywhere.</p>
+    <details id="skills-box" class="box">
+      <summary id="skills-summary" class="skill-sum"><span class="caret">▸</span><span class="t">Skills</span><span id="skills-count" class="d">@@SKILLS_FACT@@</span></summary>
+      <div class="skills-body">
+        <p class="note">A skill is instructions the agent may choose to follow, installed at
+        <code>~/.deepnest/skills/&lt;name&gt;/SKILL.md</code> or as one Markdown file beside it. A skill
+        an <em>app</em> carries at <code>&lt;app&gt;/.agent/skills/</code> is not in this list: this page
+        belongs to no app, and one list of every app's skills would say each of them applies everywhere.</p>
+        <p id="skills-detail" class="note">@@SKILLS@@</p>
 @@SKILL_LIST@@
+      </div>
+    </details>
   </section>
 
   <p id="status" class="note" role="status" aria-live="polite"></p>
@@ -374,6 +477,7 @@ mod tests {
             token: "0123456789abcdef".repeat(4),
             model: Some("deepseek-flash".to_string()),
             apps: "2 apps in /home/u/.deepnest/apps".to_string(),
+            apps_count: Some(2),
             skills: "1 skill in /home/u/.deepnest/skills".to_string(),
             skill_list: vec![("notes".to_string(), "Use when writing a note".to_string())],
             skill_problems: Vec::new(),
@@ -388,18 +492,109 @@ mod tests {
         assert!(page.contains(r#"<meta name="deepnest-token" content="0123456789abcdef"#));
         assert!(page.contains(r#"<meta name="deepnest-port" content="4270">"#));
         assert!(page.contains("127.0.0.1:4270"));
-        // Rendered, not fetched: a reader without script still learns these.
-        assert!(page.contains("configured (deepseek-flash)"), "{page}");
+        // Rendered, not fetched: a reader without script still learns these. The model is named
+        // twice — in the line of facts and on the model row — and both come from the same field.
+        assert!(
+            page.contains(
+                r#"<span class="fact" id="model-fact"><code>deepseek-flash</code></span>"#
+            ),
+            "{page}"
+        );
+        assert!(
+            page.contains(r#"<span id="model-value" class="value">deepseek-flash</span>"#),
+            "{page}"
+        );
         assert!(page.contains("2 apps in /home/u/.deepnest/apps"), "{page}");
     }
 
+    /// The page is the shell the design draws, not the markup it grew into.
+    ///
+    /// Each assertion here is one piece of that shell, and the reason to pin them rather than
+    /// describe them is that the previous page satisfied every behavioural test in this file while
+    /// looking nothing like the design: the facts were all present, spread over three paragraphs.
     #[test]
-    fn first_run_says_the_endpoint_is_not_configured() {
-        let page = page(&Panel {
+    fn the_page_is_the_shell_the_design_draws() {
+        let page = page(&panel());
+        // The brand, and the one line that answers "is it ready, and what do I have".
+        assert!(page.contains(r#"<div class="brand">"#), "{page}");
+        assert!(page.contains(r#"<p class="ready">"#), "{page}");
+        assert!(page.contains(r#"class="verdict ok""#), "{page}");
+        assert!(
+            page.contains(r#"<span id="verdict-text">Ready</span>"#),
+            "{page}"
+        );
+        // The model as a state with one button, rather than as a form standing open.
+        assert!(page.contains(r#"<div class="model">"#), "{page}");
+        assert!(page.contains(r#"id="model-change""#), "{page}");
+        // A section heading that carries its own count.
+        assert!(page.contains(r#"<div class="sec-head">"#), "{page}");
+        assert!(
+            page.contains(r#"<span id="apps-count" class="count">2</span>"#),
+            "{page}"
+        );
+        // The list is one box of rows, and the row that adds one is the last row of it.
+        assert!(page.contains(r#"<div class="box">"#), "{page}");
+        assert!(
+            page.contains(r#"<details id="create-box" class="add-row">"#),
+            "{page}"
+        );
+        // Skills are one row until someone asks for the rest.
+        assert!(page.contains(r#"class="skill-sum""#), "{page}");
+        assert!(
+            page.contains(r#"<span id="skills-count" class="d">1 installed</span>"#),
+            "{page}"
+        );
+    }
+
+    #[test]
+    fn first_run_says_so_and_opens_the_form_that_fixes_it() {
+        let unset = page(&Panel {
             model: None,
             ..panel()
         });
-        assert!(page.contains("not configured"), "{page}");
+        let page = unset;
+        assert!(page.contains(r#"class="verdict warn""#), "{page}");
+        assert!(
+            page.contains(r#"<span id="verdict-text">No model</span>"#),
+            "{page}"
+        );
+        // The value says what is missing instead of being blank, and says it in the warn colour.
+        assert!(
+            page.contains(r#"<span id="model-value" class="value unset">none yet</span>"#),
+            "{page}"
+        );
+        // The form is the first thing on the page with no model configured, and closed with one:
+        // `hidden` is what the script toggles, and a reader with script off gets the right half of
+        // that without running any.
+        assert!(
+            page.contains(r#"<section id="first-run" class="first-run">"#),
+            "the form must be open on the first run: {page}"
+        );
+        assert!(
+            super::page(&panel()).contains(r#"<section id="first-run" class="first-run" hidden>"#),
+            "the form must start closed once a model exists"
+        );
+    }
+
+    /// A process with no apps directory has no count, and that is not zero.
+    ///
+    /// `0 apps` is a claim about a directory that was read and found empty. A page that made it
+    /// about a directory this process was never given would be telling a reader their apps are
+    /// gone.
+    #[test]
+    fn no_apps_directory_is_a_dash_rather_than_a_zero() {
+        let page = page(&Panel {
+            apps_count: None,
+            ..panel()
+        });
+        assert!(
+            page.contains(r#"<span id="apps-count" class="count">—</span>"#),
+            "{page}"
+        );
+        assert!(
+            page.contains(r#"<span class="fact" id="apps-fact">no apps directory</span>"#),
+            "{page}"
+        );
     }
 
     #[test]
@@ -446,21 +641,61 @@ mod tests {
 
     #[test]
     fn a_path_is_text_on_the_row_and_not_a_band_across_it() {
-        // `.mono` carries a background, which is right for a word inside a line and wrong for a
+        // `.mono` carried a background, which is right for a word inside a line and wrong for a
         // block: on the path line it painted a grey band the width of the card, which reads as
-        // progress rather than as where the app lives.
+        // progress rather than as where the app lives. The path now shares the row's one meta line
+        // with the template, appended as a text node after it.
         assert!(
-            SCRIPT.contains(r#"element("div", "note path", app.path)"#),
-            "the path is drawn with the class that carries a background again"
+            SCRIPT.contains(r#"meta.appendChild(document.createTextNode(" · " + app.path))"#),
+            "the path is not appended to the row's meta line: {SCRIPT}"
         );
         assert!(!SCRIPT.contains(r#""note mono""#), "{SCRIPT}");
         assert!(
-            STYLE.contains(".app .path"),
-            "nothing styles the class the script gives the path"
+            STYLE.contains(".who .meta"),
+            "nothing styles the class the script gives the meta line"
         );
         assert!(
-            STYLE.contains("word-break: break-all"),
-            "a path too long for the card would be cut instead of wrapped"
+            STYLE.contains("overflow-wrap: anywhere"),
+            "a path too long for the row would be cut instead of wrapped"
+        );
+    }
+
+    /// The two surfaces are one system, and a token is the thing that says so.
+    ///
+    /// The panel's colours were written as literals while the dialog had a named block, so the two
+    /// halves of deepnest's own interface looked related by accident. Copying the dialog's values
+    /// into the panel is a debt; this test is what keeps the copy from drifting — a name that moves
+    /// in one file has to move in the other or the build says so.
+    #[test]
+    fn the_panel_and_the_dialog_share_one_token_block() {
+        for name in [
+            "--dn-surface",
+            "--dn-ink",
+            "--dn-ink-1",
+            "--dn-line",
+            "--dn-accent",
+            "--dn-accent-tint",
+            "--dn-ok",
+            "--dn-bad",
+            "--dn-warn",
+            "--dn-radius-m",
+            "--dn-space-m",
+            "--dn-text-body",
+        ] {
+            assert!(
+                STYLE.contains(&format!("{name}:")),
+                "the panel's token block has no {name}"
+            );
+            assert!(
+                !DIALOG_STYLE.is_empty() && DIALOG_STYLE.contains(&format!("{name}:")),
+                "the dialog's token block has no {name}"
+            );
+        }
+        // And the panel draws its rules out of those names rather than out of literals: a raw hex
+        // in a rule is a colour that no scheme can move.
+        assert!(
+            !STYLE.contains("#c0392b") && !STYLE.contains("#2d7a46"),
+            "a rule still carries the literal colour the token block replaced"
         );
     }
 
@@ -471,6 +706,7 @@ mod tests {
             token: "\"><script>alert(1)</script>".to_string(),
             model: Some("<img onerror=x>".to_string()),
             apps: "</p><script>alert(2)</script>".to_string(),
+            apps_count: Some(2),
             skills: "</p><script>alert(3)</script>".to_string(),
             // A skill's name is a directory or a header line, and its description is whatever the
             // user typed: both are input, and both land in markup.
@@ -2891,7 +3127,7 @@ mod tests {
             .find("return null;")
             .expect("an unknown state still produces a chip, and a chip is a claim");
         let built = body
-            .find(r#"return element("span""#)
+            .find(r#"element("span", "chip ""#)
             .expect("the chip is never built, so this test is stale");
         assert!(
             none < built,
