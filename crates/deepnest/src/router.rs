@@ -3404,6 +3404,17 @@ mod tests {
             .complete();
         assert_eq!(chat.status, 412, "{:?}", chat);
 
+        // `cancel` is one of them, and it is the one a page got wrong: the dialog's Stop button
+        // posted `{}` here, and the refusal is what "pressing stop does not stop" was made of.
+        let cancel = router
+            .respond(&post_body("/api/apps/notes/cancel", r#"{}"#))
+            .complete();
+        assert_eq!(cancel.status, 400, "{:?}", cancel);
+        assert!(
+            error_text(&cancel).contains("takes no request body"),
+            "{}",
+            error_text(&cancel)
+        );
         // The same body on a route that does not read one is refused by name — answering "done"
         // to content nobody looked at is the answer a server must not give.
         let start = router

@@ -3449,11 +3449,14 @@
       "Stopping \u2014 a running command is killed now; a model call already sent ends when it " +
         "returns."
     );
+    // No body, and that is the whole of the bug this line carried: the route refuses a request
+    // body by name — a server must not answer "done" about content it never read — so `body: "{}"`
+    // turned every press of this control into a `400` and the flag was never set. Measured on the
+    // running page: a turn went on spending after the press, and the only thing that changed was
+    // the wording above it.
     fetch(stoppingRoute(), {
       method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: "{}"
+      credentials: "same-origin"
     })
       .then(function (response) {
         return response.json().then(

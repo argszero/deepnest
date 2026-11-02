@@ -3218,6 +3218,20 @@ mod tests {
             .find(r#"stop.addEventListener("click""#)
             .expect("the control has no press handler")..];
         let press = &press[..press.find("fetch(stoppingRoute()").expect("it posts")];
+        // What the button says is the second half of the defect, and this is the first: the
+        // request itself. `POST .../cancel` reads no body, and this router refuses a body on a
+        // route that reads none — so the `body: "{}"` this call once carried turned every press
+        // into a `400`, the flag was never set, and the turn went on spending. Nothing in the
+        // page could notice: the reply was a refusal the control reset itself from, which looks
+        // exactly like a stop that was asked for and is still in flight.
+        let request = &DIALOG_SCRIPT[DIALOG_SCRIPT
+            .find("fetch(stoppingRoute(),")
+            .expect("the stop is posted somewhere")..];
+        let request = &request[..request.find("})").expect("the call ends")];
+        assert!(
+            !request.contains("body"),
+            "the stop posts a body to a route that reads none, so it is refused: {request}"
+        );
         assert!(
             press.contains("STOPPING_LABEL"),
             "the control does not say it is stopping: {press}"
