@@ -46,6 +46,7 @@ use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+use base64::Engine as _;
 use deepnest_apps::{BuildError, Runner, Slug, StartError, State, Supervisor, TemplateError};
 use serde_json::{json, Value};
 
@@ -56,6 +57,7 @@ use deepnest_packaging::{Probe, StdProbe};
 use deepnest_web::Panel;
 
 use crate::cancel;
+use crate::capture;
 use crate::chat;
 use crate::escalation;
 use crate::grant;
@@ -86,6 +88,11 @@ pub struct Lifecycle {
     /// same reason `builder` is one: the check that refuses a build has to be testable on a machine
     /// that happens to have a compiler, and on one that does not.
     pub preflight: Arc<dyn Probe>,
+    /// How a picture of the screen is taken. A trait object for the same reason `preflight` is one:
+    /// the real capturer runs a platform program, and on macOS the first run of that program is
+    /// what raises the screen-recording grant — a test suite must not do that to the person whose
+    /// machine it runs on.
+    pub capturer: Arc<dyn capture::Capturer>,
     pub home: PathBuf,
     /// The rebuild queue: what a writing turn starts, and what the page polls until the app serves
     /// the change. Held here because it outlives any one request — a queue rebuilt per request
@@ -133,6 +140,7 @@ impl Lifecycle {
             builder,
             forwarder: Arc::new(StdForwarder),
             preflight: Arc::new(StdProbe),
+            capturer: Arc::new(capture::StdCapturer::new(home.clone())),
             home,
         }
     }
@@ -194,6 +202,12 @@ impl Lifecycle {
     /// The same lifecycle with a different C-toolchain probe.
     pub fn with_preflight(mut self, preflight: Arc<dyn Probe>) -> Self {
         self.preflight = preflight;
+        self
+    }
+
+    /// The same lifecycle with a different way of taking a picture of the screen.
+    pub fn with_capturer(mut self, capturer: Arc<dyn capture::Capturer>) -> Self {
+        self.capturer = capturer;
         self
     }
 }
@@ -347,6 +361,14 @@ impl Router {
     pub fn with_preflight(mut self, preflight: Arc<dyn Probe>) -> Self {
         if let Some(lifecycle) = self.lifecycle.take() {
             self.lifecycle = Some(lifecycle.with_preflight(preflight));
+        }
+        self
+    }
+
+    /// The same router, with a different way of taking a picture of the screen.
+    pub fn with_capturer(mut self, capturer: Arc<dyn capture::Capturer>) -> Self {
+        if let Some(lifecycle) = self.lifecycle.take() {
+            self.lifecycle = Some(lifecycle.with_capturer(capturer));
         }
         self
     }
@@ -551,8 +573,10 @@ impl Router {
         }
         // One cookie per route the dialog may reach, and a value per cookie: the capability to
         // send a message must not be the capability to approve a widening, or to watch a build.
-        // All three are minted here, because serving the page is the moment this server can tell
-        // "this browser loaded the app from here" from "something else on this machine asked".
+        // Every one of them is minted here, because serving the page is the moment this server can
+        // tell "this browser loaded the app from here" from "something else on this machine asked",
+        // and no later request can. `capture` is the heaviest of the set; what it costs is stated
+        // on its own constant rather than in a word like "safe".
         let mut response = response;
         for action in [
             chat::ACTION,
@@ -561,6 +585,7 @@ impl Router {
             rebuild::ACTION,
             history::ACTION,
             sessions::ACTION,
+            capture::ACTION,
         ] {
             let name =
                 grant::cookie_name(action).expect("every route the dialog may reach has one");
@@ -1139,6 +1164,7 @@ impl Router {
             // has to be true.
             let what = match action {
                 Action::Chat => "takes a message",
+                Action::Capture => "takes a picture of the screen",
                 Action::Cancel => "stops a turn",
                 _ => "changes state",
             };
@@ -1285,6 +1311,7 @@ impl Router {
                 ))
             }
             Action::Chat => self.chat(request, &dir, &slug, lifecycle),
+            Action::Capture => Answer::Full(self.capture_route(lifecycle)),
             Action::History => Answer::Full(Response::json(200, history::body(&dir))),
             Action::Build if request.method == Method::Get => {
                 // The same route read rather than run: what the page polls after a turn reported
@@ -1346,6 +1373,35 @@ impl Router {
     /// middle of a model call ends when that call returns. Zero is an ordinary answer — a second
     /// press, or a stop that arrives after the answer did — because a stop that finds nothing to
     /// stop is a true statement about the app, not a failure of the request.
+    /// The picture of the screen, as a `data:` URL.
+    ///
+    /// Encoded here rather than handed over as bytes because the page's next move is to put it in
+    /// an `<img>`, choose a region of it, and hand the result to the attachment list — and a `data:`
+    /// URL is the one spelling that needs no second route, no file lifetime, and no second origin
+    /// for the canvas the crop is drawn on to be tainted by.
+    ///
+    /// A failure to take it is `503`: the machine could not be photographed, which is not a fault in
+    /// the request. The sentence it carries is the whole answer — the panel shows it as it is,
+    /// because "the screenshot failed" without the reason leaves a person with nothing to do next.
+    fn capture_route(&self, lifecycle: &Lifecycle) -> Response {
+        match lifecycle.capturer.capture() {
+            Ok(png) => Response::json(
+                200,
+                json!({
+                    "image": format!(
+                        "data:image/png;base64,{}",
+                        base64::engine::general_purpose::STANDARD.encode(&png)
+                    ),
+                    // Not read by the page: it is what a later reader of a log needs to tell a
+                    // picture that arrived whole from one that was cut short.
+                    "bytes": png.len(),
+                })
+                .to_string(),
+            ),
+            Err(reason) => Response::json(503, error_body(&reason)),
+        }
+    }
+
     fn cancel_route(&self, slug: &Slug) -> Response {
         let stopping = self.turns.stop(slug.as_str());
         let note = match stopping {
@@ -1707,6 +1763,15 @@ enum Action {
     Restart,
     /// Send one message to the app's agent, in the body.
     Chat,
+    /// Take a picture of the screen, and answer it in a form the box can attach.
+    ///
+    /// Under `/api/apps/<slug>/` because that is where every verb on an app lives and the button is
+    /// in that app's dialog, but what it produces has nothing to do with the app: the picture
+    /// travels out of this route and into the message the person is writing, by the same path a
+    /// pasted one takes (`crate::chat`'s `images`). It needs the lifecycle and not the app's
+    /// process, which is why an app that is stopped can still be screenshotted into a message about
+    /// why it is stopped.
+    Capture,
     /// Read, or answer, the widening request a turn is waiting on.
     ///
     /// The one app route that is not a `POST`: `GET` reports what is being asked (a page polling
@@ -1746,6 +1811,7 @@ impl Action {
             "stop" => Some(Self::Stop),
             "restart" => Some(Self::Restart),
             chat::ACTION => Some(Self::Chat),
+            capture::ACTION => Some(Self::Capture),
             escalation::ACTION => Some(Self::Escalation),
             cancel::ACTION => Some(Self::Cancel),
             history::ACTION => Some(Self::History),
@@ -1755,8 +1821,8 @@ impl Action {
     }
 
     /// The verbs, for a refusal that tells the caller what would have worked.
-    const VERBS: &str =
-        "create, build, start, stop, restart, chat, cancel, escalation, history or sessions";
+    const VERBS: &str = "create, build, start, stop, restart, chat, capture, cancel, \
+                         escalation, history or sessions";
 }
 
 /// The value of one query parameter, percent-decoded.
@@ -2055,6 +2121,128 @@ mod tests {
                 .map_or(raw.clone(), ToString::to_string),
             Err(_) => raw,
         }
+    }
+
+    /// A capturer that answers what the test told it to, and runs no program.
+    ///
+    /// The real one shells out to the platform's screenshot program, and on macOS the first run of
+    /// that program is what raises the screen-recording grant. A test suite that raised it would be
+    /// interrupting the machine it is running on, so what is faked here is only the bytes: the
+    /// route, the envelope and the refusal above it are the code under test.
+    struct FakeCapturer {
+        answer: Result<Vec<u8>, String>,
+    }
+
+    impl crate::capture::Capturer for FakeCapturer {
+        fn capture(&self) -> Result<Vec<u8>, String> {
+            self.answer.clone()
+        }
+    }
+
+    fn showing(png: &[u8]) -> Arc<dyn crate::capture::Capturer> {
+        Arc::new(FakeCapturer {
+            answer: Ok(png.to_vec()),
+        })
+    }
+
+    fn refusing(reason: &str) -> Arc<dyn crate::capture::Capturer> {
+        Arc::new(FakeCapturer {
+            answer: Err(reason.to_string()),
+        })
+    }
+
+    /// A router whose app `notes` exists and whose capturer is the test's.
+    fn capturing(scratch: &Scratch, capturer: Arc<dyn crate::capture::Capturer>) -> Router {
+        router()
+            .with_lifecycle(
+                Arc::new(deepnest_apps::Supervisor::with_parts(
+                    Box::new(FakeSpawner),
+                    Box::new(AlwaysReady),
+                )),
+                scratch.base.clone(),
+                scratch.apps(),
+            )
+            .with_capturer(capturer)
+    }
+
+    #[test]
+    fn the_dialog_asks_for_the_route_this_crate_answers() {
+        // Two crates, one string. `crates/web` cannot see `capture::ACTION`, so the route the
+        // dialog posts to and the action this router parses are only the same word by agreement —
+        // and a disagreement is a button that answers `404` with nothing on the page saying why.
+        let asked = format!("routeFor(\"{}\")", capture::ACTION);
+        assert!(
+            deepnest_web::DIALOG_SCRIPT.contains(&asked),
+            "the dialog does not ask for `{}`",
+            capture::ACTION
+        );
+    }
+
+    #[test]
+    fn a_capture_answers_with_the_picture_the_machine_took() {
+        let scratch = Scratch::new("capture-answers");
+        scratch.app("notes", "Notes");
+        // The eight bytes every PNG starts with, so what comes back identifies itself as one.
+        let png: &[u8] = b"\x89PNG\r\n\x1a\n";
+        let response = capturing(&scratch, showing(png))
+            .respond(&post("/api/apps/notes/capture"))
+            .complete();
+        assert_eq!(response.status, 200, "{}", body(&response));
+
+        let answer = body(&response);
+        // The spelling a pasted picture already arrives in. The page hands this straight to the
+        // attachment list, so a different envelope would be a second path into the message — and
+        // the one thing this feature must not have is a second path.
+        assert!(answer.contains("data:image/png;base64,"), "{answer}");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(png);
+        assert!(answer.contains(&encoded), "{answer}");
+        assert!(
+            answer.contains(&format!("\"bytes\":{}", png.len())),
+            "{answer}"
+        );
+    }
+
+    #[test]
+    fn a_capture_that_could_not_be_taken_says_why_and_ships_no_picture() {
+        // A machine with no screenshot program, or one whose permission was refused. The sentence
+        // is the answer: a person reading "the screenshot failed" alone has nothing to do next.
+        let scratch = Scratch::new("capture-refused");
+        scratch.app("notes", "Notes");
+        let response = capturing(
+            &scratch,
+            refusing("screencapture exited 1: could not create image"),
+        )
+        .respond(&post("/api/apps/notes/capture"))
+        .complete();
+        assert_eq!(response.status, 503);
+        let answer = body(&response);
+        assert!(answer.contains("could not create image"), "{answer}");
+        // And no picture: a `data:` URL beside the error would be a page attaching a photograph it
+        // was told did not exist.
+        assert!(!answer.contains("data:image"), "{answer}");
+    }
+
+    #[test]
+    fn a_capture_is_a_post_and_nothing_else() {
+        // A picture behind `GET` is a picture a browser may take by prefetching a link, which is
+        // the same reason every other verb here is a `POST`. Answered before the slug is validated,
+        // so the refusal names the method whatever app the caller spelled.
+        let scratch = Scratch::new("capture-method");
+        scratch.app("notes", "Notes");
+        let response = capturing(&scratch, showing(b"\x89PNG"))
+            .respond(&authorized_get("/api/apps/notes/capture"))
+            .complete();
+        assert_eq!(response.status, 405);
+        assert!(
+            response
+                .headers
+                .iter()
+                .any(|(name, value)| *name == "Allow" && *value == "POST"),
+            "{:?}",
+            response.headers
+        );
+        let answer = body(&response);
+        assert!(answer.contains("takes a picture of the screen"), "{answer}");
     }
 
     #[test]
@@ -2946,7 +3134,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_action_is_not_found_and_the_refusal_lists_the_ten_that_exist() {
+    fn an_unknown_action_is_not_found_and_the_refusal_lists_the_eleven_that_exist() {
         let scratch = Scratch::new("life-action");
         scratch.built_app("notes", "Notes");
         let router = supervised(&scratch);
@@ -2955,7 +3143,8 @@ mod tests {
         assert_eq!(unknown.status, 404);
         assert!(
             body(&unknown).contains(
-                "create, build, start, stop, restart, chat, cancel, escalation, history or sessions"
+                "create, build, start, stop, restart, chat, capture, cancel, escalation, \
+                 history or sessions"
             ),
             "{:?}",
             unknown
@@ -2967,7 +3156,8 @@ mod tests {
         assert_eq!(bare.status, 404);
         assert!(
             body(&bare).contains(
-                "create, build, start, stop, restart, chat, cancel, escalation, history or sessions"
+                "create, build, start, stop, restart, chat, capture, cancel, escalation, \
+                 history or sessions"
             ),
             "{:?}",
             bare
@@ -3680,7 +3870,12 @@ mod tests {
         crate::http::read(&mut reader).unwrap()
     }
 
-    /// The same page, returning every capability the dialog holds.
+    /// The same page, returning the six capabilities the tests below spend.
+    ///
+    /// The page mints a seventh — the screenshot route's — which the count just below covers, and
+    /// which the capture test spends by name. It is not handed back here because eleven call sites
+    /// destructure this tuple, and widening it to reach one value would touch eleven tests for a
+    /// route none of them exercises.
     #[allow(clippy::type_complexity)]
     fn app_page_with_grants(
         scratch: &Scratch,
@@ -3698,7 +3893,7 @@ mod tests {
         let cookies = set_cookies(&page);
         assert_eq!(
             cookies.len(),
-            6,
+            7,
             "a page carries one cookie per route: {cookies:?}"
         );
         let chat = cookies
@@ -3907,16 +4102,21 @@ mod tests {
         .unwrap();
         let reloaded = router.respond(&again).complete();
         assert_eq!(reloaded.status, 200);
-        assert_eq!(
-            set_cookies(&reloaded).len(),
-            0,
-            "a capability was minted twice"
+        // The page presents six of the seven. None of those six is minted again — which is the
+        // churn this test is about — and the seventh, the screenshot route's, is handed over
+        // because this rewrite of the request does not carry it. Named rather than counted, so a
+        // capability added later fails here instead of passing quietly.
+        let minted = set_cookies(&reloaded);
+        assert_eq!(minted.len(), 1, "a capability was minted twice: {minted:?}");
+        assert!(
+            minted[0].starts_with("deepnest-capture="),
+            "the wrong capability was minted again: {minted:?}"
         );
     }
 
     #[test]
     fn a_page_holding_one_capability_is_given_the_other_and_keeps_the_one_it_has() {
-        // The values are separate, so a page that has only one is given exactly the other five.
+        // The values are separate, so a page that has only one is given exactly the other six.
         let scratch = Scratch::new("grant-half");
         scratch.built_app("notes", "Notes");
         let (router, chat, _, _, _, _, _) = app_page_with_grants(&scratch, "notes");
@@ -3927,7 +4127,7 @@ mod tests {
         .unwrap();
         let reloaded = router.respond(&again).complete();
         let minted = set_cookies(&reloaded);
-        assert_eq!(minted.len(), 5, "{minted:?}");
+        assert_eq!(minted.len(), 6, "{minted:?}");
         assert!(
             minted
                 .iter()
@@ -3968,7 +4168,7 @@ mod tests {
             .complete();
 
         let cookies = set_cookies(&page);
-        assert_eq!(cookies.len(), 6, "{cookies:?}");
+        assert_eq!(cookies.len(), 7, "{cookies:?}");
         let chat = cookies
             .iter()
             .find(|raw| raw.starts_with("deepnest-chat="))

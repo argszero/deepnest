@@ -99,6 +99,22 @@ pub const HISTORY_COOKIE: &str = "deepnest-history";
 /// speak in it.
 pub const SESSIONS_COOKIE: &str = "deepnest-sessions";
 
+/// The cookie that opens an app's capture route.
+///
+/// The heaviest of the seven, and its cost is written here rather than left to be discovered: what
+/// it opens is a photograph of the whole screen, and a page that holds this value can take one
+/// without anything the person in front of the machine would notice. The other six all leave a
+/// trace — a turn writes into the transcript, a build announces itself, a history read is answered
+/// on screen — so a script that spends one is eventually seen spending it. A capture is over before
+/// it could be seen, and an app's own script can present this cookie exactly as the dialog does.
+///
+/// It is granted anyway, because the alternative is a button that always answers `401`: the dialog
+/// holds no control token, so without this value the route is unreachable from the one place a
+/// person can press it. What bounds it is what bounds the rest — one app, one route, one verb,
+/// `HttpOnly`, `SameSite=Strict`, and [`TTL`] — and what it does not bound is the residual this
+/// module states above, which is why the paragraph exists instead of a sentence saying "safe".
+pub const CAPTURE_COOKIE: &str = "deepnest-capture";
+
 /// How long a minted value stays usable.
 ///
 /// Long enough for a day's work in one tab, short enough that a value lifted out of a browser
@@ -127,6 +143,7 @@ pub fn cookie_name(action: &str) -> Option<&'static str> {
         crate::rebuild::ACTION => Some(BUILD_COOKIE),
         crate::history::ACTION => Some(HISTORY_COOKIE),
         crate::sessions::ACTION => Some(SESSIONS_COOKIE),
+        crate::capture::ACTION => Some(CAPTURE_COOKIE),
         _ => None,
     }
 }
@@ -361,6 +378,7 @@ mod tests {
         assert_eq!(cookie_name("escalation"), Some(ESCALATION_COOKIE));
         assert_eq!(cookie_name("build"), Some(BUILD_COOKIE));
         assert_eq!(cookie_name("sessions"), Some(SESSIONS_COOKIE));
+        assert_eq!(cookie_name("capture"), Some(CAPTURE_COOKIE));
         // The verbs that change a process stay behind the token, and so does anything added later
         // without a line here.
         assert_eq!(cookie_name("start"), None);

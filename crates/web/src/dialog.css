@@ -344,7 +344,8 @@
   outline-offset: 1px;
 }
 
-#deepnest-dialog-attach {
+#deepnest-dialog-attach,
+#deepnest-dialog-capture {
   display: inline-block;
   margin-top: 0.45rem;
   margin-right: 0.35rem;
@@ -357,11 +358,13 @@
   cursor: pointer;
 }
 
-#deepnest-dialog-attach:hover {
+#deepnest-dialog-attach:hover,
+#deepnest-dialog-capture:hover {
   border-color: rgba(255, 255, 255, 0.5);
 }
 
-#deepnest-dialog-attach:focus-visible {
+#deepnest-dialog-attach:focus-visible,
+#deepnest-dialog-capture:focus-visible {
   outline: 2px solid #7aa7ff;
   outline-offset: 1px;
 }
@@ -370,6 +373,119 @@
  * is only hidden if this sheet says so. */
 #deepnest-dialog-picker[hidden] {
   display: none;
+}
+
+/* The screenshot: the frozen frame, and the rectangle dragged over it.
+ *
+ * The sheet covers the viewport and is a child of the root rather than of the panel, because it is
+ * shown at the one moment the panel is hidden — the panel is on the screen the picture is of, and a
+ * picture of the panel is the one thing this must not produce. `inset: 0` against the viewport
+ * rather than against the panel: the region a person means is wherever the thing they are pointing
+ * at happens to be, and the panel is a 22rem column in one corner. */
+#deepnest-dialog-shot {
+  position: fixed;
+  inset: 0;
+  display: block;
+  box-sizing: border-box;
+  z-index: 1;
+  background: #0b0b0e;
+  cursor: crosshair;
+  /* A drag on a touch screen is a scroll unless this says otherwise, and a scroll is not a
+   * rectangle. */
+  touch-action: none;
+}
+
+#deepnest-dialog-shot[hidden] {
+  display: none;
+}
+
+/* `contain` and not `cover`: the whole screen has to be reachable, and a picture cropped to the
+ * viewport's shape at its edges would put a monitor's corners out of reach. */
+#deepnest-dialog-shot-frame {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  -webkit-user-drag: none;
+  user-select: none;
+}
+
+/* The selection, and everything outside it dimmed. `100vmax` of box-shadow rather than a second
+ * mask element: one shadow on the rectangle is the whole effect, and it cannot fall out of step
+ * with a layer that has to be moved beside it. */
+#deepnest-dialog-shot-box {
+  position: absolute;
+  display: block;
+  box-sizing: border-box;
+  border: 1px solid #7aa7ff;
+  background: rgba(122, 167, 255, 0.14);
+  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.5);
+  /* The drag is read from the sheet underneath. A rectangle that took the pointer would end the
+   * drag the moment it appeared under it. */
+  pointer-events: none;
+}
+
+#deepnest-dialog-shot-box[hidden] {
+  display: none;
+}
+
+#deepnest-dialog-shot-bar {
+  position: absolute;
+  left: 50%;
+  bottom: 1.2rem;
+  transform: translateX(-50%);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  max-width: calc(100vw - 2rem);
+  padding: 0.5rem 0.7rem;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  background: #1e1e23;
+  color: #f4f4f6;
+  cursor: default;
+}
+
+#deepnest-dialog-shot-hint {
+  display: block;
+  margin: 0;
+  color: rgba(244, 244, 246, 0.78);
+  font: 500 12px/1.2 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+#deepnest-dialog-shot-use,
+#deepnest-dialog-shot-whole,
+#deepnest-dialog-shot-cancel {
+  display: inline-block;
+  padding: 0.3rem 0.6rem;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 6px;
+  background: #2b2b32;
+  color: #f4f4f6;
+  font: 600 12px/1.2 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  cursor: pointer;
+}
+
+/* The one button that finishes the job, and the only one disabled until there is a region. */
+#deepnest-dialog-shot-use {
+  border-color: rgba(122, 167, 255, 0.7);
+}
+
+#deepnest-dialog-shot-use:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+#deepnest-dialog-shot-use:focus-visible,
+#deepnest-dialog-shot-whole:focus-visible,
+#deepnest-dialog-shot-cancel:focus-visible {
+  outline: 2px solid #7aa7ff;
+  outline-offset: 1px;
 }
 
 #deepnest-dialog-send {

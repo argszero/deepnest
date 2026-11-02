@@ -9,15 +9,17 @@
 // 1. **It never holds the control token.** The app's own script shares this origin, so a token
 //    written into this page is a token the app can read and spend — and the control token spends
 //    on every route there is.
-// 2. **It calls five routes and brings no credential of its own**: `POST /api/apps/<slug>/chat`,
+// 2. **It calls seven routes and brings no credential of its own**: `POST /api/apps/<slug>/chat`,
 //    `GET`/`POST /api/apps/<slug>/escalation` — the second is how a widening request reaches the
 //    person in front of the page — `GET /api/apps/<slug>/build`, which is what a turn that changed
 //    the app leaves behind to be watched, `GET /api/apps/<slug>/history`, which is what makes the
-//    conversation survive a reload, and `POST /api/apps/<slug>/cancel`, which stops a turn that is
-//    already spending. For each, the browser attaches a cookie the server minted when it served
-//    this page, scoped to that one path, and all five are different
-//    values. So the box works on a page whose app is stopped or mid-rewrite, and a page that
-//    cannot present that cookie gets a `401` and says so instead of failing silently.
+//    conversation survive a reload, `POST /api/apps/<slug>/cancel`, which stops a turn that is
+//    already spending, `GET`/`POST /api/apps/<slug>/sessions`, which is the drawer, and
+//    `POST /api/apps/<slug>/capture`, which is a picture of the screen. For each, the browser
+//    attaches a cookie the server minted when it served this page, scoped to that one path, and all
+//    seven are different values. So the box works on a page whose app is stopped or mid-rewrite,
+//    and a page that cannot present that cookie gets a `401` and says so instead of failing
+//    silently.
 //
 // The residual, stated where it is made rather than left implied: the app's own script can make
 // that same request, so an app can spend its own agent turns. It cannot spend another app's, reach
@@ -347,7 +349,27 @@
     takeFile(file, next);
   }
 
+  // The one place a picture joins the message, whichever way it arrived: the clipboard, the file
+  // picker, or the screenshot. More than one way in and one place to land is what keeps the marker,
+  // the number and the limit from disagreeing between them — and the limit is checked here, where
+  // every way in arrives, so a caller written later cannot bypass it.
+  function attachPicture(url) {
+    if (picturesReferredTo(input.value).length >= MAX_PICTURES) {
+      say("A message carries at most " + MAX_PICTURES + " pictures.", true);
+      return false;
+    }
+    var id = nextPicture;
+    nextPicture += 1;
+    attached.push({ id: id, url: url });
+    putAtCaret(markerFor(id));
+    refreshNote();
+    return true;
+  }
+
   function takePicture(file, next) {
+    // The same limit, asked before the file is read rather than after: reading eight pictures to
+    // throw them away is work done for a message that is already full, and `next` has to be called
+    // either way. `attachPicture` asks again because it is the gate the screenshot path reaches.
     if (picturesReferredTo(input.value).length >= MAX_PICTURES) {
       say("A message carries at most " + MAX_PICTURES + " pictures.", true);
       next();
@@ -356,11 +378,7 @@
     var reader = new FileReader();
     reader.onload = function () {
       if (typeof reader.result === "string") {
-        var id = nextPicture;
-        nextPicture += 1;
-        attached.push({ id: id, url: reader.result });
-        putAtCaret(markerFor(id));
-        refreshNote();
+        attachPicture(reader.result);
       }
       next();
     };
@@ -369,6 +387,180 @@
       next();
     };
     reader.readAsDataURL(file);
+  }
+
+  // ---- The screenshot, from the press to the attachment ----
+  //
+  // The panel sits over the screen, so a picture taken while it is up is a picture of the panel. It
+  // goes away first — and the wait below is two animation frames, not one: the first hands the
+  // change to the compositor and the second runs after the frame carrying it has been painted. One
+  // frame was measured to be enough on a warm tab and not on one that had just loaded.
+  function afterPaint(next) {
+    if (document.hidden || typeof window.requestAnimationFrame !== "function") {
+      // Nothing is being painted, so there is no frame to wait for; the delay is what still puts
+      // the panel's disappearance in front of the capture.
+      window.setTimeout(next, 60);
+      return;
+    }
+    window.requestAnimationFrame(function () {
+      window.requestAnimationFrame(next);
+    });
+  }
+
+  function startCapture() {
+    panelWasOpen = !panel.hidden;
+    panel.hidden = true;
+    ball.hidden = true;
+    afterPaint(function () {
+      fetch(routeFor("capture"), { method: "POST", credentials: "same-origin" })
+        .then(function (response) {
+          if (response.status === 401) {
+            // The grant is gone: expired, or this page was not served by this process. Reloading
+            // is the one action that mints another — the same reading as on the box.
+            throw new Error(
+              "This page's permission to take a picture has expired — reload the page."
+            );
+          }
+          return response.json().then(function (answer) {
+            if (!response.ok) {
+              // The server's sentence is the whole answer: "screencapture exited 1: …" says what
+              // "the screenshot failed" cannot, and it is what tells a person to grant the
+              // permission it names. Shown through `textContent`, never as markup.
+              throw new Error((answer && answer.error) || "The screen could not be captured.");
+            }
+            return answer.image;
+          });
+        })
+        .then(function (image) {
+          if (typeof image !== "string" || image.indexOf("data:image/") !== 0) {
+            throw new Error("The screen was captured but no picture arrived.");
+          }
+          openShot(image);
+        })
+        .catch(function (error) {
+          restorePanel();
+          say(error && error.message ? error.message : "The screen could not be captured.", true);
+        });
+    });
+  }
+
+  function restorePanel() {
+    ball.hidden = false;
+    // Through `show` rather than by assigning `hidden`: opening is also when the transcript is
+    // asked for again, and the panel comes back the way it was found rather than always open.
+    show(panelWasOpen);
+  }
+
+  function openShot(image) {
+    shotFrame.src = image;
+    shotBox.hidden = true;
+    dragFrom = null;
+    selection = null;
+    shotUse.disabled = true;
+    shotHint.textContent = "Drag over the part you mean.";
+    shot.hidden = false;
+    // The sheet takes the keyboard so Escape and Enter are answered here rather than by the page
+    // underneath, which is covered by it.
+    shot.focus();
+  }
+
+  function closeShot() {
+    shot.hidden = true;
+    shotFrame.removeAttribute("src");
+    shotBox.hidden = true;
+    dragFrom = null;
+    selection = null;
+    shotUse.disabled = true;
+  }
+
+  // The picture as it is actually drawn. `object-fit: contain` letterboxes it, so the element's box
+  // and the picture's box are two different rectangles — and only the second one maps to pixels.
+  function drawnFrame() {
+    var box = shotFrame.getBoundingClientRect();
+    var wide = shotFrame.naturalWidth;
+    var tall = shotFrame.naturalHeight;
+    if (!wide || !tall || !box.width || !box.height) {
+      return null;
+    }
+    var scale = Math.min(box.width / wide, box.height / tall);
+    var width = wide * scale;
+    var height = tall * scale;
+    return {
+      left: box.left + (box.width - width) / 2,
+      top: box.top + (box.height - height) / 2,
+      width: width,
+      height: height,
+      scale: scale
+    };
+  }
+
+  function clampToFrame(x, y, drawn) {
+    return {
+      x: Math.min(Math.max(x, drawn.left), drawn.left + drawn.width),
+      y: Math.min(Math.max(y, drawn.top), drawn.top + drawn.height)
+    };
+  }
+
+  function drawSelection() {
+    if (!selection) {
+      shotBox.hidden = true;
+      shotUse.disabled = true;
+      return;
+    }
+    shotBox.hidden = false;
+    shotBox.style.left = selection.left + "px";
+    shotBox.style.top = selection.top + "px";
+    shotBox.style.width = selection.width + "px";
+    shotBox.style.height = selection.height + "px";
+    shotUse.disabled = false;
+  }
+
+  function useSelection() {
+    var drawn = drawnFrame();
+    if (!drawn || !selection) {
+      return;
+    }
+    // Back to picture pixels before cropping: the selection is in viewport pixels, and those shrink
+    // the picture by `drawn.scale` before it is ever drawn.
+    var url = croppedPicture(
+      (selection.left - drawn.left) / drawn.scale,
+      (selection.top - drawn.top) / drawn.scale,
+      selection.width / drawn.scale,
+      selection.height / drawn.scale
+    );
+    closeShot();
+    restorePanel();
+    if (url) {
+      attachPicture(url);
+    }
+  }
+
+  function useWholeFrame() {
+    if (!drawnFrame()) {
+      return;
+    }
+    var url = croppedPicture(0, 0, shotFrame.naturalWidth, shotFrame.naturalHeight);
+    closeShot();
+    restorePanel();
+    if (url) {
+      attachPicture(url);
+    }
+  }
+
+  // The region, scaled so its long edge fits `CAPTURE_LONGEST` and never scaled up: a crop of a
+  // small region is already the size to send it at, and a whole 4K screen is 8.3 megapixels, whose
+  // `data:` URL would be several times the largest message this server accepts.
+  function croppedPicture(left, top, width, height) {
+    var scale = Math.min(1, CAPTURE_LONGEST / Math.max(width, height));
+    var canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    var context = canvas.getContext("2d");
+    if (!context) {
+      return null;
+    }
+    context.drawImage(shotFrame, left, top, width, height, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/png");
   }
 
   // The name as the person's own file system spells it, minus the characters a marker cannot hold:
@@ -513,8 +705,164 @@
     }
   });
 
+  // The screenshot. A sibling of "Attach a file" rather than a mode: a person who wants to point at
+  // something on their screen reaches for it exactly where they reach for a file, and the picture it
+  // produces lands in the message the same way.
+  //
+  // The picture is taken by the deepnest process, not by this page. The browser's own screen-share
+  // API is what a page would reach for, and the price is a picker for every press plus a permission
+  // prompt this page cannot answer for the person in front of it — and the dialogs that costs are
+  // the whole reason the request goes to the server instead. What comes back is a `data:` URL of the
+  // whole screen, and the sheet below is where a person says which part of it they meant.
+  var CAPTURE_LONGEST = 1600;
+
+  var capture = document.createElement("button");
+  capture.type = "button";
+  capture.id = "deepnest-dialog-capture";
+  capture.textContent = "Screenshot";
+  capture.addEventListener("click", startCapture);
+
+  // The frozen frame, and the rectangle dragged over it. Full-viewport and outside the panel on
+  // purpose: the panel hides itself for the capture (a picture of the panel is the one thing this
+  // must not produce), so the sheet cannot be a child of it.
+  var shot = document.createElement("div");
+  shot.id = "deepnest-dialog-shot";
+  shot.hidden = true;
+  shot.tabIndex = -1;
+  shot.setAttribute("role", "dialog");
+  shot.setAttribute("aria-modal", "true");
+  shot.setAttribute("aria-label", "Choose the part of the screen to send");
+
+  var shotFrame = document.createElement("img");
+  shotFrame.id = "deepnest-dialog-shot-frame";
+  // The frame is the person's own screen, and a screen reader announcing it would be reading out a
+  // picture of whatever happens to be behind this page.
+  shotFrame.alt = "";
+
+  var shotBox = document.createElement("div");
+  shotBox.id = "deepnest-dialog-shot-box";
+  shotBox.hidden = true;
+
+  var shotBar = document.createElement("div");
+  shotBar.id = "deepnest-dialog-shot-bar";
+
+  var shotHint = document.createElement("p");
+  shotHint.id = "deepnest-dialog-shot-hint";
+  shotHint.textContent = "Drag over the part you mean.";
+
+  var shotUse = document.createElement("button");
+  shotUse.type = "button";
+  shotUse.id = "deepnest-dialog-shot-use";
+  shotUse.textContent = "Use this part";
+  shotUse.disabled = true;
+  shotUse.addEventListener("click", useSelection);
+
+  var shotWhole = document.createElement("button");
+  shotWhole.type = "button";
+  shotWhole.id = "deepnest-dialog-shot-whole";
+  shotWhole.textContent = "The whole screen";
+  shotWhole.addEventListener("click", useWholeFrame);
+
+  var shotCancel = document.createElement("button");
+  shotCancel.type = "button";
+  shotCancel.id = "deepnest-dialog-shot-cancel";
+  shotCancel.textContent = "Cancel";
+  shotCancel.addEventListener("click", function () {
+    closeShot(true);
+  });
+
+  shotBar.appendChild(shotHint);
+  shotBar.appendChild(shotUse);
+  shotBar.appendChild(shotWhole);
+  shotBar.appendChild(shotCancel);
+  shot.appendChild(shotFrame);
+  shot.appendChild(shotBox);
+  shot.appendChild(shotBar);
+
+  // Which half of the panel was open when the capture started. The panel goes away so it is not in
+  // its own picture, and this is what puts it back the way it was found.
+  var panelWasOpen = false;
+  // Where the drag started, and what it currently covers, both in viewport pixels.
+  var dragFrom = null;
+  var selection = null;
+
+  // Bound here rather than beside the functions they call: a registration is a statement and runs
+  // where it sits, and every name it uses is either declared above or a function declaration, which
+  // hoists. Bound further up they would have been attached to `undefined` — the `var` that makes
+  // the sheet hoists its name and not its value.
+  shot.addEventListener("pointerdown", function (event) {
+    // A press on the bar is a press on a button, not the start of a region. Without this the drag
+    // would take it: the press would set an empty selection, the release would clear it and disable
+    // "Use this part" — and the button would be disabled by the very event that was about to press
+    // it. Measured in Chrome, where the first version of this handler did exactly that.
+    if (shotBar.contains(event.target)) {
+      return;
+    }
+    var drawn = drawnFrame();
+    if (!drawn) {
+      return;
+    }
+    var point = clampToFrame(event.clientX, event.clientY, drawn);
+    dragFrom = point;
+    selection = { left: point.x, top: point.y, width: 0, height: 0 };
+    drawSelection();
+    if (shot.setPointerCapture) {
+      shot.setPointerCapture(event.pointerId);
+    }
+    event.preventDefault();
+  });
+
+  shot.addEventListener("pointermove", function (event) {
+    var drawn = drawnFrame();
+    if (!drawn || !dragFrom) {
+      return;
+    }
+    var point = clampToFrame(event.clientX, event.clientY, drawn);
+    selection = {
+      left: Math.min(dragFrom.x, point.x),
+      top: Math.min(dragFrom.y, point.y),
+      width: Math.abs(point.x - dragFrom.x),
+      height: Math.abs(point.y - dragFrom.y)
+    };
+    drawSelection();
+  });
+
+  shot.addEventListener("pointerup", function (event) {
+    // The release of a press that never became a drag: a click on the bar, or a press that landed
+    // before the frame was drawn. There is no region to finish.
+    if (!dragFrom) {
+      return;
+    }
+    dragFrom = null;
+    // A press with no drag is not a region. Deselecting is the reading a person expects from a
+    // stray click, and sending a four-pixel picture would be the one they do not.
+    if (selection && (selection.width < 4 || selection.height < 4)) {
+      selection = null;
+      drawSelection();
+    }
+    event.preventDefault();
+  });
+
+  shot.addEventListener("keydown", function (event) {
+    // Answered here and stopped, because the page underneath has its own Escape (which closes the
+    // panel) and its own Enter. Without this, one Escape would do two things at once.
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closeShot();
+      restorePanel();
+      return;
+    }
+    if (event.key === "Enter" && selection) {
+      event.preventDefault();
+      event.stopPropagation();
+      useSelection();
+    }
+  });
+
   form.appendChild(input);
   form.appendChild(attach);
+  form.appendChild(capture);
   form.appendChild(picker);
   form.appendChild(send);
   form.appendChild(stop);
@@ -607,6 +955,9 @@
   panel.appendChild(link);
   root.appendChild(panel);
   root.appendChild(ball);
+  // Last, and outside the panel: it covers the viewport, and it is shown at the one moment the
+  // panel is not.
+  root.appendChild(shot);
   host.appendChild(root);
 
   function show(open) {

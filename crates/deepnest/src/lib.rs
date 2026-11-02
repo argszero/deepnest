@@ -28,6 +28,7 @@
 //! and a type that can hold an arbitrary header belongs with the code that forwards them.
 
 pub mod cancel;
+pub mod capture;
 pub mod chat;
 pub mod config;
 pub mod escalation;
