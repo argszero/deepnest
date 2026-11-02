@@ -585,14 +585,53 @@ pub fn watched(
         TurnOutcome::Answered { rounds, .. } | TurnOutcome::RoundLimit { rounds, .. } => *rounds,
         TurnOutcome::Cancelled { .. } => 0,
     };
+    let text = text_of(&outcome, outcome.text().to_string());
+    // How the turn ended, in the loop's own three words. It is in the body because a caller cannot
+    // otherwise tell the two that share every other field: a turn the model finished and a turn the
+    // budget stopped both answer `200`, both carry `cancelled: false`, and both carry a `rounds`
+    // count — the count alone is a number, not a verdict.
+    let outcome_name = match &outcome {
+        TurnOutcome::Answered { .. } => "answered",
+        TurnOutcome::Cancelled { .. } => "cancelled",
+        TurnOutcome::RoundLimit { .. } => "round_limit",
+    };
     Reply {
         status: 200,
         body: json!({
-            "text": outcome.text(),
+            "text": text,
+            "outcome": outcome_name,
             "rounds": rounds,
             "cancelled": matches!(outcome, TurnOutcome::Cancelled { .. }),
             "changed": changed.load(Ordering::SeqCst),
         }),
+    }
+}
+
+/// What the user sees, which is not always the model's own words.
+///
+/// A turn the round budget stopped is the one ending that was silent: `TurnOutcome::text` hands back
+/// the model's last words, and the model asked for a tool instead of writing any, so the answer
+/// arrived empty with nothing to explain it. The loop already records why it stopped — "the round
+/// budget of 540 ran out with the model still asking for work" is a `note` in `history.jsonl` — and
+/// [`crate::chat::Reply`] handed the caller none of it. Read on a transcript that note is an
+/// explanation; read in the dialog it is a page that answered nothing at all.
+///
+/// The sentence is the shape `crates/agent` already gives a subagent's caller, for the same reason:
+/// whoever asked has to know the work is unfinished to decide whether to ask for more of it.
+fn text_of(outcome: &TurnOutcome, words: String) -> String {
+    let TurnOutcome::RoundLimit { rounds, .. } = outcome else {
+        return words;
+    };
+    let note = format!(
+        "[the turn hit its round budget of {rounds} and did not finish — nothing further was run. \
+         Sending another message picks it up from here]"
+    );
+    // The model's own words when it had any, the note alone when it had none: an answer that opens
+    // with a blank line reads as a bug rather than as a cut.
+    if words.trim().is_empty() {
+        note
+    } else {
+        format!("{}\n\n{note}", words.trim_end())
     }
 }
 
@@ -685,6 +724,34 @@ mod tests {
         seen: std::sync::Mutex<Vec<Vec<Message>>>,
         /// What each request was told it could call — the other half of the prompt's tool section.
         offered: std::sync::Mutex<Vec<Vec<ToolDefinition>>>,
+    }
+
+    /// A model that never stops asking for a tool, so the only ending a turn can reach is the budget.
+    ///
+    /// It asks for a tool that does not exist, which is deliberate twice: the dispatch is a name
+    /// lookup, so full-budget turns cost no process, and a call that cannot run is the least
+    /// interesting thing a turn can do — what is under test is the ending, not the work.
+    struct Relentless;
+
+    impl Model for Relentless {
+        fn turn(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+        ) -> Result<AssistantTurn, LlmError> {
+            Ok(AssistantTurn {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call-1".to_string(),
+                    kind: "function".to_string(),
+                    function: deepnest_llm::FunctionCall {
+                        name: "no_such_tool".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }],
+                finish_reason: FinishReason::ToolCalls,
+            })
+        }
     }
 
     impl Scripted {
@@ -1094,6 +1161,7 @@ mod tests {
         );
         assert_eq!(reply.status, 200, "{}", reply.body);
         assert_eq!(reply.body["text"], "Bread, milk.");
+        assert_eq!(reply.body["outcome"], "answered", "{}", reply.body);
         assert_eq!(reply.body["changed"], false);
         assert_eq!(reply.body["rounds"], 1);
 
@@ -1103,6 +1171,58 @@ mod tests {
         let text = std::fs::read_to_string(&history).unwrap();
         assert!(text.contains("what is on the list?"), "{text}");
         assert!(text.contains("Bread, milk."), "{text}");
+    }
+
+    /// A turn the round budget stopped must not answer as though it had finished.
+    ///
+    /// Measured on the real binary before this test existed: a model that kept asking for a tool ran
+    /// the budget out and the route answered
+    /// `{"cancelled":false,"changed":false,"rounds":540,"text":""}` with `event: done` on the
+    /// streamed arm. Every field said nothing was wrong, `text` was empty because the model had
+    /// asked for a tool instead of writing, and the dialog draws `text` — so the page showed an empty
+    /// answer to a turn that had been cut off mid-work. The loop had recorded why ("the round budget
+    /// of 540 ran out with the model still asking for work" is a note in `history.jsonl`), so the
+    /// silence was the reply's alone.
+    ///
+    /// Two readings are pinned, because either one alone is passed by a half-fix: the body names the
+    /// ending, and the text carries a sentence. A client that reads the field and a person who only
+    /// reads the answer both end up knowing.
+    #[test]
+    fn a_turn_the_round_budget_stopped_says_so_instead_of_answering_nothing() {
+        let scratch = Scratch::new("round-limit");
+        let reply = answer(
+            Arc::new(Relentless),
+            &scratch.home,
+            &scratch.app_dir(),
+            &scratch.slug(),
+            &ask_of("rewrite the app"),
+            &Terms::default(),
+        );
+
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        assert_eq!(reply.body["outcome"], "round_limit", "{}", reply.body);
+        assert_eq!(reply.body["rounds"], 540, "{}", reply.body);
+        // `cancelled` stays false, and that is not a lie: nobody pressed stop. It was never the
+        // field that could carry this ending, which is why the body needed one that can.
+        assert_eq!(reply.body["cancelled"], false, "{}", reply.body);
+
+        let text = reply.body["text"].as_str().unwrap();
+        assert!(text.contains("hit its round budget of 540"), "{text}");
+        assert!(text.contains("did not finish"), "{text}");
+        // The model wrote nothing, so the answer is the note rather than a blank line above it.
+        assert!(
+            text.starts_with('['),
+            "the answer opens with something else: {text:?}"
+        );
+
+        // And the transcript's own note agrees with the reply rather than contradicting it: the
+        // reader of one and the reader of the other must not be told different things.
+        let history = AgentPaths::for_app(scratch.app_dir()).history();
+        let recorded = std::fs::read_to_string(&history).unwrap();
+        assert!(
+            recorded.contains("the round budget of 540 ran out"),
+            "{recorded}"
+        );
     }
 
     #[test]
