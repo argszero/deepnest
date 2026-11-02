@@ -121,6 +121,25 @@
   stop.textContent = "Stop";
   stop.hidden = true;
 
+  // A stop that has been asked for and has not happened yet.
+  //
+  // The route answers "the turn was asked to stop; it ends before its next request or tool call",
+  // which is the truth — the flag is read at the loop's own checkpoints, so a turn in the middle of
+  // a model call goes on until that call returns. Measured on this page: pressing Stop during a
+  // model call changed nothing a person could see for tens of seconds, because the button kept
+  // saying "Stop" and the progress line underneath it went on counting. That is the reading the
+  // host reported as "pressing stop does not stop".
+  //
+  // So the press is said at the press. The button is the one place nothing else writes to: the
+  // answer box belongs to the model's stream while it is writing, and the progress line is
+  // rewritten every second by the poller below.
+  var stopping = false;
+
+  // What the control reads while a stop is in flight, and what it reads again once the turn has
+  // ended. One spelling each, because a label written in two places drifts.
+  var STOP_LABEL = "Stop";
+  var STOPPING_LABEL = "Stopping\u2026";
+
   // `role="status"` with `aria-live` announces the answer without moving focus out of the box,
   // so a second message can follow the first.
   //
@@ -1010,12 +1029,37 @@
     }
   }
 
+  // The line that takes over from the counter once a stop has been asked for.
+  //
+  // Written straight to the box rather than through `showProgress`, which refuses while `stopping`
+  // is set — that refusal is what keeps the counter from coming back, and it would swallow this
+  // too. While the model is writing, the box is the model's and this leaves it alone: the button
+  // already says the same words, and a line the next token would overwrite is worse than none.
+  function showStopping(text) {
+    if (typing) {
+      return;
+    }
+    answer.textContent = text;
+    drawAgain();
+    answer.classList.remove("bad");
+    answer.classList.add("live");
+    // Announced once, unlike the counter: a person who pressed Stop needs to hear that it was
+    // heard, and this sentence does not rewrite itself every second.
+    answer.setAttribute("aria-live", "polite");
+  }
+
   // The line under the box *while* the turn runs.
   //
   // It turns the announcement off rather than leaving it on: a region that changes every second is
   // a screen reader reading a new sentence every second, which is worse than silence. The answer
   // that matters comes through `say` above, at the end.
   function showProgress(text) {
+    if (stopping) {
+      // A stop has been asked for. The counter is a claim that work is progressing, and once the
+      // person has ended it that claim is the wrong one: the turn is finishing what it was in the
+      // middle of, not getting further.
+      return;
+    }
     if (typing) {
       // The model has stopped thinking and started writing. Its own words are a better account of
       // the turn than a counter, and replacing them mid-sentence every second would be this page
@@ -2541,6 +2585,11 @@
     // sits under — every exit from a turn goes through here, whichever way the turn ended.
     stop.hidden = true;
     stop.disabled = false;
+    // The turn is over, however it ended, so a stop is no longer in flight. Clearing this here
+    // rather than at each exit is what keeps the two in step: every exit from a turn goes through
+    // this function, and a flag left standing would silence the next turn's progress line.
+    stopping = false;
+    stop.textContent = STOP_LABEL;
   }
 
   // "Working — round 3, 9 tool calls, 12s". The count is what separates a turn that is thinking
@@ -2616,6 +2665,8 @@
     // way out of it.
     stop.hidden = false;
     stop.disabled = false;
+    stop.textContent = STOP_LABEL;
+    stopping = false;
     // Read once immediately rather than a second from now: the first thing the person sees after
     // pressing send must not be the word the last 112 seconds were spent on.
     readHistory();
@@ -3116,6 +3167,16 @@
           // has to be able to put it back. A second `text` here is scoped to this callback, so it
           // would shadow that one for the failures as well as for the answer.
           var words = result.body.text;
+          if (result.body.cancelled) {
+            // The note the loop writes says the turn was cancelled; it cannot say by whom. This
+            // page knows, and the difference is the whole reading: a turn that stopped itself is
+            // something to look into, and one the person ended is the page working.
+            words =
+              "Stopped at your request, after " +
+              Math.round((Date.now() - sentAt) / 1000) +
+              "s.\n\n" +
+              words;
+          }
           if (result.body.changed) {
             // The turn came back as soon as it had written; the build it started is still running.
             // Saying "reload to see it" was the whole defect — nothing had been built to see — so
@@ -3193,7 +3254,13 @@
     if (!slug) {
       return;
     }
+    // Said here, before the request leaves. Waiting for the reply to say it is what made a stop
+    // look inert: the round trip is quick, but the wait this has to cover is the model call the
+    // turn is already inside, and for those seconds the page said nothing at all.
+    stopping = true;
     stop.disabled = true;
+    stop.textContent = STOPPING_LABEL;
+    showStopping("Stopping \u2014 this ends before the turn's next request or tool call.");
     fetch(stoppingRoute(), {
       method: "POST",
       credentials: "same-origin",
@@ -3211,14 +3278,19 @@
         );
       })
       .then(function (result) {
-        stop.disabled = false;
         if (result.status === 200 && result.body && typeof result.body.note === "string") {
           // The turn is not over yet — the loop reads the flag before its next request and before
           // every tool call of a batch — so this says what was asked rather than what has
-          // happened. The line it replaces is the progress counter, which is still running.
-          showProgress(result.body.note);
+          // happened. The control stays as it is, disabled and reading "Stopping…": the turn is
+          // still running, and the only thing a second press could do is ask again.
+          showStopping("Stopping \u2014 " + result.body.note);
           return;
         }
+        // A stop that did not arrive is not a stop: the turn is still spending, so the control
+        // goes back to being one a person can press.
+        stopping = false;
+        stop.disabled = false;
+        stop.textContent = STOP_LABEL;
         if (result.status === 401) {
           say("This page's permission to stop has expired — reload the page and try again.", true);
           return;
@@ -3226,7 +3298,9 @@
         say("The stop did not reach deepnest (" + result.status + ").", true);
       })
       .catch(function () {
+        stopping = false;
         stop.disabled = false;
+        stop.textContent = STOP_LABEL;
         say("The stop did not reach deepnest. Is it still running?", true);
       });
   });

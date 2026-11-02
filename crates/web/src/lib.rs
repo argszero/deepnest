@@ -2981,6 +2981,61 @@ mod tests {
     }
 
     #[test]
+    fn a_stop_is_said_when_it_is_pressed_and_not_when_the_reply_arrives() {
+        // The reported defect: "pressing stop does not stop". The handler was wired — the press
+        // reached `POST .../cancel` and the server set the flag — but the route's whole answer is
+        // "the turn was asked to stop; it ends before its next request or tool call", and the page
+        // waited for that reply before saying anything while the button went on reading "Stop".
+        // For the tens of seconds a model call takes, the page said nothing at all.
+        let press = &DIALOG_SCRIPT[DIALOG_SCRIPT
+            .find(r#"stop.addEventListener("click""#)
+            .expect("the control has no press handler")..];
+        let press = &press[..press.find("fetch(stoppingRoute()").expect("it posts")];
+        assert!(
+            press.contains("STOPPING_LABEL"),
+            "the control does not say it is stopping: {press}"
+        );
+        assert!(
+            press.contains("stopping = true"),
+            "the press is not recorded until the reply arrives: {press}"
+        );
+        // The counter is a claim that work is progressing, and after a stop that claim is false —
+        // left alone it rewrites the stop line every second and the press reads as ignored again.
+        let progress = &DIALOG_SCRIPT[DIALOG_SCRIPT
+            .find("function showProgress(text)")
+            .expect("the progress line is written somewhere")..];
+        let progress = &progress[..progress.find("\n  }").expect("the function ends")];
+        assert!(
+            progress.contains("if (stopping)"),
+            "the progress counter overwrites the stop: {progress}"
+        );
+        // A writer of its own, because `showProgress` is what refuses now.
+        assert!(
+            DIALOG_SCRIPT.contains("function showStopping("),
+            "the stop has no line of its own to say it on"
+        );
+        // The turn comes back `cancelled`, and the loop's note cannot say by whom. A stop the
+        // person asked for must not read like a turn that failed on its own.
+        assert!(
+            DIALOG_SCRIPT.contains("Stopped at your request"),
+            "a stopped turn is not told apart from a broken one"
+        );
+        // And every exit puts the control back, or the next turn's progress line is silenced.
+        let watching = &DIALOG_SCRIPT[DIALOG_SCRIPT
+            .find("function stopWatching()")
+            .expect("the turn is watched somewhere")..];
+        let watching = &watching[..watching.find("\n  }").expect("the function ends")];
+        assert!(
+            watching.contains("stopping = false"),
+            "a stop is left standing after its turn ended: {watching}"
+        );
+        assert!(
+            watching.contains("STOP_LABEL"),
+            "the control does not read Stop again for the next turn: {watching}"
+        );
+    }
+
+    #[test]
     fn the_dialog_says_what_a_running_turn_is_doing_and_stops_when_it_ends() {
         // The measured defect: one turn ran 112 seconds and 24 rounds and the page said a single
         // word for all of it, so a turn that had rewritten the app read as a turn that never ran.
