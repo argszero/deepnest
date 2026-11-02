@@ -1232,14 +1232,32 @@ mod tests {
             rule.contains("max-height: none"),
             "the 78vh ceiling is still there, so the expanded panel is no taller than the small one"
         );
+        // `inset: 0` is not enough and was measured not enough: a classic scrollbar — every Windows
+        // build — takes 15 px of the layout viewport, so a sheet sized by the offsets stopped 15 px
+        // short on a page that scrolls and left a strip of the app down its right-hand edge. The
+        // units are the viewport's, which include that gutter, and the page is held still besides.
         assert!(
-            rule.contains("inset: 0"),
-            "the sheet stops short of the window it was just given, so the app shows through \
-             around a box that is already asking to be a page"
+            rule.contains("width: 100vw") && rule.contains("height: 100vh"),
+            "the sheet is sized by the layout viewport, so a classic scrollbar leaves a strip of \
+             the app showing down the edge of a page that scrolls"
         );
         assert!(
             rule.contains("max-height: none"),
             "a ceiling survived into the expanded rule"
+        );
+        assert!(
+            DIALOG_STYLE.contains("html.deepnest-dialog-locked"),
+            "nothing stops the page scrolling behind a sheet that covers it"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("deepnest-dialog-locked"),
+            "the stylesheet has a lock no code ever takes"
+        );
+        // Taken and given back from both halves of the state — the expansion and whether the panel is
+        // on screen — because an expanded panel that has been closed has to hand the page back.
+        assert!(
+            DIALOG_SCRIPT.contains("expanded && !panel.hidden"),
+            "the page stays locked after the panel is closed, so the app cannot scroll at all"
         );
 
         // The measure the sheet gave up did not disappear: it moved to the column inside it, which

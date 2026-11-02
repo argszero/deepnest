@@ -271,11 +271,30 @@
  * a scrim over the page belongs to a sheet that leaves the page visible, and this one does not. */
 #deepnest-dialog-panel[data-expanded="yes"] {
   position: fixed;
-  inset: 0;
-  width: auto;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
   max-height: none;
   border: 0;
   border-radius: 0;
+}
+
+/* The page does not scroll behind a sheet that covers it.
+ *
+ * Two reasons, and the second is the one a person feels. A page that scrolls under an opaque sheet
+ * is a page being moved where nobody can see it, so closing the dialog puts the app somewhere the
+ * person did not take it. And a classic scrollbar — every Windows build this ships to — takes 15 px
+ * of the layout viewport, so `inset: 0` on the sheet stopped exactly 15 px short and left that strip
+ * of the app showing down the right-hand edge. `overflow: hidden` on the root removes the scrollbar,
+ * the layout viewport becomes the whole window, and the measurement below is what confirmed the
+ * scroll position survives the lock and the unlock.
+ *
+ * The class goes on the document element rather than an inline style on the app's `body`: this file
+ * may only ever borrow the page, and a class it added can be taken away again without this code
+ * knowing what the app's own `overflow` was. */
+html.deepnest-dialog-locked {
+  overflow: hidden;
 }
 
 /* The measure the sheet gave up. Every child of the panel sits in one centred column, so the

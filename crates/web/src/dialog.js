@@ -1020,6 +1020,25 @@
     expand.title = next
       ? "Back to the small window (Esc)"
       : "Fill the window with this conversation, full screen (Esc)";
+    holdThePage();
+  }
+
+  // A full-screen sheet is the page for as long as it is up, so the page underneath stops moving:
+  // a scroll wheel over a transcript that has reached its end would otherwise walk the app somewhere
+  // nobody can see. It is also what makes the sheet reach the edges — a classic scrollbar takes 15 px
+  // of the layout viewport on every Windows build, and that strip of app showing down the right-hand
+  // edge is what this was measured on.
+  //
+  // The lock is on the document element and only while the sheet is actually on screen: an expanded
+  // panel that has been closed leaves the page scrollable again, which is why this is called from
+  // both places that change either half rather than from `setExpanded` alone.
+  function holdThePage() {
+    var holding = expanded && !panel.hidden;
+    if (holding) {
+      document.documentElement.classList.add("deepnest-dialog-locked");
+    } else {
+      document.documentElement.classList.remove("deepnest-dialog-locked");
+    }
   }
 
   expand.addEventListener("click", function () {
@@ -1029,6 +1048,7 @@
   function show(open) {
     panel.hidden = !open;
     ball.setAttribute("aria-expanded", open ? "true" : "false");
+    holdThePage();
     if (open) {
       // Read before focus: the transcript is what the person came to see, and asking for it here
       // is also what makes the page's first open after a rebuild show the turn that caused it.
