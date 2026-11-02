@@ -34,6 +34,14 @@ use crate::session::{fit_tail, Record, Session};
 /// network and no HTTP adapter, and the adapter itself (which lives in `crates/gateway`) can be
 /// swapped without touching the loop.
 pub trait Model: Send + Sync {
+    /// The model this asks, when it knows. Recorded in the app's model log beside the request, so
+    /// a log read a week later says which model produced an answer — the config file it came from
+    /// may have changed since. `None` for a model with no name to give, which is every fake in a
+    /// test and no reason to make one write a stub.
+    fn model_name(&self) -> Option<&str> {
+        None
+    }
+
     /// One turn: the messages in, the reply out.
     fn turn(
         &self,
@@ -208,6 +216,10 @@ pub struct Agent {
     /// a request then comes back as a refusal saying so — which is the honest answer for an agent
     /// with no page in front of it, and is what every test without a person attached gets.
     approver: Option<Arc<dyn Approver>>,
+    /// Where every request and its answer are recorded, when the caller wants them recorded.
+    /// `None` is the default: a test has no app directory, and a turn that had to invent one to
+    /// keep a log would be a turn that writes where it was not asked to.
+    llm_log: Option<crate::llmlog::LlmLog>,
 }
 
 impl Agent {
@@ -228,7 +240,17 @@ impl Agent {
             system: system.into(),
             limits: Limits::default(),
             approver: None,
+            llm_log: None,
         }
+    }
+
+    /// Record every request this turn sends and what came back, in this file.
+    ///
+    /// The log is diagnostic and its failure is not the turn's: a full disk costs the record, not
+    /// the work. What is written, and why the file is not `history.jsonl`, is in [`crate::llmlog`].
+    pub fn with_llm_log(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.llm_log = Some(crate::llmlog::LlmLog::new(path));
+        self
     }
 
     pub fn with_limits(mut self, limits: Limits) -> Self {
@@ -317,9 +339,16 @@ impl Agent {
                 return Ok(self.cancel_note(round));
             }
             let messages = self.request_messages(budget)?;
+            // What was sent is recorded before the answer is acted on: a request that is then
+            // answered with a failure is exactly the one somebody comes to this file to read.
+            self.record_request(&messages, &definitions)?;
             let turn = match self.model.turn_with(&messages, &definitions, &mut *on_text) {
-                Ok(turn) => turn,
+                Ok(turn) => {
+                    self.record_answer(&turn)?;
+                    turn
+                }
                 Err(error) => {
+                    self.record_failure(&error)?;
                     // A refusal is an answer about the content; a length complaint is an answer
                     // about the request. Only the second is worth acting on, and only twice.
                     if error.kind == deepnest_llm::FailureKind::ContentRisk {
@@ -547,6 +576,55 @@ impl Agent {
         Ok(messages)
     }
 
+    /// Write the request half of an exchange, when a log was asked for.
+    fn record_request(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> Result<(), AgentError> {
+        let Some(log) = &self.llm_log else {
+            return Ok(());
+        };
+        let record = crate::llmlog::Request::now(
+            self.model.model_name().unwrap_or("unknown"),
+            messages,
+            tools,
+        );
+        self.note_a_log_failure(log.append(&record))
+    }
+
+    /// Write what the model answered, with the cost the provider reported for it.
+    fn record_answer(&self, turn: &AssistantTurn) -> Result<(), AgentError> {
+        let Some(log) = &self.llm_log else {
+            return Ok(());
+        };
+        let record = crate::llmlog::Response::answered(turn);
+        self.note_a_log_failure(log.append(&record))
+    }
+
+    /// Write a failed call, with its status and the provider's own words.
+    ///
+    /// Recorded even though the loop may recover from it — a shrunk request that then succeeds
+    /// leaves a conversation that says nothing about the `400` that made it shrink, and that is
+    /// the failure somebody reads this file to find.
+    fn record_failure(&self, error: &LlmError) -> Result<(), AgentError> {
+        let Some(log) = &self.llm_log else {
+            return Ok(());
+        };
+        let record = crate::llmlog::Response::failed(error);
+        self.note_a_log_failure(log.append(&record))
+    }
+
+    /// A log that cannot be written costs the record, never the turn: this file is a diagnostic,
+    /// and an agent that stopped working because its log directory was full would be trading the
+    /// work for the account of it. Said out loud once, in the conversation, so it is not silent.
+    fn note_a_log_failure(&self, written: std::io::Result<()>) -> Result<(), AgentError> {
+        if let Err(error) = written {
+            self.note(format!("the model log could not be written: {error}"))?;
+        }
+        Ok(())
+    }
+
     fn append(&self, message: &Message) -> Result<(), AgentError> {
         self.session
             .append_message(message)
@@ -631,6 +709,20 @@ mod tests {
             content: Some(text.to_string()),
             tool_calls: Vec::new(),
             finish_reason: FinishReason::Stop,
+            usage: deepnest_llm::Usage::default(),
+        }
+    }
+
+    /// The same answer, with the cost a provider reports for it.
+    fn answer_costing(text: &str, prompt_tokens: u64, completion_tokens: u64) -> AssistantTurn {
+        AssistantTurn {
+            usage: deepnest_llm::Usage {
+                prompt_tokens,
+                completion_tokens,
+                total_tokens: prompt_tokens + completion_tokens,
+                cached_tokens: Some(prompt_tokens / 2),
+            },
+            ..answer(text)
         }
     }
 
@@ -639,6 +731,7 @@ mod tests {
             content: None,
             tool_calls: calls,
             finish_reason: FinishReason::ToolCalls,
+            usage: deepnest_llm::Usage::default(),
         }
     }
 
@@ -689,6 +782,115 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.base);
         }
+    }
+
+    /// What a turn sent and what it cost, in the app's own file.
+    ///
+    /// The conversation says what was said; only this file says what each request cost, which is
+    /// the one number a token bill cannot be reconstructed from afterwards.
+    #[test]
+    fn a_turn_records_every_request_and_what_it_cost() {
+        let scratch = Scratch::new("llm-log");
+        let model = ScriptedModel::new(vec![
+            Ok(asks(vec![call("read", "{}")])),
+            Ok(answer_costing("done", 900, 30)),
+        ]);
+        let log = scratch.base.join("llm.jsonl");
+        let agent = scratch.agent(model).with_llm_log(&log);
+
+        let outcome = agent.run_turn("do it", &Cancellation::new()).unwrap();
+        assert_eq!(outcome.text(), "done");
+
+        let text = std::fs::read_to_string(&log).expect("the log was written");
+        let records: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        // Two rounds: the model asked for a tool, then answered. Four records, in order.
+        assert_eq!(records.len(), 4, "{text}");
+        assert_eq!(records[0]["type"], "request");
+        assert_eq!(records[1]["type"], "response");
+        assert_eq!(
+            records[1]["finish_reason"], "tool_calls",
+            "the provider's own word for why it stopped: {text}"
+        );
+        assert_eq!(records[2]["type"], "request");
+        assert_eq!(records[3]["type"], "response");
+        assert_eq!(records[3]["content"], "done");
+        assert_eq!(records[3]["finish_reason"], "stop");
+        assert_eq!(
+            records[3]["usage"]["prompt_tokens"], 900,
+            "the cost the provider reported is what makes this file worth keeping: {text}"
+        );
+        assert_eq!(
+            records[3]["usage"]["cached_tokens"], 450,
+            "and which part of it was served from a cache: {text}"
+        );
+
+        // The request record is the whole body, because "what did we actually send" is the
+        // question a wrong answer sends a reader back to.
+        let first = &records[0];
+        assert_eq!(first["messages"][0]["role"], "system");
+        assert!(
+            first["messages"]
+                .as_array()
+                .is_some_and(|messages| messages.iter().any(|m| m["content"] == "do it")),
+            "the words the person typed are in it: {text}"
+        );
+        assert!(
+            first["tools"]
+                .as_array()
+                .is_some_and(|tools| !tools.is_empty()),
+            "and the tool set the turn could actually dispatch: {text}"
+        );
+    }
+
+    /// A failed call is recorded too, even though the loop may recover from it: a shrunk request
+    /// that then succeeds leaves a conversation that says nothing about the `400` behind it.
+    #[test]
+    fn a_model_call_that_failed_is_also_recorded() {
+        let scratch = Scratch::new("llm-log-failure");
+        let model = ScriptedModel::new(vec![Err(LlmError::classify(
+            Some(400),
+            "context length exceeded",
+        ))]);
+        let log = scratch.base.join("llm.jsonl");
+        let agent = scratch.agent(model).with_llm_log(&log);
+
+        // The loop shrinks and asks again with the same script, so the second call fails too and
+        // the turn ends as an error. What is under test is the record, not the ending.
+        let _ = agent.run_turn("do it", &Cancellation::new());
+
+        let text = std::fs::read_to_string(&log).expect("the log was written");
+        let records: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let failures: Vec<&serde_json::Value> = records
+            .iter()
+            .filter(|record| record["type"] == "response")
+            .collect();
+        assert!(!failures.is_empty(), "{text}");
+        assert_eq!(failures[0]["http_status"], 400, "{text}");
+        assert_eq!(failures[0]["error"], "context length exceeded", "{text}");
+        assert!(
+            failures[0].get("content").is_none(),
+            "a failure answers nothing and must not claim it did: {text}"
+        );
+    }
+
+    /// No log asked for, no file written: a turn in a test writes where it was asked to and
+    /// nowhere else.
+    #[test]
+    fn a_turn_without_a_log_writes_none() {
+        let scratch = Scratch::new("llm-log-absent");
+        let model = ScriptedModel::new(vec![Ok(answer("hi"))]);
+        let agent = scratch.agent(model);
+        agent.run_turn("do it", &Cancellation::new()).unwrap();
+        assert!(
+            !scratch.base.join("llm.jsonl").exists(),
+            "a log nobody asked for is not created"
+        );
     }
 
     #[test]
@@ -1041,6 +1243,7 @@ mod tests {
             content: None,
             tool_calls: Vec::new(),
             finish_reason: FinishReason::ContentFilter,
+            usage: deepnest_llm::Usage::default(),
         })]);
         let agent = scratch.agent(model);
         let error = agent

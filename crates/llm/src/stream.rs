@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-use crate::model::{FunctionCall, ToolCall};
+use crate::model::{FunctionCall, ToolCall, Usage};
 
 /// One dispatched server-sent event.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -202,6 +202,20 @@ impl FinishReason {
         matches!(self, Self::Length)
     }
 
+    /// The word the provider used, which is what a reader of a log is looking for. A reason this
+    /// version does not know is returned as the provider spelled it; an absent one says so rather
+    /// than borrowing another word for it.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Stop => "stop",
+            Self::Length => "length",
+            Self::ToolCalls => "tool_calls",
+            Self::ContentFilter => "content_filter",
+            Self::Other(other) => other,
+            Self::Absent => "absent",
+        }
+    }
+
     /// The model asked for tools, so the caller owes it a result.
     pub fn is_tool_call(&self) -> bool {
         matches!(self, Self::ToolCalls)
@@ -251,6 +265,12 @@ pub struct StreamChoice {
 pub struct StreamChunk {
     #[serde(default)]
     pub choices: Vec<StreamChoice>,
+    /// What the request cost so far, on the chunks that say — see [`crate::model::StreamOptions`].
+    ///
+    /// It arrives on a chunk of its own, one with **no choices at all**, which is why the
+    /// accumulator reads it before the early return that ignores a choice-less chunk.
+    #[serde(default)]
+    pub usage: Option<Usage>,
 }
 
 /// The finished turn: what the model said, what it asked for, and why it stopped.
@@ -259,6 +279,8 @@ pub struct AssistantTurn {
     pub content: Option<String>,
     pub tool_calls: Vec<ToolCall>,
     pub finish_reason: FinishReason,
+    /// What this one request cost, as the provider reported it. Default (zero) when it did not say.
+    pub usage: Usage,
 }
 
 /// Assembles a streamed turn from its deltas.
@@ -271,6 +293,7 @@ pub struct TurnAccumulator {
     content: String,
     calls: BTreeMap<u32, PartialCall>,
     finish_reason: FinishReason,
+    usage: Usage,
 }
 
 #[derive(Debug, Default)]
@@ -285,8 +308,12 @@ impl TurnAccumulator {
         Self::default()
     }
 
-    /// Apply one `data:` payload. Chunks with no choices (a keep-alive) change nothing.
+    /// Apply one `data:` payload. Chunks with no choices (a keep-alive) change nothing — except the
+    /// one that carries only a cost, which is exactly how a streamed answer reports it.
     pub fn apply(&mut self, chunk: &StreamChunk) {
+        if let Some(usage) = chunk.usage {
+            self.usage = usage;
+        }
         // deepnest never asks for `n > 1`, so only the first choice carries the turn.
         let Some(choice) = chunk.choices.first() else {
             return;
@@ -352,6 +379,7 @@ impl TurnAccumulator {
             },
             tool_calls,
             finish_reason: self.finish_reason,
+            usage: self.usage,
         }
     }
 }

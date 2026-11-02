@@ -185,6 +185,8 @@ cause.
 │   ├── target/              build output
 │   └── .agent/
 │       ├── history.jsonl    conversation, replayable per turn
+│       ├── llm.jsonl        every request sent and what came back, cost included
+│       ├── llm.jsonl.1/.2   the two rotations kept beside it
 │       └── memory/*.md      long-term memory + MEMORY.md index
 └── logs/<slug>.log          one log per app, read from its end
 ```
@@ -192,6 +194,13 @@ cause.
 Three rules carry weight here:
 
 - **Agent state lives inside the app directory**, so deleting an app deletes its agent's history and memory with it, and backing an app up backs them up too (`host 20:58` — memory is part of "EMRG-level capability", not an optional feature).
+- **What a request cost is recorded beside the conversation, not in it.** `history.jsonl` says
+  what was said; `llm.jsonl` says what each request carried, what the endpoint answered, and what
+  it charged — and none of those can be read out of the other. A token count cannot be derived
+  from text, the same history is charged again on every round it is replayed in, and a `400` the
+  loop then shrank away leaves no trace in a conversation that recovered. The log is diagnostic:
+  a turn whose log cannot be written still runs, and the file rotates into two backups past 50 MB
+  because a request record holds the whole context it sent.
 - **The agent's history is not stored in `app.sqlite`.** That database belongs to the user's app, and a second writer on it is exactly the `database is locked` failure the WAL measurement already documented.
 - **A directory is an app because `deepnest.toml` says so** (`decided in implementation, 2026-10-31`). Treating every directory under `apps/` as an app has no way to report a broken one: it would be listed as an app whose source happens to be missing, and the failure would surface much later as a build error about a file nobody was editing. The manifest also carries the template version the app was created from — recorded now, because the cheap moment to start recording it is before there is anything to migrate.
 

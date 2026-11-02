@@ -34,7 +34,8 @@ pub use client::{
 };
 pub use error::{FailureKind, LlmError};
 pub use model::{
-    ChatRequest, ChatResponse, Choice, FunctionCall, Message, ToolCall, ToolDefinition,
+    ChatRequest, ChatResponse, Choice, FunctionCall, Message, StreamOptions, ToolCall,
+    ToolDefinition, Usage,
 };
 pub use retry::RetryPolicy;
 pub use stream::{AssistantTurn, FinishReason, SseDecoder, SseEvent, TurnAccumulator};

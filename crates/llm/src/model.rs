@@ -301,6 +301,104 @@ pub struct ToolSpec {
     pub parameters: serde_json::Value,
 }
 
+/// What one request cost, as the provider counts it.
+///
+/// Carried because there is no way to work it out afterwards: a token count is not derivable from
+/// the text, and the same history is charged again on every round it is replayed in — so the only
+/// number that answers "what did this turn cost" is the one the provider sends back.
+///
+/// **Zero means "not reported", not "free"** ([`Usage::reported`]). A provider that says nothing and
+/// one that says nothing useful are the same answer to the person asking, and reporting the first
+/// as a cost of zero would be a lie about a bill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub struct Usage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    /// Prompt tokens the provider says it served from its own cache, when it says so at all.
+    ///
+    /// Two spellings on the wire and both are read: OpenAI nests it under
+    /// `prompt_tokens_details.cached_tokens`, DeepSeek reports `prompt_cache_hit_tokens` beside the
+    /// counts. It is carried because it is the one number that answers whether a history re-sent
+    /// every round is still being paid for at full price or served from a cache the provider keeps
+    /// — on a long turn that difference is most of the bill.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<u64>,
+}
+
+impl Usage {
+    /// Whether the provider reported anything at all.
+    pub fn reported(&self) -> bool {
+        self.prompt_tokens > 0 || self.completion_tokens > 0 || self.total_tokens > 0
+    }
+
+    /// This cost plus another, for a turn made of several requests.
+    ///
+    /// The cache count is `None` unless some request reported one: adding `None` to a number would
+    /// turn "this provider never says" into "nothing was cached", which is the same lie
+    /// [`Self::reported`] exists to avoid.
+    pub fn plus(self, other: Self) -> Self {
+        Self {
+            prompt_tokens: self.prompt_tokens + other.prompt_tokens,
+            completion_tokens: self.completion_tokens + other.completion_tokens,
+            total_tokens: self.total_tokens + other.total_tokens,
+            cached_tokens: match (self.cached_tokens, other.cached_tokens) {
+                (None, None) => None,
+                (one, two) => Some(one.unwrap_or(0) + two.unwrap_or(0)),
+            },
+        }
+    }
+}
+
+/// The wire's spelling of [`Usage`]: three flat counts, and the cache count in one of two places.
+#[derive(Deserialize)]
+struct UsageWire {
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    completion_tokens: u64,
+    #[serde(default)]
+    total_tokens: Option<u64>,
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptTokenDetails>,
+    #[serde(default)]
+    prompt_cache_hit_tokens: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct PromptTokenDetails {
+    #[serde(default)]
+    cached_tokens: Option<u64>,
+}
+
+impl<'de> Deserialize<'de> for Usage {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = UsageWire::deserialize(deserializer)?;
+        let parts = wire.prompt_tokens + wire.completion_tokens;
+        Ok(Self {
+            prompt_tokens: wire.prompt_tokens,
+            completion_tokens: wire.completion_tokens,
+            // A total smaller than its own two parts hides tokens, so the parts win: a computed
+            // number the counts agree with is worth more than a reported one they do not.
+            total_tokens: wire.total_tokens.unwrap_or(parts).max(parts),
+            cached_tokens: wire
+                .prompt_tokens_details
+                .and_then(|details| details.cached_tokens)
+                .or(wire.prompt_cache_hit_tokens),
+        })
+    }
+}
+
+/// Ask a streamed answer to say what it cost.
+///
+/// A whole answer reports usage unasked; a streamed one does not — its final chunk carries counts
+/// only when the request asks. Sent on the streaming path and nowhere else, because on the path
+/// that reports anyway it would be a parameter with nothing to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct StreamOptions {
+    pub include_usage: bool,
+}
+
 /// A chat completion request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatRequest {
@@ -312,6 +410,9 @@ pub struct ChatRequest {
     pub tools: Option<Vec<ToolDefinition>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    /// Ask a streamed answer to report what it cost — see [`StreamOptions`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<StreamOptions>,
 }
 
 impl ChatRequest {
@@ -322,11 +423,25 @@ impl ChatRequest {
             stream: None,
             tools: None,
             temperature: None,
+            stream_options: None,
         }
     }
 
+    /// The same request, streamed, and asking for the answer's cost with it.
     pub fn streaming(mut self) -> Self {
         self.stream = Some(true);
+        self.stream_options = Some(StreamOptions {
+            include_usage: true,
+        });
+        self
+    }
+
+    /// The same request with the ask for a cost removed.
+    ///
+    /// What the client falls back to when an endpoint refuses the body that carries
+    /// `stream_options`: the answer matters more than the number, so the number is what is given up.
+    pub fn without_usage(mut self) -> Self {
+        self.stream_options = None;
         self
     }
 
@@ -340,6 +455,9 @@ impl ChatRequest {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ChatResponse {
     pub choices: Vec<Choice>,
+    /// What the request cost, when the provider says. Absent is an ordinary answer.
+    #[serde(default)]
+    pub usage: Option<Usage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

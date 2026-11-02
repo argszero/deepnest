@@ -166,6 +166,9 @@ impl Client {
             content: choice.message.content,
             tool_calls: choice.message.tool_calls.unwrap_or_default(),
             finish_reason: FinishReason::from_wire(choice.finish_reason.as_deref()),
+            // A whole answer reports its cost unasked; a provider that says nothing leaves this at
+            // zero, which is what `Usage::reported` reads as "not reported" rather than "free".
+            usage: response.usage.unwrap_or_default(),
         })
     }
 
@@ -195,10 +198,22 @@ impl Client {
     ) -> Result<AssistantTurn, LlmError> {
         let streaming = ChatRequest {
             stream: Some(true),
+            // Asked here rather than left to the caller: this is the function that decides the
+            // answer will arrive in pieces, and pieces are exactly what hides the cost. A caller
+            // that has already decided gets what it decided.
+            stream_options: request.stream_options.or(Some(crate::model::StreamOptions {
+                include_usage: true,
+            })),
             ..request.clone()
         };
-        let http = self.build(&streaming)?;
+        let mut http = self.build(&streaming)?;
         let mut attempt = 1;
+        // What a streamed answer is asked for: counts, in a final chunk of their own. Not every
+        // endpoint accepts the parameter, and a 400 for it says nothing about the request itself —
+        // so one such refusal is answered by asking again without it, once, because the answer
+        // matters more than the number.
+        let mut asked_for_usage = streaming.stream_options.is_some();
+        let mut dropped_the_ask = false;
         loop {
             let mut turn = TurnAccumulator::new();
             let mut saw_done = false;
@@ -233,6 +248,22 @@ impl Client {
             match outcome {
                 Err(error) => {
                     let error = self.scrub(error);
+                    // An endpoint that refuses `stream_options` is refusing the parameter, not the
+                    // request: drop it and send the same body again. Only for a 4xx, only when the
+                    // body says what it objected to, and only once — anything wider would resend a
+                    // malformed request forever.
+                    if asked_for_usage
+                        && !dropped_the_ask
+                        && error
+                            .status
+                            .is_some_and(|status| (400..500).contains(&status))
+                        && error.body.contains("stream_options")
+                    {
+                        dropped_the_ask = true;
+                        asked_for_usage = false;
+                        http = self.build(&streaming.clone().without_usage())?;
+                        continue;
+                    }
                     // Restarting after events have been delivered would replay half a turn.
                     if delivered > 0 || !self.retry.may_retry(attempt, &error) {
                         return Err(error);
@@ -558,6 +589,126 @@ mod tests {
         assert_eq!(turn.content.as_deref(), Some("Hello"));
         assert_eq!(turn.finish_reason, FinishReason::Stop);
         assert_eq!(transport.request_count(), 1);
+    }
+
+    /// A streamed answer reports its cost only when it is asked to, in a final chunk that carries
+    /// no choices at all — which is the chunk an accumulator that returned early would drop.
+    #[test]
+    fn a_streamed_answer_reports_what_it_cost_when_it_is_asked() {
+        let transport = StreamTransport::new(vec![Ok(vec![
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n".into(),
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n".into(),
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1200,\"completion_tokens\":40,\"total_tokens\":1240,\"prompt_tokens_details\":{\"cached_tokens\":1024}}}\n\ndata: [DONE]\n\n"
+                .into(),
+        ])]);
+        let client = client_with(transport.clone(), Arc::new(RecordingSleeper::default()));
+
+        let turn = client.chat_stream(&request()).expect("assembled");
+        assert_eq!(turn.usage.prompt_tokens, 1_200);
+        assert_eq!(turn.usage.completion_tokens, 40);
+        assert_eq!(turn.usage.total_tokens, 1_240);
+        assert_eq!(
+            turn.usage.cached_tokens,
+            Some(1_024),
+            "the cache count is read from the nested spelling OpenAI uses"
+        );
+
+        let sent = transport.requests.lock().unwrap()[0].clone();
+        assert!(
+            sent.body
+                .contains("\"stream_options\":{\"include_usage\":true}"),
+            "the request has to ask for the counts: {}",
+            sent.body
+        );
+    }
+
+    /// The other spelling of the cache count, which DeepSeek sends beside the flat counts.
+    #[test]
+    fn the_flat_cache_spelling_is_read_too() {
+        let transport = StreamTransport::new(vec![Ok(vec![
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"prompt_cache_hit_tokens\":8}}\n\ndata: [DONE]\n\n"
+                .into(),
+        ])]);
+        let client = client_with(transport, Arc::new(RecordingSleeper::default()));
+        let turn = client.chat_stream(&request()).expect("assembled");
+        assert_eq!(turn.usage.cached_tokens, Some(8));
+        assert_eq!(
+            turn.usage.total_tokens, 12,
+            "a total the provider did not send is the sum of its parts"
+        );
+    }
+
+    /// An endpoint that refuses the parameter is refusing the parameter, not the request: the same
+    /// body goes again without it, and the answer is still an answer.
+    #[test]
+    fn an_endpoint_that_refuses_stream_options_is_asked_again_without_them() {
+        let transport = StreamTransport::new(vec![
+            Err(LlmError::classify(
+                Some(400),
+                "unknown parameter: stream_options",
+            )),
+            Ok(vec![
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\n".into(),
+                "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+                    .into(),
+            ]),
+        ]);
+        let client = client_with(transport.clone(), Arc::new(RecordingSleeper::default()));
+
+        let turn = client
+            .chat_stream(&request())
+            .expect("the answer still arrives");
+        assert_eq!(turn.content.as_deref(), Some("ok"));
+        assert_eq!(transport.request_count(), 2);
+        let bodies: Vec<String> = transport
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| request.body.clone())
+            .collect();
+        assert!(
+            bodies[0].contains("stream_options"),
+            "the first attempt asks: {}",
+            bodies[0]
+        );
+        assert!(
+            !bodies[1].contains("stream_options"),
+            "the second does not: {}",
+            bodies[1]
+        );
+    }
+
+    /// A 400 about something else is not a reason to resend: that request was malformed, and
+    /// sending it again unchanged would be a loop.
+    #[test]
+    fn a_four_hundred_about_anything_else_is_not_resent() {
+        let transport = StreamTransport::new(vec![
+            Err(LlmError::classify(Some(400), "messages must not be empty")),
+            Ok(vec!["data: [DONE]\n\n".into()]),
+        ]);
+        let client = client_with(transport.clone(), Arc::new(RecordingSleeper::default()));
+        assert!(client.chat_stream(&request()).is_err());
+        assert_eq!(transport.request_count(), 1);
+    }
+
+    /// What a whole answer costs is read from the response body, where the provider puts it.
+    #[test]
+    fn a_whole_answer_carries_the_cost_the_provider_reported() {
+        let body = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":50,\"completion_tokens\":5,\"total_tokens\":55}}";
+        let transport = ScriptedTransport::new(vec![ok(body)]);
+        let client = client_with(transport, Arc::new(RecordingSleeper::default()));
+        let turn = client.turn(&request()).expect("a whole answer");
+        assert_eq!(turn.usage.prompt_tokens, 50);
+        assert_eq!(turn.usage.total_tokens, 55);
+        assert!(
+            turn.usage.reported(),
+            "a cost the provider named is a cost that was reported"
+        );
+        assert_eq!(
+            turn.usage.cached_tokens, None,
+            "the provider said nothing about a cache, and none is invented"
+        );
     }
 
     #[test]

@@ -158,7 +158,10 @@ impl LoopRunner {
             session,
             system,
         )
-        .with_limits(self.limits);
+        .with_limits(self.limits)
+        // The child's requests cost the same as any other and its conversation says nothing about
+        // them, so its log sits beside its own `history.jsonl` rather than in the parent's.
+        .with_llm_log(dir.join("llm.jsonl"));
         // The child's own cancellation: a deadline thread flips it, and the loop stops at the
         // next round boundary.
         let cancel = Cancellation::new();
@@ -207,6 +210,7 @@ mod tests {
                 content: Some(self.reply.clone()),
                 tool_calls: Vec::new(),
                 finish_reason: FinishReason::Stop,
+                usage: deepnest_llm::Usage::default(),
             })
         }
     }

@@ -27,6 +27,7 @@
 //! `crates/gateway`.
 
 pub mod approve;
+pub mod llmlog;
 pub mod memory;
 pub mod prompt;
 pub mod runner;
@@ -36,6 +37,7 @@ pub mod turn;
 use std::path::{Path, PathBuf};
 
 pub use approve::{Answer, Approver};
+pub use llmlog::{LlmLog, Request, Response};
 pub use memory::{MemoryEntry, MemoryStore};
 pub use prompt::PromptContext;
 pub use runner::LoopRunner;
@@ -72,6 +74,12 @@ impl AgentPaths {
     /// The conversation, one JSON record per line.
     pub fn history(&self) -> PathBuf {
         self.root.join("history.jsonl")
+    }
+
+    /// The model log — every request sent and what came back, beside the conversation rather than
+    /// in it. See [`llmlog`] for why the two files answer different questions.
+    pub fn llm_log(&self) -> PathBuf {
+        self.root.join("llm.jsonl")
     }
 
     /// The directory holding memory entries and their index.
@@ -112,6 +120,7 @@ mod tests {
             paths.memory_index(),
             Path::new("/apps/notes/.agent/memory/MEMORY.md")
         );
+        assert_eq!(paths.llm_log(), Path::new("/apps/notes/.agent/llm.jsonl"));
         assert!(paths.subagent_dir(3).starts_with(paths.root()));
     }
 
