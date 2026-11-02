@@ -117,6 +117,19 @@ impl Cancellation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     /// Model calls in one turn, including tool round-trips.
+    ///
+    /// This is a loop guard **and** a spend ceiling: every round is one model call, so the number
+    /// is also the most one turn can bill. It was 24, and 24 was a number nobody chose — it arrived
+    /// with the first version of this loop, with no reason written beside it. What that cost is
+    /// measured rather than imagined: a turn spent all 24 walking one app's directory with `ls`,
+    /// `find` and `glob`, reported "I'll start by looking at the app as it stands", and stopped
+    /// before it had written a line.
+    ///
+    /// 540 is the owner's number. It is safe to be far larger than the guard this used to be
+    /// because the budget is not the only stop any more: a turn is bounded by the reader pressing
+    /// stop (the cancellation registry in `crates/deepnest`), by a subagent's wall-clock deadline,
+    /// and by the spend ceiling above. A runaway loop is cut by those whether the budget is 24 or
+    /// 540, so the budget is free to be a number that lets a turn finish.
     pub max_rounds: usize,
     /// Characters of conversation sent per request, system prompt included.
     pub max_history_chars: usize,
@@ -125,7 +138,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_rounds: 24,
+            max_rounds: 540,
             max_history_chars: 120_000,
         }
     }
@@ -1324,6 +1337,22 @@ mod tests {
             .unwrap();
         assert!(text.contains("nobody answered"), "{text}");
         assert!(text.contains("Tell the user"), "{text}");
+    }
+
+    /// The floor the budget must not fall back under.
+    ///
+    /// 270 is the long-task budget the sibling agent settled on after 30 rounds kept truncating
+    /// real work, and it is the reference number for "enough to finish". Pinned as a floor rather
+    /// than as equality: raising the budget is a tuning decision, and lowering it is the regression
+    /// this test exists for — what shipped before was 24, which could not finish a turn.
+    #[test]
+    fn the_default_round_budget_stays_above_the_floor_a_long_task_needed() {
+        let limits = Limits::default();
+        assert!(
+            limits.max_rounds >= 270,
+            "the round budget fell to {}, under the 270 a long task needed elsewhere",
+            limits.max_rounds
+        );
     }
 
     #[test]
