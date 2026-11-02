@@ -412,9 +412,18 @@ impl Agent {
             // under — so a folding and a trimming can never disagree about what fits.
             let messages = if dropped > 0 && !compaction_failed {
                 match self.compact(round, budget)? {
-                    Compacted::Rewritten => self.request_messages(budget)?.0,
+                    Compacted::Rewritten(spent) => {
+                        // Counted in the cost and not in the rounds, which is the distinction #105
+                        // drew and this keeps: the summary is not a step of the work, so the caller
+                        // is not asked to think of it as one — but it is a model call this turn
+                        // made, so it is money this turn spent, and leaving it out of `usage`
+                        // would put the one number a person reads below what they were billed.
+                        usage = usage.plus(spent);
+                        self.request_messages(budget)?.0
+                    }
                     Compacted::Skipped => messages,
-                    Compacted::Failed => {
+                    Compacted::Failed(spent) => {
+                        usage = usage.plus(spent);
                         compaction_failed = true;
                         messages
                     }
@@ -686,9 +695,11 @@ impl Agent {
     /// Three things it deliberately does not do. It does not fail the turn: a summary that cannot
     /// be written costs the summary, and the request then goes out trimmed exactly as it would have
     /// without this. It does not spend a round: `rounds` counts the caller's requests, and the
-    /// summariser is a cost of staying inside the budget rather than a step of the work. And it
-    /// drops no note: those are the agent's own record of what happened, they are never sent to the
-    /// model, and the fold keeps every one of them.
+    /// summariser is a cost of staying inside the budget rather than a step of the work — though
+    /// what it *spends* is returned to the caller and added to the turn's `usage`, because a model
+    /// call this turn made is money this turn is billed for whether or not it advanced the work.
+    /// And it drops no note: those are the agent's own record of what happened, they are never sent
+    /// to the model, and the fold keeps every one of them.
     ///
     /// It also refuses a fold that cannot help. If the messages the cut would keep do not fit the
     /// budget on their own, summarising what came before them frees nothing: the request would be
@@ -728,15 +739,18 @@ impl Agent {
                     "the conversation was not compacted: the summary call failed: {}",
                     error.body
                 ))?;
-                return Ok(Compacted::Failed);
+                return Ok(Compacted::Failed(Usage::default()));
             }
         };
         let summary = turn.content.as_deref().unwrap_or("").trim();
+        let spent = turn.usage;
         if summary.is_empty() {
             self.note(
                 "the conversation was not compacted: the summary call answered with no text",
             )?;
-            return Ok(Compacted::Failed);
+            // The call was made and billed even though the answer was unusable, so its price is
+            // returned rather than dropped: this turn spent that money and the person is owed it.
+            return Ok(Compacted::Failed(spent));
         }
         let replaced = records[..at]
             .iter()
@@ -755,7 +769,7 @@ impl Agent {
              became one summary, and the newest {keep} are still sent as they were. The summary is \
              in the file as an ordinary message, so this turn and every later one read it back."
         ))?;
-        Ok(Compacted::Rewritten)
+        Ok(Compacted::Rewritten(spent))
     }
 
     /// The records a compaction is about to drop, as text for the summariser, capped at one
@@ -896,19 +910,28 @@ impl Agent {
     }
 }
 
-/// What a compaction attempt did.
+/// What a compaction attempt did, and what it cost.
 ///
 /// Three answers rather than a bool, because the caller acts differently on each: a rewrite means
 /// the request is rebuilt from the file, a skip means leaving records out was the answer and no
 /// model call was spent finding that out, and a failure means this turn stops asking.
+///
+/// Both answers that made a model call carry its [`Usage`], because the summary is **money this
+/// turn spent and not a round of its work** — and those two facts have to travel separately. A
+/// turn that compacts is billed for a request the caller never asked for, so a report that counts
+/// rounds reports the wrong number of steps, and a report that counts only rounds *misses* the
+/// money. Measured on a cold-run app (eight turns building one small app, `llm.jsonl` against the
+/// reply): the two summariser calls those turns made were 84,560 prompt tokens that appeared in
+/// the log and in no answer the person could see.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Compacted {
-    /// The older messages were replaced by a summary on disk.
-    Rewritten,
+    /// The older messages were replaced by a summary on disk, for this price.
+    Rewritten(Usage),
     /// There was nothing to fold, so no model call was made.
     Skipped,
-    /// The fold was attempted and did not happen. The file is untouched.
-    Failed,
+    /// The fold was attempted and did not happen, for this price when the call itself was billed.
+    /// The file is untouched.
+    Failed(Usage),
 }
 
 /// What the summariser is told to produce.
@@ -1778,6 +1801,49 @@ mod tests {
         // Half of each round's prompt was served from the provider's cache, and adding them keeps
         // both: 450 + 600.
         assert_eq!(usage.cached_tokens, Some(1_050));
+    }
+
+    /// A summary is not a round, and it is still money.
+    ///
+    /// The distinction #105 drew and this keeps: `rounds` counts the caller's requests, so the
+    /// summariser is not one of them — the person asked for one thing and the turn did one thing.
+    /// But the summariser is a model call this turn made, so its tokens are this turn's bill, and a
+    /// report that left them out would put the number a person reads *below* what the provider
+    /// charged. Measured on a cold-run app (eight turns building one small app), the turns that
+    /// compacted spent 84,560 prompt tokens that the answer never mentioned.
+    #[test]
+    fn a_summary_costs_money_without_being_a_round() {
+        let scratch = Scratch::new("compact-cost");
+        already_said(&scratch, 8);
+        let model = ScriptedModel::new(vec![
+            Ok(answer_costing(
+                "eight questions were asked; question 7 was the last",
+                5_000,
+                200,
+            )),
+            Ok(answer_costing("done", 1_200, 40)),
+        ]);
+        let agent = scratch.agent(model.clone()).with_limits(folding_limits());
+
+        let outcome = agent
+            .run_turn("and now this", &Cancellation::new())
+            .unwrap();
+
+        // One round: the caller asked once, and the summariser did not turn that into two steps.
+        match &outcome {
+            TurnOutcome::Answered { rounds, .. } => {
+                assert_eq!(*rounds, 1, "the summary is not a round of the work")
+            }
+            other => panic!("expected an answer, got {other:?}"),
+        }
+        // Both calls are in the bill, and the ticket is larger than the answer's own request.
+        let usage = outcome.usage();
+        assert_eq!(usage.prompt_tokens, 6_200, "5,000 summary + 1,200 round");
+        assert_eq!(usage.completion_tokens, 240, "200 summary + 40 round");
+        assert_eq!(usage.total_tokens, 6_440);
+        // And the log agrees: every request this turn made is in it, so the reply and the file
+        // that an outside reader reconstructs the cost from cannot disagree.
+        assert_eq!(model.calls(), 2);
     }
 
     #[test]
