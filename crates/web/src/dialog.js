@@ -2050,6 +2050,10 @@
       })
       .then(function (body) {
         var turns = (body && body.turns) || [];
+        // Before anything is drawn, because the box's own walk is part of what this read is for:
+        // the conversation on the server is reachable from the box only if the list is in step
+        // with the file, and it is this read that knows what the file holds.
+        seedFromTheFile(turns);
         var drawnTheAnswer = showTurns(turns, watching !== null);
         if (watching !== null) {
           showProgress(describeProgress(turns));
@@ -2345,7 +2349,8 @@
       return;
     }
     if (event.key === "ArrowUp") {
-      if (recallAt >= sentByHand.length) {
+      var back = recallList();
+      if (recallAt >= back.length) {
         // At the oldest message: nothing left to walk to, so the key changes nothing rather than
         // emptying a box the person is reading. The default is still taken away, because otherwise
         // the browser moves the caret to the start of the message the person is looking at.
@@ -2354,7 +2359,7 @@
       }
       recallAt += 1;
       event.preventDefault();
-      putBack(sentByHand[sentByHand.length - recallAt]);
+      putBack(back[back.length - recallAt]);
       return;
     }
     // `Down`. Past the newest message is the empty box, which is what a person who walked back and
@@ -2364,7 +2369,8 @@
     }
     recallAt -= 1;
     event.preventDefault();
-    putBack(recallAt === 0 ? "" : sentByHand[sentByHand.length - recallAt]);
+    var forward = recallList();
+    putBack(recallAt === 0 ? "" : forward[forward.length - recallAt]);
   });
 
   // The messages this page has sent, newest last, so the box can hand one back. Measured in Chrome
@@ -2400,6 +2406,64 @@
 
   // Which message `Up` is on, counted from the newest: 0 is "not walking", 1 is the last one sent.
   var recallAt = 0;
+
+  // What the conversation already on the server holds, oldest first — the other half of the walk.
+  //
+  // `sentByHand` alone covers one page's lifetime, and this product reloads the page constantly:
+  // the agent changes code, the browser comes back, and the conversation returns because it is read
+  // from the file. The messages did not. Measured in Chrome on a page loaded onto a conversation
+  // with two exchanges in it — the state every rebuild leaves behind — `Up` three times answered
+  // `""`, `""`, `""`, while both exchanges were drawn in the transcript and the three key events
+  // had demonstrably arrived. So the one thing a person actually wants after a rebuild, "the same
+  // sentence with one word changed", was the one thing the box could not give back.
+  var fromTheFile = [];
+
+  // Read out of every history read rather than appended to, so it follows the file: switching
+  // conversation, or a turn landing, puts the list back in step instead of accumulating two.
+  function seedFromTheFile(turns) {
+    var seeded = [];
+    for (var i = 0; turns && i < turns.length; i++) {
+      var said = String((turns[i] && turns[i].user) || "").trim();
+      if (!said) {
+        continue;
+      }
+      // Said twice in a row is one message here too, for the same reason `remember` does it.
+      if (seeded[seeded.length - 1] === said) {
+        continue;
+      }
+      seeded.push(said);
+    }
+    if (seeded.length > RECALL_KEPT) {
+      seeded = seeded.slice(seeded.length - RECALL_KEPT);
+    }
+    fromTheFile = seeded;
+  }
+
+  // The walk: the conversation first, then what this page typed.
+  //
+  // Two lists rather than one, because they arrive in different orders. A message is remembered the
+  // moment it leaves the box, and the file only has it after the turn is recorded — so appending
+  // both into one list would put an old turn *after* the sentence just sent whenever a history read
+  // that started earlier landed later. The file is always older than this page, so the order is
+  // not something to reconstruct: it is the shape of the two lists.
+  function recallList() {
+    if (!fromTheFile.length) {
+      return sentByHand;
+    }
+    if (!sentByHand.length) {
+      return fromTheFile;
+    }
+    // The two meet at a duplicate: by the time the next read lands, the sentence this page sent is
+    // in the file as well. One press should not return it twice.
+    var joined = fromTheFile.slice();
+    for (var i = 0; i < sentByHand.length; i++) {
+      if (i === 0 && joined[joined.length - 1] === sentByHand[0]) {
+        continue;
+      }
+      joined.push(sentByHand[i]);
+    }
+    return joined;
+  }
 
   // The phrase the transcript is being searched for, lowercased once so every comparison is the
   // same comparison. Empty is the ordinary window.
