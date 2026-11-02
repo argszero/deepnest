@@ -1818,6 +1818,82 @@ mod tests {
     }
 
     #[test]
+    fn the_box_remembers_the_conversation_it_was_loaded_onto() {
+        // `sentByHand` covers one page's lifetime, and this product reloads the page constantly: the
+        // agent changes code, the browser comes back, and the conversation returns because it is
+        // read from the file. The messages did not. Measured in Chrome on a page loaded onto a
+        // conversation with two exchanges in it — the state every rebuild leaves behind — `Up`
+        // answered `""`, `""`, `""`, while the two exchanges were drawn and the three key events had
+        // demonstrably arrived. After: `"sort by due date"`, then `"add a due date column"`.
+        assert!(
+            DIALOG_SCRIPT.contains("var fromTheFile = [];"),
+            "the box holds no part of the conversation, so a reload takes the messages with it"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("function seedFromTheFile(turns) {"),
+            "nothing turns the conversation into messages the box can hand back"
+        );
+        // The word for the field is the record's own: `Turn.user` is documented as "what the person
+        // typed", which is the thing this key gives back.
+        assert!(
+            DIALOG_SCRIPT.contains(r#"String((turns[i] && turns[i].user) || "").trim()"#),
+            "the seeded messages are not the ones the person typed"
+        );
+        // Seeded where the file is read, or the list and the transcript would be two different
+        // accounts of the same conversation.
+        let read = DIALOG_SCRIPT
+            .find("function readHistory() {")
+            .expect("the history read exists");
+        let body = &DIALOG_SCRIPT[read..];
+        let body = &body[..body.find("\n  }\n").expect("the read ends")];
+        assert!(
+            body.contains("seedFromTheFile(turns);"),
+            "the file is read without the box learning what it holds"
+        );
+        // Before the transcript is drawn, because the seeded list is the same read's answer: a
+        // person can press `Up` the moment the panel opens.
+        assert!(
+            body.find("seedFromTheFile(turns);").expect("seeded")
+                < body
+                    .find("showTurns(turns")
+                    .expect("the transcript is drawn"),
+            "the box is told after the transcript is drawn: {body}"
+        );
+        // Two lists, and the merge between them. A message is remembered when it leaves the box and
+        // reaches the file after the turn is recorded, so appending both into one list would put an
+        // old turn *after* the sentence just sent whenever an earlier read landed later.
+        assert!(
+            DIALOG_SCRIPT.contains("function recallList() {"),
+            "there is no exception-safe order between the file and this page"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("var joined = fromTheFile.slice();"),
+            "the conversation is not walked before what this page typed"
+        );
+        // The seam: by the time the next read lands, the sentence this page sent is in the file as
+        // well, and one press must not return it twice.
+        assert!(
+            DIALOG_SCRIPT.contains("if (i === 0 && joined[joined.length - 1] === sentByHand[0]) {"),
+            "the two lists meet at a duplicate, so a message would be walked twice"
+        );
+        // Both arrow keys go through the merge — the walk is one list or the other, never one of
+        // them for `Up` and the raw array for `Down`.
+        assert_eq!(
+            DIALOG_SCRIPT.matches("var back = recallList();").count(),
+            1,
+            "`Up` does not walk the merged list"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("var forward = recallList();"),
+            "`Down` walks only what this page typed, so it cannot come back out of the conversation"
+        );
+        assert!(
+            !DIALOG_SCRIPT.contains("sentByHand[sentByHand.length - recallAt]"),
+            "a key still indexes the page's own list directly, so the conversation is not reachable"
+        );
+    }
+
+    #[test]
     fn an_exchange_can_be_found_in_a_conversation_the_window_does_not_reach() {
         // The transcript draws the newest twenty turns, so in a long conversation the rest is not
         // in the page at all. Measured in Chrome against forty exchanges: the panel opened with
