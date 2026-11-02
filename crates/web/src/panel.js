@@ -195,7 +195,7 @@
     }
     card.appendChild(head);
     if (app.path) {
-      card.appendChild(element("div", "note mono", app.path));
+      card.appendChild(element("div", "note path", app.path));
     }
 
     // A failed app says why on its own row. That reason is the one fact deciding whether the next

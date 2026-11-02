@@ -24,12 +24,17 @@
 //! a form field, in the browser's autofill, and in whatever a user does with "save password" — and
 //! it makes the first thing deepnest asks for a trip to a terminal.
 //!
-//! ## Why the script is a separate file
+//! ## Why the script and the stylesheet are separate files
 //!
 //! A policy of `script-src 'self'` is worth more than the convenience of an inline script: it means
 //! a string that reaches the page from the filesystem — an app's name, a slug — cannot become code.
 //! The token reaches the script through the DOM rather than through a `<script>` block for the same
 //! reason.
+//!
+//! `style-src 'self'` buys the same thing one layer down, and the page pays for it the same way: no
+//! `<style>` block, and no `style` attribute anywhere. Under `'unsafe-inline'` a name or a skill's
+//! description that reached the markup could carry styling of its own; under `'self'` the only
+//! styles that apply are the ones [`STYLE`] holds.
 //!
 //! ## What the page says without script
 //!
@@ -68,6 +73,12 @@
 /// Where the panel's script is served.
 pub const SCRIPT_PATH: &str = "/panel.js";
 
+/// Where the panel's stylesheet is served.
+pub const STYLE_PATH: &str = "/panel.css";
+
+/// The panel's stylesheet.
+pub const STYLE: &str = include_str!("panel.css");
+
 /// Where the app page's dialog script is served.
 ///
 /// The pair below is what `deepnest_gateway::dialog` names in the markup it injects; this crate
@@ -87,10 +98,12 @@ pub const DIALOG_STYLE: &str = include_str!("dialog.css");
 ///
 /// `script-src 'self'` and nothing else: no inline script, no `eval`, no third-party origin. There
 /// is no network access beyond this origin either (`connect-src 'self'`), because the panel talks
-/// only to deepnest. `form-action 'none'` survives from the placeholder: the panel's forms are
-/// handled by script, so a real form submission is a bug rather than a fallback.
+/// only to deepnest. `style-src 'self'` is the same rule for styling — the page loads
+/// [`STYLE_PATH`] and writes no `style` attribute, so a string that reached the markup cannot
+/// restyle the page around itself. `form-action 'none'` survives from the placeholder: the panel's
+/// forms are handled by script, so a real form submission is a bug rather than a fallback.
 pub const CSP: &str = "default-src 'none'; script-src 'self'; connect-src 'self'; \
-                       style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; \
+                       style-src 'self'; base-uri 'none'; form-action 'none'; \
                        frame-ancestors 'none'";
 
 /// The panel's script.
@@ -288,43 +301,7 @@ const PAGE: &str = r#"<!doctype html>
 <meta name="deepnest-token" content="@@TOKEN@@">
 <meta name="deepnest-port" content="@@PORT@@">
 <title>deepnest</title>
-<style>
-  :root { color-scheme: light dark; --line: rgba(127,127,127,.32); --dim: .66; }
-  body { font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0; }
-  main { max-width: 44rem; margin: 8vh auto 4rem; padding: 0 1.5rem; }
-  h1 { font-size: 1.6rem; margin: 0 0 .2rem; letter-spacing: -.02em; }
-  h2 { font-size: 1.05rem; margin: 2rem 0 .6rem; letter-spacing: -.01em; }
-  .sub { margin: 0 0 1.6rem; opacity: var(--dim); font-size: .9rem; }
-  p { margin: 0 0 .85rem; }
-  code, .mono { font: .875em ui-monospace, SFMono-Regular, Menlo, monospace; background: rgba(127,127,127,.14); padding: .1em .35em; border-radius: 4px; }
-  section { border-top: 1px solid var(--line); padding-top: .4rem; margin-top: 1.6rem; }
-  label { display: block; margin: .7rem 0 .2rem; font-size: .875rem; opacity: .85; }
-  input { width: 100%; box-sizing: border-box; padding: .45rem .55rem; font: inherit; font-size: .9rem; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 6px; }
-  button { font: inherit; font-size: .875rem; padding: .35rem .7rem; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
-  button:hover:not(:disabled) { border-color: currentColor; }
-  button:disabled { opacity: .4; cursor: default; }
-  button.primary { border-color: currentColor; font-weight: 600; }
-  .row { display: flex; gap: .5rem; align-items: baseline; flex-wrap: wrap; }
-  .app { border: 1px solid var(--line); border-radius: 8px; padding: .7rem .85rem; margin: 0 0 .6rem; }
-  .app.broken { border-color: #c0392b; }
-  .app h3 { font-size: .95rem; margin: 0; }
-  .app .slug { opacity: var(--dim); font-size: .8rem; }
-  .app .reason { font-size: .85rem; margin: .35rem 0 0; word-break: break-word; }
-  .app .actions { margin-top: .55rem; display: flex; gap: .4rem; flex-wrap: wrap; align-items: baseline; }
-  /* The state, as a claim about a process rather than as a label on a card. Drawn only when the
-     listing could ask a supervisor, so its absence means "nobody could say". */
-  .chip { font-size: .75rem; padding: .05rem .45rem; border-radius: 999px; border: 1px solid var(--line); opacity: .9; }
-  .chip.running { border-color: #2d7a46; }
-  .chip.stopped, .chip.failed { opacity: .65; }
-  .note { font-size: .85rem; opacity: var(--dim); }
-  ul { margin: .3rem 0 .9rem; padding-left: 1.1rem; }
-  li { margin: .3rem 0; }
-  .state { font-size: .9rem; margin: .3rem 0 .9rem; }
-  .bad { color: #c0392b; }
-  .good { color: #2d7a46; }
-  @media (prefers-color-scheme: dark) { .bad { color: #ff8b7d; } .good { color: #7ed6a1; } .chip.running { border-color: #7ed6a1; } .app.broken { border-color: #ff8b7d; } }
-  noscript p { border-left: 3px solid var(--line); padding-left: .8rem; }
-</style>
+<link rel="stylesheet" href="/panel.css">
 </head>
 <body>
 <main>
@@ -350,7 +327,7 @@ const PAGE: &str = r#"<!doctype html>
       <input id="api-key" name="api_key" type="password" autocomplete="off" required>
       <label for="model">Model</label>
       <input id="model" name="model" placeholder="deepseek-flash" autocomplete="off" required>
-      <p class="row" style="margin-top:.9rem"><button class="primary" type="submit">Save</button></p>
+      <p class="row submit"><button class="primary" type="submit">Save</button></p>
     </form>
   </section>
 
@@ -365,7 +342,7 @@ const PAGE: &str = r#"<!doctype html>
         <input id="new-slug" name="slug" placeholder="notes" autocomplete="off" required>
         <label for="new-name">Display name</label>
         <input id="new-name" name="name" placeholder="Notes" autocomplete="off">
-        <p class="row" style="margin-top:.9rem"><button class="primary" type="submit">Create</button></p>
+        <p class="row submit"><button class="primary" type="submit">Create</button></p>
       </form>
     </details>
   </section>
@@ -440,6 +417,51 @@ mod tests {
         );
         assert!(CSP.contains("script-src 'self'"), "{CSP}");
         assert!(!CSP.contains("script-src 'unsafe-inline'"), "{CSP}");
+    }
+
+    #[test]
+    fn the_page_loads_its_stylesheet_rather_than_carrying_one() {
+        // `style-src 'self'` is the whole point of the file: under `'unsafe-inline'` any string
+        // that reaches the page — an app's name, a skill's description — can carry styling of its
+        // own, and the policy is what stops it. The href is pinned against the constant rather
+        // than against the word `/panel.css`, so a rename breaks here instead of in a browser.
+        let page = page(&panel());
+        assert!(
+            page.contains(&format!(r#"<link rel="stylesheet" href="{STYLE_PATH}">"#)),
+            "{page}"
+        );
+        assert!(
+            !page.contains("<style"),
+            "an inline block would need 'unsafe-inline' in the policy"
+        );
+        assert!(
+            !page.contains(r#"style=""#),
+            "a style attribute would need 'unsafe-inline' too: {page}"
+        );
+        assert!(CSP.contains("style-src 'self'"), "{CSP}");
+        assert!(!CSP.contains("style-src 'unsafe-inline'"), "{CSP}");
+        // And the bytes the route serves are the ones the page draws.
+        assert!(STYLE.contains(".chip.running"), "{STYLE}");
+    }
+
+    #[test]
+    fn a_path_is_text_on_the_row_and_not_a_band_across_it() {
+        // `.mono` carries a background, which is right for a word inside a line and wrong for a
+        // block: on the path line it painted a grey band the width of the card, which reads as
+        // progress rather than as where the app lives.
+        assert!(
+            SCRIPT.contains(r#"element("div", "note path", app.path)"#),
+            "the path is drawn with the class that carries a background again"
+        );
+        assert!(!SCRIPT.contains(r#""note mono""#), "{SCRIPT}");
+        assert!(
+            STYLE.contains(".app .path"),
+            "nothing styles the class the script gives the path"
+        );
+        assert!(
+            STYLE.contains("word-break: break-all"),
+            "a path too long for the card would be cut instead of wrapped"
+        );
     }
 
     #[test]

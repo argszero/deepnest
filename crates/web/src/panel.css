@@ -1,0 +1,249 @@
+/* The control panel's stylesheet.
+ *
+ * It is a file rather than a `<style>` block in the page for one reason: a stylesheet this server
+ * owns is what lets the policy say `style-src 'self'` instead of `'unsafe-inline'`. Under
+ * `'unsafe-inline'` any string that reaches the page — an app's name, a skill's description — can
+ * carry a `style` attribute of its own and restyle the page around it; under `'self'` it cannot.
+ * The same rule already governs the script (`panel.js`) and for the same reason.
+ *
+ * Two consequences hold this file together:
+ *
+ * - **Nothing here is inline.** A `style="…"` attribute anywhere in the page is blocked by the
+ *   policy, silently, so the two spacings the markup used to spell that way are `.row.submit` and
+ *   `.app .path` below.
+ * - **A class that carries a background is for text inside a line, not for a block.** `.mono` was
+ *   on both, and on the path line — a `div` — it painted a full-width band of grey across the card,
+ *   which reads as a progress bar rather than as a path. The path is `.path`: monospaced, no
+ *   background, wrapped rather than cut.
+ */
+
+:root {
+  color-scheme: light dark;
+  --line: rgba(127, 127, 127, 0.32);
+  --dim: 0.66;
+}
+
+body {
+  font:
+    16px/1.55 ui-sans-serif,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+  margin: 0;
+}
+
+main {
+  max-width: 44rem;
+  margin: 8vh auto 4rem;
+  padding: 0 1.5rem;
+}
+
+h1 {
+  font-size: 1.6rem;
+  margin: 0 0 0.2rem;
+  letter-spacing: -0.02em;
+}
+
+h2 {
+  font-size: 1.05rem;
+  margin: 2rem 0 0.6rem;
+  letter-spacing: -0.01em;
+}
+
+.sub {
+  margin: 0 0 1.6rem;
+  opacity: var(--dim);
+  font-size: 0.9rem;
+}
+
+p {
+  margin: 0 0 0.85rem;
+}
+
+code {
+  font:
+    0.875em ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+  background: rgba(127, 127, 127, 0.14);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+}
+
+section {
+  border-top: 1px solid var(--line);
+  padding-top: 0.4rem;
+  margin-top: 1.6rem;
+}
+
+label {
+  display: block;
+  margin: 0.7rem 0 0.2rem;
+  font-size: 0.875rem;
+  opacity: 0.85;
+}
+
+input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.45rem 0.55rem;
+  font: inherit;
+  font-size: 0.9rem;
+  color: inherit;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+button {
+  font: inherit;
+  font-size: 0.875rem;
+  padding: 0.35rem 0.7rem;
+  color: inherit;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: currentColor;
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+button.primary {
+  border-color: currentColor;
+  font-weight: 600;
+}
+
+.row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+/* The button that submits a form sits below its last field. It used to be a `style` attribute,
+   which the policy now blocks. */
+.row.submit {
+  margin-top: 0.9rem;
+}
+
+.app {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.7rem 0.85rem;
+  margin: 0 0 0.6rem;
+}
+
+.app.broken {
+  border-color: #c0392b;
+}
+
+.app h3 {
+  font-size: 0.95rem;
+  margin: 0;
+}
+
+.app .slug {
+  opacity: var(--dim);
+  font-size: 0.8rem;
+}
+
+/* Where the app lives. Wrapped rather than cut: a truncated path is one a reader cannot copy, and
+   the last segment is the part that says which app this is. */
+.app .path {
+  font:
+    0.8em/1.4 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+  margin: 0.2rem 0 0;
+  word-break: break-all;
+}
+
+.app .reason {
+  font-size: 0.85rem;
+  margin: 0.35rem 0 0;
+  word-break: break-word;
+}
+
+.app .actions {
+  margin-top: 0.55rem;
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  align-items: baseline;
+}
+
+/* The state, as a claim about a process rather than as a label on a card. Drawn only when the
+   listing could ask a supervisor, so its absence means "nobody could say". */
+.chip {
+  font-size: 0.75rem;
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  opacity: 0.9;
+}
+
+.chip.running {
+  border-color: #2d7a46;
+}
+
+.chip.stopped,
+.chip.failed {
+  opacity: 0.65;
+}
+
+.note {
+  font-size: 0.85rem;
+  opacity: var(--dim);
+}
+
+ul {
+  margin: 0.3rem 0 0.9rem;
+  padding-left: 1.1rem;
+}
+
+li {
+  margin: 0.3rem 0;
+}
+
+.state {
+  font-size: 0.9rem;
+  margin: 0.3rem 0 0.9rem;
+}
+
+.bad {
+  color: #c0392b;
+}
+
+.good {
+  color: #2d7a46;
+}
+
+@media (prefers-color-scheme: dark) {
+  .bad {
+    color: #ff8b7d;
+  }
+  .good {
+    color: #7ed6a1;
+  }
+  .chip.running {
+    border-color: #7ed6a1;
+  }
+  .app.broken {
+    border-color: #ff8b7d;
+  }
+}
+
+noscript p {
+  border-left: 3px solid var(--line);
+  padding-left: 0.8rem;
+}
