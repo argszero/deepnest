@@ -248,6 +248,33 @@
   display: none;
 }
 
+/* Expanded: the room the window has, less one margin, in both directions. Height comes from `top`
+ * and `bottom` together rather than from a number, so the panel takes whatever the window leaves and
+ * the transcript's `flex: 1` hands all of it to the conversation — the thing a fixed ceiling was
+ * never able to do.
+ *
+ * The width is not the window's. A line of prose set the full width of a 1400 px window is one the
+ * eye loses its place in, so the panel is capped at 38rem (608 px, 1.7× the small panel) and centred
+ * with `left: 50%` and a transform, which is the one centring that needs no width on the root.
+ * `min()` against the window is what keeps a narrow one uncut: below 38rem the panel takes the
+ * window less the same margin, so nothing ever hangs off the edge.
+ *
+ * `position: fixed` rather than the small panel's `absolute` because the root is a shrink-to-fit
+ * box pinned to the page's corner: a box sized by its own content cannot be the room its content is
+ * asking for. `right: auto` is spelled out — the small panel's `right: 0` would otherwise still be
+ * there, and an absolutely positioned box with `left`, `right` and `width` all set is over-
+ * constrained. */
+#deepnest-dialog-panel[data-expanded="yes"] {
+  position: fixed;
+  top: var(--dn-space-3xl);
+  bottom: var(--dn-space-3xl);
+  right: auto;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(38rem, calc(100vw - 2 * var(--dn-space-3xl)));
+  max-height: none;
+}
+
 /* The app's name and the way into its conversations, on one line: the drawer is a place to go,
  * not a third heading, and a second row for one button would cost the transcript a line it needs. */
 #deepnest-dialog-head {
@@ -271,8 +298,10 @@
 
 /* `all: initial` leaves a button an inline box with no border and no padding, so every property
  * this one has is written here. It is deliberately quiet: the sentence people come to this dialog
- * for is the answer, and a button that competes with it is one pressed by mistake. */
-#deepnest-dialog-sessions-toggle {
+ * for is the answer, and a button that competes with it is one pressed by mistake. The second
+ * selector is the expand toggle, which is the same quiet pill on the same line. */
+#deepnest-dialog-sessions-toggle,
+#deepnest-dialog-expand {
   display: inline-block;
   flex: none;
   box-sizing: border-box;
@@ -288,12 +317,15 @@
 }
 
 #deepnest-dialog-sessions-toggle:hover,
-#deepnest-dialog-sessions-toggle[aria-expanded="true"] {
+#deepnest-dialog-sessions-toggle[aria-expanded="true"],
+#deepnest-dialog-expand:hover,
+#deepnest-dialog-expand[aria-pressed="true"] {
   border-color: var(--dn-line-hover);
   color: var(--dn-ink-strong);
 }
 
-#deepnest-dialog-sessions-toggle:focus-visible {
+#deepnest-dialog-sessions-toggle:focus-visible,
+#deepnest-dialog-expand:focus-visible {
   outline: 2px solid var(--dn-accent);
   outline-offset: 1px;
 }
