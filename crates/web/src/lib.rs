@@ -707,6 +707,164 @@ mod tests {
     }
 
     #[test]
+    fn a_picture_joins_the_message_in_one_place_however_it_arrived() {
+        // Three ways in — the clipboard, the file picker, the screenshot — and one landing place.
+        // This is the assertion that keeps it that way, and it earns its place because the failure
+        // it prevents is silent: a picture pushed into `attached` from somewhere else still gets a
+        // marker, and the marker is what the request is read from, so the two can name different
+        // pictures and nothing on the page would say so.
+        assert_eq!(
+            DIALOG_SCRIPT.matches("attached.push(").count(),
+            1,
+            "a picture is attached in more than one place"
+        );
+        // The reader the clipboard and the picker share, and the two callers that hand it a URL.
+        assert_eq!(
+            DIALOG_SCRIPT
+                .matches("attachPicture(reader.result)")
+                .count(),
+            1,
+            "the clipboard and the file picker no longer land where a picture is attached"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("attachPicture(url)"),
+            "the screenshot does not land where a picture is attached"
+        );
+        // And the limit is asked at the landing place rather than at each entrance, so a caller
+        // written later cannot arrive without it.
+        let body = DIALOG_SCRIPT
+            .split("function attachPicture(url) {")
+            .nth(1)
+            .and_then(|rest| rest.split("function takePicture(file, next) {").next())
+            .expect("the landing place has no body to read");
+        assert!(
+            body.contains("MAX_PICTURES"),
+            "the picture limit is not checked where every picture arrives: {body}"
+        );
+    }
+
+    #[test]
+    fn a_screenshot_is_taken_by_this_machine_and_not_by_a_browser_picker() {
+        // The whole reason the route exists: a page can ask for the screen with `getDisplayMedia`,
+        // and what that costs is a browser picker for every single press, plus a system prompt no
+        // page can answer for the person in front of it. The picture is taken by the deepnest
+        // process instead, which is one press.
+        for forbidden in ["getDisplayMedia", "mediaDevices", "getUserMedia"] {
+            assert!(
+                !DIALOG_SCRIPT.contains(forbidden),
+                "{forbidden} puts a picker and a screen-recording prompt in front of every press"
+            );
+        }
+        assert!(
+            DIALOG_SCRIPT.contains(
+                r#"fetch(routeFor("capture"), { method: "POST", credentials: "same-origin" })"#
+            ),
+            "the picture is not asked for from the route that takes it"
+        );
+        // The panel is on the screen the picture is of, so it goes first — and the request goes
+        // after it, not before. Read as an order, because the two are one line apart.
+        let hidden = DIALOG_SCRIPT
+            .find("ball.hidden = true;")
+            .expect("nothing makes the dialog disappear before the capture");
+        let asked = DIALOG_SCRIPT.find(r#"routeFor("capture")"#).unwrap();
+        assert!(
+            hidden < asked,
+            "the picture is asked for while the dialog is still over the screen"
+        );
+        // And it waits for the frame that carries that, because asking on the next tick is asking
+        // before the browser has painted.
+        assert!(
+            DIALOG_SCRIPT.contains("window.requestAnimationFrame(function () {"),
+            "the capture does not wait for a frame at all"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("window.requestAnimationFrame(next);"),
+            "the capture waits one frame, which was measured to be enough on a warm tab and not \
+             on one that had just loaded"
+        );
+    }
+
+    #[test]
+    fn the_cropped_screenshot_fits_what_a_message_may_carry() {
+        // The whole screen arrives as a `data:` URL — 8.3 megapixels of 4K — and the largest
+        // message this server accepts is bounded. What the crop produces is scaled on its long edge
+        // before it becomes an attachment, and never scaled up: a small region is already the size
+        // to send it at.
+        assert!(
+            DIALOG_SCRIPT.contains("var CAPTURE_LONGEST = 1600;"),
+            "the capture has no ceiling on its long edge"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("Math.min(1, CAPTURE_LONGEST / Math.max(width, height))"),
+            "the crop is scaled up, or not scaled at all"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#"canvas.toDataURL("image/png")"#),
+            "the region is not turned into the form an attachment is carried in"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("object-fit: contain")
+                || DIALOG_STYLE.contains("object-fit: contain"),
+            "the frame is cropped to the viewport, so part of the screen is unreachable"
+        );
+        // The rectangle is dragged over the frame as it is drawn, and `contain` letterboxes it: the
+        // element's box and the picture's box are different rectangles, so the selection has to be
+        // mapped back through the scale before it is cropped.
+        assert!(
+            DIALOG_SCRIPT.contains("function drawnFrame()"),
+            "the selection is not mapped from the viewport back to picture pixels"
+        );
+    }
+
+    #[test]
+    fn the_screenshot_sheet_is_its_own_surface_with_its_own_escape() {
+        assert!(
+            DIALOG_SCRIPT.contains(r#""deepnest-dialog-shot""#),
+            "there is no sheet to drag a region on"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#"shot.addEventListener("pointerdown""#)
+                && DIALOG_SCRIPT.contains(r#"shot.addEventListener("pointermove""#),
+            "nothing reads the drag"
+        );
+        // One Escape must do one thing. The page underneath binds Escape to closing the panel, so
+        // the sheet stops the event rather than letting both answers run.
+        assert!(
+            DIALOG_SCRIPT.contains("event.stopPropagation();"),
+            "the sheet's keyboard handling leaks to the page under it"
+        );
+        assert!(
+            DIALOG_STYLE.contains("#deepnest-dialog-shot {"),
+            "the sheet is styled nowhere"
+        );
+        // `all: initial` resets `display`, so a hidden surface is only hidden if the sheet says so
+        // — the same trap the picker has above.
+        assert!(
+            DIALOG_STYLE.contains("#deepnest-dialog-shot[hidden]"),
+            "`all: initial` resets `[hidden]`, so the sheet would be drawn"
+        );
+        // A press on the bar must not start a region. Measured in Chrome: the first version of the
+        // drag handler took the press on "Use this part" for the start of a selection, and its
+        // release cleared that selection and disabled the button — so the button was disabled by
+        // the very event that was about to press it, and the crop never happened.
+        assert!(
+            DIALOG_SCRIPT.contains("shotBar.contains(event.target)"),
+            "a press on the bar is taken for the start of a region"
+        );
+        // The button is a sibling of Attach in the row, because both mean "point at something".
+        let attach = DIALOG_SCRIPT.find("form.appendChild(attach);").unwrap();
+        let capture = DIALOG_SCRIPT.find("form.appendChild(capture);").unwrap();
+        assert!(
+            attach < capture,
+            "the screenshot button is not in the input row beside Attach"
+        );
+        assert!(
+            DIALOG_STYLE.contains("#deepnest-dialog-capture"),
+            "the button is styled nowhere"
+        );
+    }
+
+    #[test]
     fn the_dialog_takes_a_file_the_same_way_it_takes_a_picture() {
         // A file is the picture case with one difference that decides the whole design: it has a
         // name. `[file report.csv]` is the marker, so what the person's sentence points at and what
