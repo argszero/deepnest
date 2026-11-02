@@ -306,16 +306,23 @@ const PAGE: &str = r#"<!doctype html>
   button.primary { border-color: currentColor; font-weight: 600; }
   .row { display: flex; gap: .5rem; align-items: baseline; flex-wrap: wrap; }
   .app { border: 1px solid var(--line); border-radius: 8px; padding: .7rem .85rem; margin: 0 0 .6rem; }
+  .app.broken { border-color: #c0392b; }
   .app h3 { font-size: .95rem; margin: 0; }
   .app .slug { opacity: var(--dim); font-size: .8rem; }
+  .app .reason { font-size: .85rem; margin: .35rem 0 0; word-break: break-word; }
   .app .actions { margin-top: .55rem; display: flex; gap: .4rem; flex-wrap: wrap; align-items: baseline; }
+  /* The state, as a claim about a process rather than as a label on a card. Drawn only when the
+     listing could ask a supervisor, so its absence means "nobody could say". */
+  .chip { font-size: .75rem; padding: .05rem .45rem; border-radius: 999px; border: 1px solid var(--line); opacity: .9; }
+  .chip.running { border-color: #2d7a46; }
+  .chip.stopped, .chip.failed { opacity: .65; }
   .note { font-size: .85rem; opacity: var(--dim); }
   ul { margin: .3rem 0 .9rem; padding-left: 1.1rem; }
   li { margin: .3rem 0; }
   .state { font-size: .9rem; margin: .3rem 0 .9rem; }
   .bad { color: #c0392b; }
   .good { color: #2d7a46; }
-  @media (prefers-color-scheme: dark) { .bad { color: #ff8b7d; } .good { color: #7ed6a1; } }
+  @media (prefers-color-scheme: dark) { .bad { color: #ff8b7d; } .good { color: #7ed6a1; } .chip.running { border-color: #7ed6a1; } .app.broken { border-color: #ff8b7d; } }
   noscript p { border-left: 3px solid var(--line); padding-left: .8rem; }
 </style>
 </head>
@@ -2787,6 +2794,92 @@ mod tests {
         }
         // And the one route the markup names is the one the server answers.
         assert_eq!(SCRIPT_PATH, "/panel.js");
+    }
+
+    #[test]
+    fn the_panel_offers_only_the_verbs_the_state_can_use() {
+        // The server's rule, and the reason this is worded as a rule rather than as a shape:
+        // `POST /api/apps/<slug>/start` on an app that is already running answers `409`, and
+        // `stop` on one that is not answers `stopped` again having done nothing. Every row used to
+        // carry build, start, stop and restart regardless, so four of the five controls on screen
+        // were presses whose only possible outcome was an error or a no-op.
+        assert!(
+            !SCRIPT.contains(r#"["build", "start", "stop", "restart"].forEach"#),
+            "every app still gets the same four verbs, whatever state it is in"
+        );
+        assert!(
+            SCRIPT.contains(r#"running: ["stop", "restart"]"#),
+            "a running app is offered the verbs that apply to a stopped one"
+        );
+        assert!(
+            SCRIPT.contains(r#"stopped: ["start", "build"]"#),
+            "a stopped app is offered Stop, which answers `stopped` having done nothing"
+        );
+        assert!(
+            SCRIPT.contains(r#"failed: ["start", "build"]"#),
+            "a failed app is not offered a restart before its reason has been read"
+        );
+        // A failure carries the reason the supervisor recorded, on the row it belongs to: that one
+        // fact decides whether the next press is Start or a look at the log, and it used to arrive
+        // only as the answer to a press that failed.
+        assert!(
+            SCRIPT.contains("app.reason"),
+            "the reason an app failed never reaches its row"
+        );
+    }
+
+    #[test]
+    fn open_is_a_link_only_when_something_is_listening() {
+        // `GET /app/<slug>/` answers `503` in plain text for an app that is not running, so "Open"
+        // was a link to an error page — the first control on the row and the one that could not
+        // work. The word stays where it was, so a row does not change shape between states.
+        let guard = SCRIPT
+            .find("if (running || !known) {")
+            .expect("the link is drawn without asking whether anything is listening");
+        let href = SCRIPT
+            .find(r#"open.href = "/app/""#)
+            .expect("the link has no target, so this test is stale");
+        assert!(
+            guard < href,
+            "the href is set before the state is consulted, so every row links to the app"
+        );
+        assert!(
+            SCRIPT.contains(r#"shut.title = "not running — start it first";"#),
+            "a row that is not running says why its Open is not a link"
+        );
+    }
+
+    #[test]
+    fn a_state_nobody_could_determine_is_not_drawn_as_stopped() {
+        // `/api/apps` answers null in every process field when the process that serves it has no
+        // supervisor to ask. A chip saying "stopped" there would be a guess, and the guess sends
+        // someone to start an app that may be serving already — so nothing is drawn, and every
+        // verb is offered because none of the four is refused in that state.
+        assert!(
+            SCRIPT.contains(
+                r#"if (app.state !== "running" && app.state !== "stopped" && app.state !== "failed") {"#
+            ),
+            "the chip is drawn without checking that there is a state to draw"
+        );
+        let chip = SCRIPT
+            .find("function stateChip(app) {")
+            .expect("the state chip has no definition this test can reach");
+        let body = &SCRIPT[chip..];
+        let none = body
+            .find("return null;")
+            .expect("an unknown state still produces a chip, and a chip is a claim");
+        let built = body
+            .find(r#"return element("span""#)
+            .expect("the chip is never built, so this test is stale");
+        assert!(
+            none < built,
+            "the chip is built before the state is checked, so an unknown state draws one"
+        );
+        // The fallback list exists and is the one that keeps every verb.
+        assert!(
+            SCRIPT.contains("var VERBS_UNKNOWN = [\"build\", \"start\", \"stop\", \"restart\"];"),
+            "an unknown state is drawn with fewer verbs than the server would accept"
+        );
     }
 
     #[test]
