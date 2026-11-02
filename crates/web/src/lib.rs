@@ -1011,6 +1011,74 @@ mod tests {
     }
 
     #[test]
+    fn an_exchange_says_when_it_was_asked_in_the_readers_own_clock() {
+        // The record stores UTC (`...Z`) and the page printed its digits unchanged, so on a UTC+8
+        // machine a conversation held at 15:10 was listed as `07:10` and an exchange asked at
+        // 23:40Z was dated to the previous day. Measured in Chrome with two fixed instants: the
+        // drawer read `2026-11-02 07:10` while the browser's own clock said 15:10.
+        //
+        // The transcript said nothing at all about when anything happened — measured, no element
+        // under a turn carried a time — so two exchanges that read the same were told apart by
+        // nothing.
+        assert!(
+            DIALOG_SCRIPT.contains("function instantOf(at)"),
+            "the page never turns a record's instant into a clock reading"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("var instant = new Date(at);"),
+            "the instant is not converted, so the page prints the record's zone"
+        );
+        // The record keeps its own precision where a machine reads it.
+        assert!(
+            DIALOG_SCRIPT.contains(r#"when.setAttribute("datetime", turn.at)"#),
+            "the drawn time is not tied to the instant it came from"
+        );
+        // Today loses the day, because the reader is in it; another day keeps it, because a bare
+        // `15:10` from last week reads as this afternoon.
+        assert!(
+            DIALOG_SCRIPT.contains("sameLocalDay(instant, new Date())"),
+            "every exchange draws the same shape whether it was today or last week"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("function dayOf(instant)"),
+            "a time from another day cannot say which day"
+        );
+        // A record that cannot be parsed is a record with no time, not a page drawing `NaN`.
+        assert!(
+            DIALOG_SCRIPT.contains("return isNaN(instant.getTime()) ? null : instant;"),
+            "an unreadable timestamp becomes text on the page"
+        );
+        // The question lives in its own element so the time can share the row: a line of its own
+        // would cost every exchange the height #85 and #86 spent two cycles recovering. Measured,
+        // the row is 17 px with the time in it and the exchanges stayed 96 and 80 px tall.
+        assert!(
+            DIALOG_SCRIPT.contains(r#"words.className = "deepnest-asked-words";"#),
+            "the question and the time are one text node, so the time cannot be placed"
+        );
+        assert!(
+            DIALOG_STYLE.contains("#deepnest-dialog-transcript .deepnest-asked-words"),
+            "the question has no rule of its own to be laid out by"
+        );
+        // Two halves of the row: the words take what is left and wrap there, the time keeps its own
+        // width. Measured against a 192-character question that wrapped to 87 px: the time stayed
+        // on one line at the top of it, and nothing crossed the transcript's right edge.
+        for needed in [
+            "justify-content: space-between",
+            "flex: 1 1 auto",
+            "#deepnest-dialog-transcript .deepnest-turn-time",
+            "flex: none",
+            "white-space: nowrap",
+        ] {
+            assert!(DIALOG_STYLE.contains(needed), "{needed} is missing");
+        }
+        // `all: initial` resets `display` to `inline` and the font and colour to the page's own,
+        // which inside this panel is 16 px black on a dark box — so each of those is written back.
+        for needed in ["all: initial", "display: block", "font: 10px"] {
+            assert!(DIALOG_STYLE.contains(needed), "{needed} is missing");
+        }
+    }
+
+    #[test]
     fn the_conversation_takes_the_height_the_panel_has_left() {
         // The panel and the conversation each carried a ceiling, and the pair of them kept a single
         // exchange out of sight. Measured in Chrome at 840, 1100 and 1400 px viewports: the panel
