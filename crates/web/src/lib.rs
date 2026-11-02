@@ -1667,10 +1667,25 @@ mod tests {
             "all: initial",
             "display: block",
             "cursor: pointer",
-            "background: rgba(110, 168, 254, 0.12)",
             ":focus-visible",
         ] {
             assert!(DIALOG_STYLE.contains(needed), "{needed} is missing");
+        }
+        // The colour and the ground are asked for as declarations rather than as values: the rules
+        // read them from the token block now, and a test that repeated the literal would be a second
+        // place the colour is named — which is the thing this change removed.
+        let rule = DIALOG_STYLE
+            .split("#deepnest-dialog-transcript .deepnest-code-more {")
+            .nth(1)
+            .expect("the fold control has a selector and no rule");
+        let rule = &rule[..rule
+            .find('}')
+            .expect("the fold control's rule never closes")];
+        for written in ["background:", "color:", "border:"] {
+            assert!(
+                rule.contains(written),
+                "the fold control does not write its own `{written}`, so `all: initial` keeps the page's"
+            );
         }
     }
 
@@ -2824,5 +2839,151 @@ mod tests {
             DIALOG_STYLE.contains(".deepnest-turn:first-of-type"),
             "the first turn drawn still matches `:first-child`, which the control broke"
         );
+    }
+
+    /// The stylesheet with every comment taken out, so a value quoted in prose — and this file
+    /// quotes several, on purpose — is not counted as a value in use.
+    fn without_comments(css: &str) -> String {
+        let mut out = String::with_capacity(css.len());
+        let mut rest = css;
+        while let Some(open) = rest.find("/*") {
+            out.push_str(&rest[..open]);
+            match rest[open..].find("*/") {
+                // An unclosed comment swallows what follows it, exactly as a browser would.
+                Some(close) => rest = &rest[open + close + 2..],
+                None => return out,
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// Every colour the stylesheet spells out: the `#`-forms long enough to be one, and the
+    /// functional ones. A selector is not a colour: `#deepnest-dialog` starts with a run that is not
+    /// all hex digits, and no id in this file is.
+    fn colour_literals(css: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        let bytes = css.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'#' {
+                let start = i + 1;
+                let mut end = start;
+                while end < bytes.len() && (bytes[end] as char).is_ascii_alphanumeric() {
+                    end += 1;
+                }
+                let run = &css[start..end];
+                if matches!(run.len(), 3 | 4 | 6 | 8) && run.chars().all(|c| c.is_ascii_hexdigit())
+                {
+                    found.push(format!("#{run}"));
+                }
+                i = end;
+                continue;
+            }
+            for form in ["rgb(", "rgba(", "hsl(", "hsla("] {
+                if css[i..].starts_with(form) {
+                    let end = css[i..].find(')').map(|n| i + n + 1).unwrap_or(bytes.len());
+                    found.push(css[i..end].to_string());
+                    i = end;
+                    break;
+                }
+            }
+            i += 1;
+        }
+        found
+    }
+
+    /// The custom property names a piece of CSS declares, and the ones it reads through `var()`.
+    fn names_in(css: &str, marker: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        let mut rest = css;
+        while let Some(at) = rest.find("--") {
+            rest = &rest[at + 2..];
+            let mut end = 0;
+            while end < rest.len() {
+                let c = rest.as_bytes()[end];
+                if c.is_ascii_alphanumeric() || c == b'-' {
+                    end += 1;
+                } else {
+                    break;
+                }
+            }
+            let tail = &rest[end..];
+            if tail.starts_with(marker) {
+                found.push(format!("--{}", &rest[..end]));
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn the_dialogs_colours_are_named_once_and_read_by_name() {
+        // `docs/design.md` sets the standard for the apps deepnest generates — "the look is one token
+        // block, not a stylesheet" — and this panel was the one stylesheet in the repository that
+        // broke it: 155 colour expressions written as 70 literals, among them eighteen evenly-spaced
+        // opacities of one ink and two blues two units apart. A colour written into a rule is a
+        // colour nobody can restyle, which costs more here than anywhere else in the page: the panel
+        // is a guest on a page deepnest does not own.
+        //
+        // Four things are checked, because a block that exists is not a block that is used, and a
+        // block that leaks is not a block at all.
+        let css = without_comments(DIALOG_STYLE);
+
+        // 1. It exists, and it is the dialog's own root rather than `:root`. A generated app declares
+        //    its palette on `:root` (`docs/design.md`), so a block written there would restyle the
+        //    app's page instead of the panel on top of it.
+        let at = css
+            .find("--dn-")
+            .expect("the stylesheet names no colour at all");
+        let open = css[..at]
+            .rfind('{')
+            .expect("the first token is outside any rule");
+        let line = css[..open].rfind('\n').map(|n| n + 1).unwrap_or(0);
+        assert_eq!(
+            css[line..open].trim(),
+            "#deepnest-dialog",
+            "the token block is declared somewhere other than the dialog's own root"
+        );
+        assert!(
+            !css.contains(":root"),
+            "the stylesheet declares onto `:root`, which is the app's own palette"
+        );
+
+        // 2. Every name in the block carries the prefix, so no two palettes can meet by name.
+        let close = at + css[at..].find('}').expect("the token block never closes");
+        let (block, rules) = (&css[at..close], &css[close..]);
+        let declared = names_in(block, ":");
+        assert!(declared.len() > 20, "the token block is not a vocabulary");
+        for name in &declared {
+            assert!(
+                name.starts_with("--dn-"),
+                "{name} is unprefixed, so it can collide with the app's own tokens"
+            );
+        }
+
+        // 3. No rule outside the block names a colour. This is the assertion the whole change is
+        //    for: a literal added below it in a later change fails here.
+        let literals = colour_literals(rules);
+        assert!(
+            literals.is_empty(),
+            "colours are still written into the rules: {literals:?}"
+        );
+
+        // 4. The two directions of use agree: nothing is read that was never declared — a typo here
+        //    is not a compile error, it is a property that silently resolves to nothing — and nothing
+        //    is declared that nothing reads, which is a colour described and then abandoned.
+        let read = names_in(rules, ")");
+        for name in &read {
+            assert!(
+                declared.iter().any(|d| d == name),
+                "{name} is read but never declared"
+            );
+        }
+        for name in &declared {
+            assert!(
+                read.iter().any(|r| r == name),
+                "{name} is declared and never read"
+            );
+        }
     }
 }
