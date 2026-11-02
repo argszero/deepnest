@@ -86,7 +86,10 @@ pub struct Turn {
     /// that has stopped growing is the one worth telling the user about.
     pub rounds: usize,
     /// The agent's own notes, in order: why a turn ended early, what it could not run.
-    pub notes: Vec<String>,
+    ///
+    /// Each carries the round it was written in, so the page can draw it where it happened instead
+    /// of collecting the turn's notes at its end.
+    pub notes: Vec<Note>,
     /// What the agent ran about it, in the order it asked.
     pub calls: Vec<Call>,
     /// When the user's message was written, UTC to the second, as the file wrote it.
@@ -153,6 +156,23 @@ pub struct Said {
     /// [`Call::round`].
     pub round: usize,
     /// What it said, cut to what a page polled every second can carry.
+    pub text: String,
+}
+
+/// One of the agent's own notes, and where in the turn it happened.
+///
+/// The position is the point. A note is written into the file at the moment it happens, and until
+/// this carried a round the page drew every note *after* the whole turn — so a compaction note,
+/// written before the turn's first request, appeared under five hundred tool batches and read as
+/// the last thing that happened. The round is derived from the file itself: it is how many
+/// responses the turn had made when the note was written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Note {
+    /// How many of this turn's responses had been recorded when the note was written, counting
+    /// from 1 — the same numbering as [`Call::round`], except that a note written before the first
+    /// request (a compaction) carries `0`, which is what puts it above that request's calls.
+    pub round: usize,
+    /// What the agent recorded.
     pub text: String,
 }
 
@@ -484,7 +504,13 @@ fn push(turns: &mut Vec<Turn>, record: &Record) {
         }
         "agent" => {
             if let (Some(turn), Some(note)) = (turns.last_mut(), record.content.as_ref()) {
-                turn.notes.push(note.clone());
+                // `turn.rounds` is how many responses this turn had written when the note landed,
+                // which is exactly the position the page needs: a compaction before the first
+                // request is `0`, and a note written after round N's calls is `N`.
+                turn.notes.push(Note {
+                    round: turn.rounds,
+                    text: note.clone(),
+                });
             }
         }
         _ => {}
@@ -536,6 +562,7 @@ mod tests {
     const RESULT: &str = r#"{"type":"message","role":"tool","content":"ok","tool_call_id":"c1","at":"2026-11-01T01:00:03Z"}"#;
     const REPLY: &str = r#"{"type":"message","role":"assistant","content":"Done: three files.","at":"2026-11-01T01:00:04Z"}"#;
     const NOTE: &str = r#"{"type":"note","role":"agent","content":"the round budget of 24 ran out with the model still asking for work","at":"2026-11-01T01:00:05Z"}"#;
+    const COMPACTED: &str = r#"{"type":"note","role":"agent","content":"the conversation outgrew one request, so 40 earlier message(s) were folded into a summary; the newest 6 are still sent in full.","at":"2026-11-01T01:00:01Z"}"#;
 
     #[test]
     fn an_app_nobody_has_spoken_to_has_an_empty_conversation() {
@@ -769,9 +796,35 @@ mod tests {
         assert_eq!(turns[0].tools, 2);
         assert_eq!(turns[0].notes.len(), 1);
         assert!(
-            turns[0].notes[0].contains("round budget of 24"),
+            turns[0].notes[0].text.contains("round budget of 24"),
             "{:?}",
             turns[0].notes
+        );
+    }
+
+    #[test]
+    fn a_note_carries_the_round_it_was_written_in_rather_than_the_end_of_the_turn() {
+        // The measured case (host, 2026-11-02): a compaction happens *before* the turn's first
+        // request, and every note in the turn was drawn after all of its calls — so in a turn that
+        // ran its whole 540-round budget, the first thing that happened was the last line on
+        // screen, and it stayed there. Position is what the page needs, and it comes from the file.
+        let scratch = Scratch::new("note-round");
+        scratch.write(&[ASK, COMPACTED, TOOLS, RESULT, NOTE]);
+        let turns = read(&scratch.base);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].notes.len(), 2, "{:?}", turns[0].notes);
+        assert_eq!(
+            turns[0].notes[0].round, 0,
+            "a compaction written before the first request belongs above round 1's calls"
+        );
+        assert!(
+            turns[0].notes[0].text.contains("folded into a summary"),
+            "{:?}",
+            turns[0].notes[0]
+        );
+        assert_eq!(
+            turns[0].notes[1].round, 1,
+            "a note written after a round's calls belongs under them"
         );
     }
 
