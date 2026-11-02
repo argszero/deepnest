@@ -98,6 +98,16 @@ pub struct Turn {
 pub struct Call {
     /// The tool's name, exactly as the model asked for it.
     pub name: String,
+    /// Why the model made this call, in the words it was asked for.
+    ///
+    /// Every tool's schema makes `intent` a required argument, and this is where it is read. It is
+    /// the one part of a call a person can check at a glance: `what` is whatever argument happened
+    /// to look most like a subject, which for `read` is a path and for `bash` is a command line —
+    /// both of which say what was done and never why.
+    ///
+    /// Empty for a call the model made without one (an older record, or a model that ignored the
+    /// schema), and the row falls back to [`Call::what`] so it still says something.
+    pub intent: String,
     /// The one argument that says what the call was about — the command, the path, the pattern.
     ///
     /// One and not all of them: a row is a line, and the arguments of a call that names a file and
@@ -109,6 +119,14 @@ pub struct Call {
     pub state: String,
     /// What the tool answered, cut to what a page polling once a second can carry.
     pub output: String,
+    /// What the call was given: the arguments as the model wrote them, cut the same way as
+    /// [`Call::output`].
+    ///
+    /// Kept because a row that shows only the tool and its intent is a row a person cannot audit:
+    /// "read the config" and "read line 4,000 of the config" are the same intent and different
+    /// calls. It sits behind the same second disclosure as the output, so the transcript still
+    /// reads as intent first and detail on request.
+    pub input: String,
     /// Which of this turn's responses asked for this call, counting from 1.
     ///
     /// The transcript drew every call of a turn as one flat list, so a response that asked for six
@@ -154,6 +172,36 @@ const TURN_OUTPUT_CHARS: usize = 12_000;
 
 /// How much of the identifying argument a row shows.
 const WHAT_CHARS: usize = 80;
+
+/// How much of the model's stated reason a row shows.
+///
+/// Longer than [`WHAT_CHARS`] because a sentence is the point: 80 characters is a command line, and
+/// this is meant to be the thing that makes the command line unnecessary to read.
+const INTENT_CHARS: usize = 200;
+
+/// How much of a call's arguments travel to the page, behind the row's own disclosure.
+const CALL_INPUT_CHARS: usize = 1_200;
+
+/// The reason the model gave for a call, cut to a line.
+///
+/// Read out of the arguments rather than carried as its own field on the wire: the model writes it
+/// as an argument because that is what every tool's schema asks for, and a second copy in the
+/// protocol would be a second place for the two to disagree.
+fn intent_of(arguments: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return String::new();
+    };
+    value
+        .get("intent")
+        .and_then(|value| value.as_str())
+        .map(|text| cut(text.trim(), INTENT_CHARS))
+        .unwrap_or_default()
+}
+
+/// The arguments as the model wrote them, cut for a page polled once a second.
+fn input_of(arguments: &str) -> String {
+    cut(arguments.trim(), CALL_INPUT_CHARS)
+}
 
 /// How much of one mid-turn line travels to the page.
 ///
@@ -253,6 +301,15 @@ fn cut_outputs(turns: &mut [Turn]) {
     for turn in turns.iter_mut() {
         let mut spent = 0;
         for call in turn.calls.iter_mut() {
+            // The arguments count against the same budget as the answers: a turn of a hundred calls
+            // carries a hundred argument strings, and the route is polled once a second. What is
+            // left is the row — the tool, its intent and how it ended — which is the part a person
+            // reads anyway.
+            if spent + call.input.chars().count() > TURN_OUTPUT_CHARS {
+                call.input = CUT_FROM_THE_TURN.to_string();
+            } else {
+                spent += call.input.chars().count();
+            }
             if call.output.is_empty() {
                 continue;
             }
@@ -375,9 +432,11 @@ fn push(turns: &mut Vec<Turn>, record: &Record) {
             for asked in record.tool_calls.iter().flatten() {
                 turn.calls.push(Call {
                     name: asked.function.name.clone(),
+                    intent: intent_of(&asked.function.arguments),
                     what: what_of(&asked.function.arguments),
                     state: String::new(),
                     output: String::new(),
+                    input: input_of(&asked.function.arguments),
                     round,
                     id: asked.id.clone(),
                 });
@@ -938,5 +997,61 @@ mod tests {
         assert_eq!(what_of(r#"{"count":3}"#), r#"{"count":3}"#);
         let long = what_of(&format!(r#"{{"command":"{}"}}"#, "z".repeat(200)));
         assert!(long.chars().count() <= WHAT_CHARS + 1, "{long}");
+    }
+
+    /// The row a person reads a call by. `what` is the argument that looks like a subject — a
+    /// command line, a path — and it says what was done and never why. Every tool's schema asks
+    /// for `intent`, so the row can lead with the model's own reason for the call.
+    #[test]
+    fn a_call_carries_the_reason_it_was_made_and_the_arguments_it_was_given() {
+        let scratch = Scratch::new("intent");
+        let asked = r#"{"type":"message","role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"bash","arguments":"{\"intent\":\"find out why the notes test fails\",\"command\":\"cargo test -q\"}"}}],"at":"2026-11-01T01:00:02Z"}"#;
+        // A call made without one — an older record, or a model that ignored the schema.
+        let bare = r#"{"type":"message","role":"assistant","tool_calls":[{"id":"c2","type":"function","function":{"name":"read","arguments":"{\"file_path\":\"src/main.rs\"}"}}],"at":"2026-11-01T01:00:04Z"}"#;
+        let result = r#"{"type":"message","role":"tool","content":"1 failed","tool_call_id":"c1","at":"2026-11-01T01:00:03Z"}"#;
+        scratch.write(&[SYSTEM, ASK, asked, result, bare]);
+
+        let turns = read(&scratch.base);
+        let calls = &turns[0].calls;
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(
+            calls[0].intent, "find out why the notes test fails",
+            "the reason is not read out of the arguments"
+        );
+        assert_eq!(
+            calls[0].what, "cargo test -q",
+            "the argument that names the subject is still there beside it"
+        );
+        assert!(
+            calls[0].input.contains("\"command\":\"cargo test -q\""),
+            "the arguments a person would audit are not carried: {}",
+            calls[0].input
+        );
+        assert!(
+            calls[1].intent.is_empty() && calls[1].what == "src/main.rs",
+            "a call with no reason leaves the row its argument instead of nothing"
+        );
+        assert!(
+            calls[1].input.contains("file_path"),
+            "a call made without a reason still shows what it was given"
+        );
+    }
+
+    /// A stated reason twice as long as a line is cut like everything else on this route, which is
+    /// polled once a second while a turn runs.
+    #[test]
+    fn a_reason_is_cut_to_one_line() {
+        let long = intent_of(&format!(
+            r#"{{"intent":"{}","command":"ls"}}"#,
+            "because ".repeat(60)
+        ));
+        assert!(
+            long.chars().count() <= INTENT_CHARS + 1,
+            "the reason is {} characters",
+            long.chars().count()
+        );
+        assert!(long.ends_with('…'), "{long}");
+        assert_eq!(intent_of("not json"), "");
+        assert_eq!(intent_of(r#"{"command":"ls"}"#), "");
     }
 }

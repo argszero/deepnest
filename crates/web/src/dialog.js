@@ -1787,7 +1787,13 @@
     return more;
   }
 
-  // One call: the tool, the argument that says what it was about, and how it ended.
+  // One call, read the way a person reads a call: what it was for, then how it ended. The
+  // arguments are behind a second disclosure with the answer they got.
+  //
+  // The row used to lead with `what` — whichever argument happened to look most like a subject —
+  // and that is a command line or a path: it says what was done and never why. Every tool's schema
+  // now makes `intent` a required argument, so the row leads with the model's own sentence about
+  // what it was trying to reach, and `what` is only the fallback for a call made without one.
   function renderCall(turn, call, index, live) {
     var row = document.createElement("div");
     row.className = "deepnest-call deepnest-call-" + (call.state || "waiting");
@@ -1797,10 +1803,19 @@
     name.textContent = call.name;
     row.appendChild(name);
 
-    if (call.what) {
+    // The reason, and the argument under it when there is one to show. `deepnest-call-what` stays
+    // on whichever of the two is drawn, because it is the span that takes the row's spare width
+    // and ellipsises what does not fit.
+    var line = String(call.intent || call.what || "");
+    if (line) {
       var what = document.createElement("span");
       what.className = "deepnest-call-what";
-      what.textContent = call.what;
+      what.textContent = line;
+      // The other one, on hover: a sentence about the intent and a command line are two different
+      // facts, and the row has room for one of them.
+      if (call.intent && call.what && call.what !== call.intent) {
+        what.title = call.what;
+      }
       row.appendChild(what);
     }
 
@@ -1809,18 +1824,21 @@
     state.textContent = stateWord(call.state, live);
     row.appendChild(state);
 
-    if (call.output) {
+    if (call.input || call.output) {
       // Keyed by the turn's own timestamp rather than by position: the list is rebuilt on every
       // poll and an index would move under the row that was open.
       var key = turn.at + "\u0000" + index + "\u0000" + call.name;
       var more = document.createElement("details");
       more.className = "deepnest-call-out";
       var summary = document.createElement("summary");
-      summary.textContent = "output";
-      var pre = document.createElement("pre");
-      pre.textContent = call.output;
+      summary.textContent = "input and output";
       more.appendChild(summary);
-      more.appendChild(pre);
+      if (call.input) {
+        more.appendChild(callPart("input", call.input));
+      }
+      if (call.output) {
+        more.appendChild(callPart("output", call.output));
+      }
       more.open = !!openedCalls[key];
       more.addEventListener("toggle", function () {
         if (more.open) {
@@ -1832,6 +1850,22 @@
       row.appendChild(more);
     }
     return row;
+  }
+
+  // One half of the disclosure: which half it is, then the text. The label is a node rather than a
+  // `pre` prefix because a tool's answer is arbitrary text and a prefix would sit inside the thing
+  // it labels — copy it, and the word comes with it.
+  function callPart(label, text) {
+    var box = document.createElement("div");
+    box.className = "deepnest-call-part";
+    var head = document.createElement("p");
+    head.className = "deepnest-call-part-name";
+    head.textContent = label;
+    var pre = document.createElement("pre");
+    pre.textContent = text;
+    box.appendChild(head);
+    box.appendChild(pre);
+    return box;
   }
 
   // ---- The answer, as the model wrote it ----------------------------------------------------

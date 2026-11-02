@@ -79,7 +79,63 @@ pub fn with_installer(installer: Arc<dyn SkillInstaller>) -> Vec<Box<dyn Tool>> 
 
 /// The definitions to send with a request, for one built set.
 pub fn definitions(tools: &[Box<dyn Tool>]) -> Vec<ToolDefinition> {
-    tools.iter().map(|tool| tool.definition()).collect()
+    tools
+        .iter()
+        .map(|tool| with_intent(tool.definition()))
+        .collect()
+}
+
+/// How long the model's stated reason may be before it is no longer a line.
+///
+/// A sentence, not a paragraph: this is what a person watching the transcript reads in place of the
+/// raw arguments, and the point of it is that it fits on one row.
+pub const INTENT_CHARS: usize = 200;
+
+/// The one argument every tool takes, added here rather than in the nine `definition()` bodies.
+///
+/// A call without a stated reason is a call a person can only read as its arguments — `rg -n notes
+/// src/`, `{"path":"src/main.rs","line":12}` — and those say what was done without saying why, which
+/// is the one thing the person watching actually wants. EMRG's own tools make this a required
+/// argument, and the host reading this dialog asked for the same on 2026-11-02T21:14: a call row is
+/// there to be read by its intent.
+///
+/// Injected in one place on purpose. Nine copies of a schema fragment are nine copies to keep in
+/// step, and a tool added later would silently be the one tool that does not ask.
+///
+/// `required` keeps whatever the tool already demanded: the intent is an extra thing the model must
+/// say, never a replacement for the argument the tool cannot run without.
+fn with_intent(mut definition: ToolDefinition) -> ToolDefinition {
+    let parameters = &mut definition.function.parameters;
+    let Some(object) = parameters.as_object_mut() else {
+        // A tool that declares something other than an object schema is not one this can edit; its
+        // `definition()` is the place to say so, and the registry's own test pins the shape.
+        return definition;
+    };
+    if let Some(properties) = object
+        .get_mut("properties")
+        .and_then(|value| value.as_object_mut())
+    {
+        properties.insert(
+            "intent".to_string(),
+            serde_json::json!({
+                "type": "string",
+                "description": format!(
+                    "Why you are making this call and what it should reach, in one plain sentence \
+                     — the person watching reads this in place of the raw arguments. At most {} \
+                     characters.", INTENT_CHARS
+                )
+            }),
+        );
+    }
+    let required = object
+        .entry("required")
+        .or_insert_with(|| serde_json::json!([]));
+    if let Some(list) = required.as_array_mut() {
+        if !list.iter().any(|value| value == "intent") {
+            list.insert(0, serde_json::json!("intent"));
+        }
+    }
+    definition
 }
 
 /// The tool with this name in one built set, if it has one.
@@ -147,6 +203,81 @@ mod tests {
             ),
             base,
         )
+    }
+
+    /// A tool call a person cannot read is a tool call they have to take on trust. The arguments
+    /// say what was done — `rg -n notes src/` — and never why, so every tool asks for the reason as
+    /// an argument of its own, and the transcript leads with it.
+    ///
+    /// The two things this pins are the two ways it can rot: a tool added later that does not ask
+    /// (it goes through [`definitions`], so it cannot), and a tool whose own required argument got
+    /// pushed out by the new one.
+    #[test]
+    fn every_tool_asks_for_the_reason_it_was_called() {
+        for tools in [
+            all(),
+            with_runner(Arc::new(StubRunner)),
+            with_installer(installer()),
+            with_seams(runner(), Some(installer())),
+        ] {
+            for definition in definitions(&tools) {
+                let name = &definition.function.name;
+                let parameters = &definition.function.parameters;
+                assert!(
+                    parameters["properties"]["intent"].is_object(),
+                    "{name} does not offer an intent argument"
+                );
+                assert_eq!(
+                    parameters["properties"]["intent"]["type"], "string",
+                    "{name}'s intent is not a sentence"
+                );
+                let required = parameters["required"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("{name} requires nothing at all"));
+                assert!(
+                    required.contains(&serde_json::json!("intent")),
+                    "{name} offers an intent and does not ask for it: {required:?}"
+                );
+                // The tool's own argument is still demanded: the reason is an extra thing the model
+                // must say, never a replacement for the one the tool cannot run without.
+                assert!(
+                    required.len() >= 2,
+                    "{name} asks for the intent and nothing else: {required:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_tool_that_asks_for_nothing_more_still_asks_for_the_reason() {
+        // `subagent` requires its prompt and nothing else; the intent must not replace it, and a
+        // definition with no `required` list at all must still gain one.
+        struct Bare;
+        impl Tool for Bare {
+            fn name(&self) -> &'static str {
+                "bare"
+            }
+            fn definition(&self) -> ToolDefinition {
+                ToolDefinition::function(
+                    "bare",
+                    "a tool that declares its parameters and no required list",
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": {"text": {"type": "string"}}
+                    }),
+                )
+            }
+            fn call(&self, _args: &serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+                ToolResult::ok("bare", "")
+            }
+        }
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(Bare)];
+        let definition = &definitions(&tools)[0];
+        assert_eq!(
+            definition.function.parameters["required"],
+            serde_json::json!(["intent"]),
+            "a definition with no required list does not gain one"
+        );
     }
 
     #[test]
