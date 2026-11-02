@@ -14,6 +14,83 @@
   all: initial;
 }
 
+/* The token block.
+ *
+ * `docs/design.md` states the standard for the apps deepnest generates: "the look is one token block,
+ * not a stylesheet" — the palette named once and used by name afterwards. This panel was the one
+ * stylesheet in the repository that broke that rule, and it breaks it in the place most expensive to
+ * fix later: 155 colour expressions written as 70 literals, among them eighteen evenly-spaced
+ * opacities of one ink and two blues two units apart. Colours scattered through a page's rules are
+ * a page nobody can restyle.
+ *
+ * It is declared on `#deepnest-dialog` and every name carries a `--dn-` prefix, and both are
+ * collision guards. This panel is a guest on a page deepnest does not own: `:root` is exactly where a
+ * generated app declares its own palette, so a block written there would restyle the app rather than
+ * the dialog, and an unprefixed `--accent` would do it by name. Custom properties are not part of
+ * `all`, so the reset above leaves them alone and every descendant inherits them.
+ */
+#deepnest-dialog {
+  /* The ground: four surfaces, darkest last. */
+  --dn-surface: #1e1e23;
+  --dn-well: #16161a;
+  --dn-raised: #2b2b32;
+  --dn-deep: #0b0b0e;
+
+  /* What is laid over a surface: the drawer's veil, the ground a code block sits on, elevation,
+   * and the scrim that dims everything outside a crop. */
+  --dn-veil: rgba(0, 0, 0, 0.22);
+  --dn-code-ground: rgba(0, 0, 0, 0.35);
+  --dn-shadow: rgba(0, 0, 0, 0.35);
+  --dn-scrim: rgba(0, 0, 0, 0.5);
+
+  /* The ink: one white, and five steps of how much of it shows.
+   *
+   * Eighteen opacities of the same ink were in use, spread evenly from 0.42 to 0.95 with no two of
+   * them meaning different things. These five sit at the middle of the cluster each one absorbs, so
+   * no piece of text moves by more than 0.05 of alpha — and the reading order, which is what the
+   * ramp is for, is now a thing the file states instead of a thing a reader has to reconstruct. */
+  --dn-ink: #f4f4f6;
+  --dn-ink-strong: #ffffff;
+  --dn-ink-1: rgba(244, 244, 246, 0.9);
+  --dn-ink-2: rgba(244, 244, 246, 0.79);
+  --dn-ink-3: rgba(244, 244, 246, 0.68);
+  --dn-ink-4: rgba(244, 244, 246, 0.58);
+  --dn-ink-5: rgba(244, 244, 246, 0.45);
+
+  /* The lines: one white at three weights, the weight a hover lifts to, and the tint a row gets
+   * when it is chosen or the pointer is on it. */
+  --dn-line-soft: rgba(255, 255, 255, 0.11);
+  --dn-line: rgba(255, 255, 255, 0.17);
+  --dn-line-strong: rgba(255, 255, 255, 0.25);
+  --dn-line-hover: rgba(255, 255, 255, 0.5);
+  --dn-tint: rgba(255, 255, 255, 0.08);
+
+  /* The one emphasis, and the four tints it is made of. There were two accents in the file —
+   * `#7aa7ff` and `#6ea8fe`, two units apart — which is what having no name for a colour costs. */
+  --dn-accent: #7aa7ff;
+  --dn-accent-dim: #9dbbff;
+  --dn-accent-ink: #cfe0ff;
+  --dn-accent-tint: rgba(110, 168, 254, 0.12);
+  --dn-accent-tint-strong: rgba(110, 168, 254, 0.22);
+  --dn-accent-edge: rgba(110, 168, 254, 0.5);
+  --dn-accent-edge-strong: rgba(110, 168, 254, 0.75);
+
+  /* The three verdicts. Only these may say that something went well, badly or nowhere, and the
+   * three quiet forms beside them are the same verdict at reading strength. */
+  --dn-ok: #6bbf7a;
+  --dn-ok-ink: #a8e6bd;
+  --dn-ok-edge: rgba(122, 199, 145, 0.6);
+  --dn-bad: #e0716d;
+  --dn-bad-ink: #ff9d90;
+  --dn-bad-edge: rgba(226, 129, 129, 0.6);
+  --dn-warn: #d8a53a;
+  --dn-warn-ink: #f0d9a8;
+  --dn-warn-tint: rgba(216, 165, 58, 0.12);
+  --dn-warn-edge: rgba(255, 189, 106, 0.6);
+  --dn-warn-surface: #23201a;
+  --dn-warn-surface-raised: #33291a;
+}
+
 /* The reset, and the one thing it must not take with it.
  *
  * `all: initial` puts every descendant back to the *browser's* defaults, and that is not what this
@@ -49,7 +126,7 @@
   display: block;
   box-sizing: border-box;
   font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: #f4f4f6;
+  color: var(--dn-ink);
   text-align: left;
   direction: ltr;
 }
@@ -61,22 +138,22 @@
   width: 2.5rem;
   height: 2.5rem;
   padding: 0;
-  border: 1px solid rgba(255, 255, 255, 0.28);
+  border: 1px solid var(--dn-line-strong);
   border-radius: 50%;
-  background: #1e1e23;
-  color: #f4f4f6;
+  background: var(--dn-surface);
+  color: var(--dn-ink);
   font: 700 15px/1 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   cursor: pointer;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 6px 20px var(--dn-shadow);
 }
 
 #deepnest-dialog-ball:hover {
-  background: #2b2b32;
+  background: var(--dn-raised);
 }
 
 #deepnest-dialog-ball:focus-visible,
 #deepnest-dialog-link:focus-visible {
-  outline: 2px solid #7aa7ff;
+  outline: 2px solid var(--dn-accent);
   outline-offset: 2px;
 }
 
@@ -102,11 +179,11 @@
   width: 22rem;
   max-height: min(44rem, 78vh);
   padding: 0.85rem 0.95rem;
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  border: 1px solid var(--dn-line);
   border-radius: 10px;
-  background: #1e1e23;
-  color: #f4f4f6;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  background: var(--dn-surface);
+  color: var(--dn-ink);
+  box-shadow: 0 10px 30px var(--dn-shadow);
   overflow: hidden;
 }
 
@@ -131,7 +208,7 @@
   min-width: 0;
   margin: 0;
   font: 600 14px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: #ffffff;
+  color: var(--dn-ink-strong);
   overflow-wrap: anywhere;
 }
 
@@ -144,23 +221,23 @@
   box-sizing: border-box;
   margin: 0;
   padding: 0.15rem 0.45rem;
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  border: 1px solid var(--dn-line);
   border-radius: 999px;
   background: transparent;
   font: 11px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: rgba(244, 244, 246, 0.72);
+  color: var(--dn-ink-3);
   cursor: pointer;
   white-space: nowrap;
 }
 
 #deepnest-dialog-sessions-toggle:hover,
 #deepnest-dialog-sessions-toggle[aria-expanded="true"] {
-  border-color: rgba(255, 255, 255, 0.42);
-  color: #ffffff;
+  border-color: var(--dn-line-hover);
+  color: var(--dn-ink-strong);
 }
 
 #deepnest-dialog-sessions-toggle:focus-visible {
-  outline: 2px solid #7aa7ff;
+  outline: 2px solid var(--dn-accent);
   outline-offset: 1px;
 }
 
@@ -172,9 +249,9 @@
   box-sizing: border-box;
   margin: 0 0 0.6rem;
   padding: 0.35rem 0.4rem;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--dn-line-soft);
   border-radius: 8px;
-  background: rgba(0, 0, 0, 0.22);
+  background: var(--dn-veil);
 }
 
 /* `[hidden]` is spelled out because `all: initial` resets `display`: the attribute alone would
@@ -190,7 +267,7 @@
   overscroll-behavior: contain;
   color-scheme: dark;
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.24) transparent;
+  scrollbar-color: var(--dn-line-strong) transparent;
 }
 
 #deepnest-dialog-sessions-list::-webkit-scrollbar {
@@ -203,7 +280,7 @@
 
 #deepnest-dialog-sessions-list::-webkit-scrollbar-thumb {
   border-radius: 4px;
-  background: rgba(255, 255, 255, 0.24);
+  background: var(--dn-line-strong);
 }
 
 /* A row is a button: the whole line is the target, because a conversation's title is a sentence
@@ -223,45 +300,45 @@
 }
 
 #deepnest-dialog-sessions .deepnest-session:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--dn-tint);
 }
 
 #deepnest-dialog-sessions .deepnest-session:focus-visible {
-  outline: 2px solid #7aa7ff;
+  outline: 2px solid var(--dn-accent);
   outline-offset: -2px;
 }
 
 /* The one the page is on. A left rule rather than a fill, because a fill on every second row is a
  * list nobody can scan; this is one row, and it is the one that matters. */
 #deepnest-dialog-sessions .deepnest-session-current {
-  border-left-color: #6ea8fe;
-  background: rgba(110, 168, 254, 0.12);
+  border-left-color: var(--dn-accent);
+  background: var(--dn-accent-tint);
 }
 
 #deepnest-dialog-sessions .deepnest-session-title {
   display: block;
   font: 500 12px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: rgba(244, 244, 246, 0.92);
+  color: var(--dn-ink-1);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 #deepnest-dialog-sessions .deepnest-session-current .deepnest-session-title {
-  color: #ffffff;
+  color: var(--dn-ink-strong);
 }
 
 #deepnest-dialog-sessions .deepnest-session-meta {
   display: block;
   margin: 0.1rem 0 0;
   font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: rgba(244, 244, 246, 0.45);
+  color: var(--dn-ink-5);
 }
 
 #deepnest-dialog-sessions .deepnest-session-none {
   display: block;
   margin: 0.2rem 0.4rem;
   font: 11px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: rgba(244, 244, 246, 0.5);
+  color: var(--dn-ink-5);
 }
 
 /* Starting one is not one of the rows: it is not a conversation yet, and a list that ends in a
@@ -272,22 +349,22 @@
   width: 100%;
   margin: 0.4rem 0 0;
   padding: 0.3rem 0.4rem;
-  border: 1px dashed rgba(255, 255, 255, 0.28);
+  border: 1px dashed var(--dn-line-strong);
   border-radius: 5px;
   background: transparent;
   font: 500 12px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: rgba(244, 244, 246, 0.82);
+  color: var(--dn-ink-2);
   text-align: left;
   cursor: pointer;
 }
 
 #deepnest-dialog-sessions-new:hover {
-  border-color: rgba(255, 255, 255, 0.55);
-  color: #ffffff;
+  border-color: var(--dn-line-hover);
+  color: var(--dn-ink-strong);
 }
 
 #deepnest-dialog-sessions-new:focus-visible {
-  outline: 2px solid #7aa7ff;
+  outline: 2px solid var(--dn-accent);
   outline-offset: -2px;
 }
 
@@ -295,19 +372,19 @@
   display: block;
   margin: 0 0 0.6rem;
   font: 12px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: rgba(244, 244, 246, 0.68);
+  color: var(--dn-ink-3);
 }
 
 #deepnest-dialog-link {
   display: inline-block;
   font: 600 13px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: #9dbbff;
+  color: var(--dn-accent-dim);
   text-decoration: underline;
   cursor: pointer;
 }
 
 #deepnest-dialog-link:hover {
-  color: #c2d4ff;
+  color: var(--dn-accent-ink);
 }
 
 /* The message box. Every property is spelled out because `all: initial` above stripped the
@@ -325,22 +402,22 @@
   width: 100%;
   min-height: 3.2rem;
   padding: 0.45rem 0.5rem;
-  border: 1px solid rgba(255, 255, 255, 0.22);
+  border: 1px solid var(--dn-line-strong);
   border-radius: 7px;
-  background: #16161a;
-  color: #f4f4f6;
+  background: var(--dn-well);
+  color: var(--dn-ink);
   font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   text-align: left;
   resize: vertical;
 }
 
 #deepnest-dialog-input::placeholder {
-  color: rgba(244, 244, 246, 0.42);
+  color: var(--dn-ink-5);
 }
 
 #deepnest-dialog-input:focus-visible,
 #deepnest-dialog-send:focus-visible {
-  outline: 2px solid #7aa7ff;
+  outline: 2px solid var(--dn-accent);
   outline-offset: 1px;
 }
 
@@ -350,22 +427,22 @@
   margin-top: 0.45rem;
   margin-right: 0.35rem;
   padding: 0.35rem 0.7rem;
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  border: 1px solid var(--dn-line);
   border-radius: 6px;
   background: transparent;
-  color: rgba(244, 244, 246, 0.82);
+  color: var(--dn-ink-2);
   font: 500 13px/1.2 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   cursor: pointer;
 }
 
 #deepnest-dialog-attach:hover,
 #deepnest-dialog-capture:hover {
-  border-color: rgba(255, 255, 255, 0.5);
+  border-color: var(--dn-line-hover);
 }
 
 #deepnest-dialog-attach:focus-visible,
 #deepnest-dialog-capture:focus-visible {
-  outline: 2px solid #7aa7ff;
+  outline: 2px solid var(--dn-accent);
   outline-offset: 1px;
 }
 
@@ -388,7 +465,7 @@
   display: block;
   box-sizing: border-box;
   z-index: 1;
-  background: #0b0b0e;
+  background: var(--dn-deep);
   cursor: crosshair;
   /* A drag on a touch screen is a scroll unless this says otherwise, and a scroll is not a
    * rectangle. */
@@ -419,9 +496,9 @@
   position: absolute;
   display: block;
   box-sizing: border-box;
-  border: 1px solid #7aa7ff;
-  background: rgba(122, 167, 255, 0.14);
-  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.5);
+  border: 1px solid var(--dn-accent);
+  background: var(--dn-accent-tint);
+  box-shadow: 0 0 0 100vmax var(--dn-scrim);
   /* The drag is read from the sheet underneath. A rectangle that took the pointer would end the
    * drag the moment it appeared under it. */
   pointer-events: none;
@@ -444,17 +521,17 @@
   box-sizing: border-box;
   max-width: calc(100vw - 2rem);
   padding: 0.5rem 0.7rem;
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  border: 1px solid var(--dn-line);
   border-radius: 8px;
-  background: #1e1e23;
-  color: #f4f4f6;
+  background: var(--dn-surface);
+  color: var(--dn-ink);
   cursor: default;
 }
 
 #deepnest-dialog-shot-hint {
   display: block;
   margin: 0;
-  color: rgba(244, 244, 246, 0.78);
+  color: var(--dn-ink-2);
   font: 500 12px/1.2 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
@@ -463,17 +540,17 @@
 #deepnest-dialog-shot-cancel {
   display: inline-block;
   padding: 0.3rem 0.6rem;
-  border: 1px solid rgba(255, 255, 255, 0.22);
+  border: 1px solid var(--dn-line-strong);
   border-radius: 6px;
-  background: #2b2b32;
-  color: #f4f4f6;
+  background: var(--dn-raised);
+  color: var(--dn-ink);
   font: 600 12px/1.2 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   cursor: pointer;
 }
 
 /* The one button that finishes the job, and the only one disabled until there is a region. */
 #deepnest-dialog-shot-use {
-  border-color: rgba(122, 167, 255, 0.7);
+  border-color: var(--dn-accent-edge-strong);
 }
 
 #deepnest-dialog-shot-use:disabled {
@@ -484,7 +561,7 @@
 #deepnest-dialog-shot-use:focus-visible,
 #deepnest-dialog-shot-whole:focus-visible,
 #deepnest-dialog-shot-cancel:focus-visible {
-  outline: 2px solid #7aa7ff;
+  outline: 2px solid var(--dn-accent);
   outline-offset: 1px;
 }
 
@@ -492,16 +569,16 @@
   display: inline-block;
   margin-top: 0.45rem;
   padding: 0.35rem 0.7rem;
-  border: 1px solid rgba(255, 255, 255, 0.28);
+  border: 1px solid var(--dn-line-strong);
   border-radius: 6px;
-  background: #2b2b32;
-  color: #f4f4f6;
+  background: var(--dn-raised);
+  color: var(--dn-ink);
   font: 600 13px/1.2 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   cursor: pointer;
 }
 
 #deepnest-dialog-send:hover:not(:disabled) {
-  border-color: rgba(255, 255, 255, 0.55);
+  border-color: var(--dn-line-hover);
 }
 
 #deepnest-dialog-send:disabled {
@@ -518,10 +595,10 @@
   margin-top: 0.45rem;
   margin-left: 0.4rem;
   padding: 0.35rem 0.7rem;
-  border: 1px solid rgba(255, 255, 255, 0.22);
+  border: 1px solid var(--dn-line-strong);
   border-radius: 6px;
   background: transparent;
-  color: rgba(244, 244, 246, 0.78);
+  color: var(--dn-ink-2);
   font: 600 13px/1.2 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   cursor: pointer;
 }
@@ -531,8 +608,8 @@
 }
 
 #deepnest-dialog-stop:hover:not(:disabled) {
-  border-color: rgba(255, 255, 255, 0.5);
-  color: #f4f4f6;
+  border-color: var(--dn-line-hover);
+  color: var(--dn-ink);
 }
 
 #deepnest-dialog-stop:disabled {
@@ -541,7 +618,7 @@
 }
 
 #deepnest-dialog-stop:focus-visible {
-  outline: 2px solid #7aa7ff;
+  outline: 2px solid var(--dn-accent);
   outline-offset: 1px;
 }
 
@@ -550,7 +627,7 @@
 #deepnest-dialog-picture-note {
   display: block;
   margin: 0.4rem 0 0;
-  color: rgba(244, 244, 246, 0.62);
+  color: var(--dn-ink-4);
   font: 11px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   text-align: left;
 }
@@ -565,9 +642,9 @@
   box-sizing: border-box;
   margin: 0.7rem 0 0;
   padding: 0.6rem 0.65rem;
-  border: 1px solid rgba(255, 189, 106, 0.5);
+  border: 1px solid var(--dn-warn-edge);
   border-radius: 7px;
-  background: #23201a;
+  background: var(--dn-warn-surface);
 }
 
 #deepnest-dialog-asked[hidden] {
@@ -579,12 +656,12 @@
   display: block;
   margin: 0 0 0.4rem;
   font: 12px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: #f4f4f6;
+  color: var(--dn-ink);
   overflow-wrap: anywhere;
 }
 
 #deepnest-dialog-asked-why {
-  color: rgba(244, 244, 246, 0.76);
+  color: var(--dn-ink-2);
   font-style: italic;
 }
 
@@ -598,21 +675,21 @@
   min-height: 2.4rem;
   margin: 0 0 0.5rem;
   padding: 0.4rem 0.5rem;
-  border: 1px solid rgba(255, 255, 255, 0.22);
+  border: 1px solid var(--dn-line-strong);
   border-radius: 7px;
-  background: #16161a;
-  color: #f4f4f6;
+  background: var(--dn-well);
+  color: var(--dn-ink);
   font: 12px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   text-align: left;
   resize: vertical;
 }
 
 #deepnest-dialog-reason::placeholder {
-  color: rgba(244, 244, 246, 0.42);
+  color: var(--dn-ink-5);
 }
 
 #deepnest-dialog-reason:focus-visible {
-  outline: 2px solid #7aa7ff;
+  outline: 2px solid var(--dn-accent);
   outline-offset: 1px;
 }
 
@@ -621,22 +698,22 @@
   display: inline-block;
   margin: 0 0.35rem 0 0;
   padding: 0.3rem 0.6rem;
-  border: 1px solid rgba(255, 255, 255, 0.28);
+  border: 1px solid var(--dn-line-strong);
   border-radius: 6px;
-  background: #2b2b32;
-  color: #f4f4f6;
+  background: var(--dn-raised);
+  color: var(--dn-ink);
   font: 600 12px/1.2 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   cursor: pointer;
 }
 
 #deepnest-dialog-allow {
-  border-color: rgba(255, 189, 106, 0.65);
-  background: #33291a;
+  border-color: var(--dn-warn-edge);
+  background: var(--dn-warn-surface-raised);
 }
 
 #deepnest-dialog-allow:hover:not(:disabled),
 #deepnest-dialog-refuse:hover:not(:disabled) {
-  border-color: rgba(255, 255, 255, 0.55);
+  border-color: var(--dn-line-hover);
 }
 
 #deepnest-dialog-allow:disabled,
@@ -647,7 +724,7 @@
 
 #deepnest-dialog-allow:focus-visible,
 #deepnest-dialog-refuse:focus-visible {
-  outline: 2px solid #7aa7ff;
+  outline: 2px solid var(--dn-accent);
   outline-offset: 1px;
 }
 
@@ -658,7 +735,7 @@
   max-height: 9rem;
   overflow: auto;
   font: 12px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: rgba(244, 244, 246, 0.86);
+  color: var(--dn-ink-1);
   /* The agent's answer is Markdown and arrives as plain text; keeping the newlines is the
    * difference between a paragraph and a wall. */
   white-space: pre-wrap;
@@ -670,14 +747,14 @@
 }
 
 #deepnest-dialog-answer.bad {
-  color: #ff9d90;
+  color: var(--dn-bad-ink);
 }
 
 /* A turn that is still running, as opposed to an answer. Monospace and dimmer because it is a
  * reading of the machine's state that will be replaced, not something the agent said. */
 #deepnest-dialog-answer.live {
   font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: rgba(244, 244, 246, 0.62);
+  color: var(--dn-ink-4);
 }
 
 /* An answer still being written. The type is the answer's own — these are the agent's words, not a
@@ -685,7 +762,7 @@
  * leaves with the class, which `say` takes off when the answer is whole. */
 #deepnest-dialog-answer.typing::after {
   content: "\258d";
-  color: rgba(244, 244, 246, 0.45);
+  color: var(--dn-ink-5);
 }
 
 /* The answer has been handed to the transcript, which draws the same words one box down and is the
@@ -744,7 +821,7 @@
 #deepnest-dialog-transcript {
   color-scheme: dark;
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.24) transparent;
+  scrollbar-color: var(--dn-line-strong) transparent;
 }
 
 #deepnest-dialog-transcript::-webkit-scrollbar {
@@ -757,7 +834,7 @@
 
 #deepnest-dialog-transcript::-webkit-scrollbar-thumb {
   border-radius: 4px;
-  background: rgba(255, 255, 255, 0.24);
+  background: var(--dn-line-strong);
 }
 
 #deepnest-dialog-transcript[hidden] {
@@ -768,7 +845,7 @@
  * scroll box cannot tell that the arrow keys now move this and not the page. Drawn *inside* the
  * box — a ring outside it would land on the jump button and the message box beneath. */
 #deepnest-dialog-transcript:focus-visible {
-  outline: 2px solid #7aa7ff;
+  outline: 2px solid var(--dn-accent);
   outline-offset: -2px;
 }
 
@@ -776,7 +853,7 @@
   display: block;
   box-sizing: border-box;
   padding: 0.4rem 0 0.5rem;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  border-top: 1px solid var(--dn-line-soft);
 }
 
 /* The oldest turns the window has not reached. It sits inside the scrolling box, above the first
@@ -790,19 +867,19 @@
   width: 100%;
   margin: 0 0 0.35rem;
   padding: 0.3rem 0.45rem;
-  border: 1px dashed rgba(255, 255, 255, 0.22);
+  border: 1px dashed var(--dn-line-strong);
   border-radius: 4px;
   background: transparent;
   font: 11px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: rgba(244, 244, 246, 0.7);
+  color: var(--dn-ink-3);
   text-align: center;
   cursor: pointer;
 }
 
 #deepnest-dialog-earlier:hover,
 #deepnest-dialog-earlier:focus-visible {
-  border-color: rgba(110, 168, 254, 0.5);
-  color: #cfe0ff;
+  border-color: var(--dn-accent-edge);
+  color: var(--dn-accent-ink);
 }
 
 /* The first turn drawn carries no top border, and the control above it is a button rather than a
@@ -821,7 +898,7 @@
   gap: 0.4rem;
   margin: 0;
   font: 600 12px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: #ffffff;
+  color: var(--dn-ink-strong);
 }
 
 #deepnest-dialog-transcript .deepnest-asked-words {
@@ -843,7 +920,7 @@
   flex: none;
   box-sizing: border-box;
   font: 10px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: rgba(244, 244, 246, 0.45);
+  color: var(--dn-ink-5);
   white-space: nowrap;
   /* Read in the reader's zone, so the digits are the ones on their own clock; the full stamp stays
    * in `title` for anyone who needs the day as well as the hour. */
@@ -855,7 +932,7 @@
   box-sizing: border-box;
   margin: 0.1rem 0 0;
   font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: rgba(244, 244, 246, 0.55);
+  color: var(--dn-ink-4);
 }
 
 /* The agent's words, laid out. Scoped to the dialog rather than to the transcript because these
@@ -871,7 +948,7 @@
   box-sizing: border-box;
   margin: 0.25rem 0 0;
   font: 12px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: rgba(244, 244, 246, 0.9);
+  color: var(--dn-ink-1);
   overflow-wrap: anywhere;
 }
 
@@ -882,7 +959,7 @@
  * `weight 400` and `EM` computed `style normal`. */
 #deepnest-dialog .deepnest-said strong {
   font-weight: 600;
-  color: #ffffff;
+  color: var(--dn-ink-strong);
 }
 
 #deepnest-dialog .deepnest-said em {
@@ -913,7 +990,7 @@
 #deepnest-dialog .deepnest-said h5,
 #deepnest-dialog .deepnest-said h6 {
   font: 600 12px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: #ffffff;
+  color: var(--dn-ink-strong);
 }
 
 /* The reset at the top of this file sets `display` on *every* descendant, and the initial value of
@@ -946,7 +1023,7 @@
   font-size: 13px;
   font-weight: 600;
   line-height: 1.35;
-  color: #ffffff;
+  color: var(--dn-ink-strong);
 }
 
 #deepnest-dialog .deepnest-said h4,
@@ -956,7 +1033,7 @@
   font-size: 12px;
   font-weight: 600;
   line-height: 1.35;
-  color: #dfe3ea;
+  color: var(--dn-ink-1);
 }
 
 /* A list item is `list-item` rather than `block`: that is the value that draws the marker outside
@@ -1015,7 +1092,7 @@
   border-collapse: collapse;
   table-layout: fixed;
   font: 11px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: rgba(244, 244, 246, 0.9);
+  color: var(--dn-ink-1);
 }
 
 #deepnest-dialog .deepnest-said thead {
@@ -1035,7 +1112,7 @@
   display: table-cell;
   box-sizing: border-box;
   padding: 0.22rem 0.32rem;
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  border: 1px solid var(--dn-line);
   text-align: left;
   vertical-align: top;
   overflow-wrap: anywhere;
@@ -1045,8 +1122,8 @@
  * reset gives every descendant black, and the shade separates it from the rows under it. */
 #deepnest-dialog .deepnest-said th {
   font-weight: 600;
-  color: #ffffff;
-  background: rgba(255, 255, 255, 0.06);
+  color: var(--dn-ink-strong);
+  background: var(--dn-tint);
 }
 
 /* Where the delimiter row put a colon. `left` is the cell rule's own default and needs no class. */
@@ -1067,8 +1144,8 @@
   font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
   padding: 0 0.2rem;
   border-radius: 3px;
-  background: rgba(255, 255, 255, 0.1);
-  color: #f4f4f6;
+  background: var(--dn-tint);
+  color: var(--dn-ink);
 }
 
 /* `display` and `box-sizing` are spelled out because `all: initial` above leaves a `pre` an
@@ -1082,7 +1159,7 @@
   margin: 0.3rem 0 0;
   padding: 0.4rem 0.5rem;
   border-radius: 4px;
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--dn-code-ground);
   overflow-x: auto;
 }
 
@@ -1117,7 +1194,7 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: #f4f4f6;
+  color: var(--dn-ink);
 }
 
 /* A fenced block and the head above it. `all: initial` still comes first — the app's stylesheet
@@ -1164,26 +1241,26 @@
   box-sizing: border-box;
   margin: 0.15rem 0 0;
   padding: 0.1rem 0.35rem;
-  border: 1px solid rgba(110, 168, 254, 0.45);
+  border: 1px solid var(--dn-accent-edge);
   border-radius: 4px;
-  background: rgba(110, 168, 254, 0.12);
+  background: var(--dn-accent-tint);
   font: 10px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: #cddaf5;
+  color: var(--dn-accent-ink);
   cursor: pointer;
 }
 
 #deepnest-dialog-transcript .deepnest-code-more:hover,
 #deepnest-dialog-transcript .deepnest-code-more:focus-visible {
-  border-color: rgba(110, 168, 254, 0.8);
-  background: rgba(110, 168, 254, 0.22);
-  color: #ffffff;
+  border-color: var(--dn-accent-edge-strong);
+  background: var(--dn-accent-tint-strong);
+  color: var(--dn-ink-strong);
 }
 
 #deepnest-dialog-transcript .deepnest-code-language {
   all: initial;
   display: block;
   font: 10px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: rgba(244, 244, 246, 0.45);
+  color: var(--dn-ink-5);
 }
 
 #deepnest-dialog-transcript .deepnest-code-copy,
@@ -1192,11 +1269,11 @@
   display: inline-block;
   box-sizing: border-box;
   padding: 0.1rem 0.35rem;
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  border: 1px solid var(--dn-line);
   border-radius: 3px;
   background: transparent;
   font: 10px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: rgba(244, 244, 246, 0.65);
+  color: var(--dn-ink-3);
   white-space: nowrap;
   cursor: pointer;
 }
@@ -1205,22 +1282,22 @@
 #deepnest-dialog-transcript .deepnest-code-copy:focus-visible,
 #deepnest-dialog-transcript .deepnest-answer-copy:hover,
 #deepnest-dialog-transcript .deepnest-answer-copy:focus-visible {
-  border-color: rgba(110, 168, 254, 0.5);
-  color: #cfe0ff;
+  border-color: var(--dn-accent-edge);
+  color: var(--dn-accent-ink);
 }
 
 /* What the press did, in the control itself: a copy with no answer looks the same whether it
  * worked or not, and the person has no way to tell a clipboard write from a dead button. */
 #deepnest-dialog-transcript .deepnest-code-copy[data-copied="yes"],
 #deepnest-dialog-transcript .deepnest-answer-copy[data-copied="yes"] {
-  border-color: rgba(122, 199, 145, 0.6);
-  color: #a8e6bd;
+  border-color: var(--dn-ok-edge);
+  color: var(--dn-ok-ink);
 }
 
 #deepnest-dialog-transcript .deepnest-code-copy[data-copied="no"],
 #deepnest-dialog-transcript .deepnest-answer-copy[data-copied="no"] {
-  border-color: rgba(226, 129, 129, 0.6);
-  color: #f0a8a8;
+  border-color: var(--dn-bad-edge);
+  color: var(--dn-bad-ink);
 }
 
 /* The answer's own control sits under the last line and to the right, rather than beside the text:
@@ -1235,7 +1312,7 @@
  * undecorated, so the only thing separating it from the sentence it sits in was a blue that a
  * reader who cannot separate blue from white does not get. */
 #deepnest-dialog .deepnest-said a {
-  color: #7aa7ff;
+  color: var(--dn-accent);
   text-decoration: underline;
 }
 
@@ -1259,14 +1336,14 @@
 }
 
 #deepnest-dialog-transcript .deepnest-call-name {
-  color: rgba(244, 244, 246, 0.95);
+  color: var(--dn-ink-1);
 }
 
 /* The argument is what a long path lives in, so it is the one part that gives way: without this a
  * deep path pushes the ending off the edge of a 22rem panel, and the ending is the whole point of
  * the row. */
 #deepnest-dialog-transcript .deepnest-call-what {
-  color: rgba(244, 244, 246, 0.6);
+  color: var(--dn-ink-4);
   flex: 1 1 6rem;
   min-width: 0;
   overflow: hidden;
@@ -1277,7 +1354,7 @@
 /* The ending, and the only colour that carries a verdict: a refusal is not a failure, and neither
  * is the ordinary end of a call. */
 #deepnest-dialog-transcript .deepnest-call-state {
-  color: rgba(244, 244, 246, 0.45);
+  color: var(--dn-ink-5);
   margin-left: auto;
   /* One word, never broken: a state reading "refu⏎sed" is a state nobody reads. */
   white-space: nowrap;
@@ -1285,19 +1362,19 @@
 }
 
 #deepnest-dialog-transcript .deepnest-call-ok .deepnest-call-state {
-  color: #6bbf7a;
+  color: var(--dn-ok);
 }
 
 #deepnest-dialog-transcript .deepnest-call-failed .deepnest-call-state {
-  color: #e0716d;
+  color: var(--dn-bad);
 }
 
 #deepnest-dialog-transcript .deepnest-call-refused .deepnest-call-state {
-  color: #d8a53a;
+  color: var(--dn-warn);
 }
 
 #deepnest-dialog-transcript .deepnest-call-waiting .deepnest-call-state {
-  color: #6ea8fe;
+  color: var(--dn-accent);
 }
 
 #deepnest-dialog-transcript .deepnest-call-out {
@@ -1310,12 +1387,12 @@
 #deepnest-dialog-transcript .deepnest-call-out summary {
   display: block;
   cursor: pointer;
-  color: rgba(244, 244, 246, 0.45);
+  color: var(--dn-ink-5);
 }
 
 #deepnest-dialog-transcript .deepnest-call-out summary::before {
   content: "\25B8\00a0";
-  color: rgba(244, 244, 246, 0.5);
+  color: var(--dn-ink-5);
 }
 
 #deepnest-dialog-transcript .deepnest-call-out[open] > summary::before {
@@ -1333,8 +1410,8 @@
   max-height: 12rem;
   overflow: auto;
   border-radius: 4px;
-  background: rgba(0, 0, 0, 0.35);
-  color: rgba(244, 244, 246, 0.8);
+  background: var(--dn-code-ground);
+  color: var(--dn-ink-2);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -1348,11 +1425,11 @@
   box-sizing: border-box;
   margin: 0.15rem 0 0.6rem;
   padding: 0.15rem 0.4rem;
-  border: 1px solid rgba(110, 168, 254, 0.5);
+  border: 1px solid var(--dn-accent-edge);
   border-radius: 999px;
-  background: rgba(110, 168, 254, 0.14);
+  background: var(--dn-accent-tint);
   font: 11px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: #cfe0ff;
+  color: var(--dn-accent-ink);
   cursor: pointer;
 }
 
@@ -1371,12 +1448,12 @@
   width: 100%;
   margin: 0.2rem 0 0.35rem;
   padding: 0.25rem 0.5rem;
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  border: 1px solid var(--dn-line);
   border-radius: 0.35rem;
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--dn-tint);
   font: 12px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: #f4f4f6;
-  caret-color: #7aa7ff;
+  color: var(--dn-ink);
+  caret-color: var(--dn-accent);
 }
 
 #deepnest-dialog-find[hidden] {
@@ -1384,7 +1461,7 @@
 }
 
 #deepnest-dialog-find::placeholder {
-  color: rgba(244, 244, 246, 0.45);
+  color: var(--dn-ink-5);
 }
 
 #deepnest-dialog-found {
@@ -1393,7 +1470,7 @@
   box-sizing: border-box;
   margin: 0 0 0.4rem;
   font: 11px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: rgba(244, 244, 246, 0.62);
+  color: var(--dn-ink-4);
 }
 
 #deepnest-dialog-found[hidden] {
@@ -1406,7 +1483,7 @@
   box-sizing: border-box;
   margin: 0.1rem 0 0;
   font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: rgba(122, 167, 255, 0.9);
+  color: var(--dn-accent);
   overflow-wrap: anywhere;
 }
 
@@ -1416,10 +1493,10 @@
   box-sizing: border-box;
   margin: 0.3rem 0 0;
   padding: 0.3rem 0.45rem;
-  border-left: 2px solid #d8a53a;
-  background: rgba(216, 165, 58, 0.12);
+  border-left: 2px solid var(--dn-warn);
+  background: var(--dn-warn-tint);
   font: 11px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: #f0d9a8;
+  color: var(--dn-warn-ink);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -1428,8 +1505,8 @@
  * dot — the count in the line under the box already moves every second, and a second thing moving
  * on the page buys nothing. */
 #deepnest-dialog-transcript .deepnest-running {
-  border-left: 2px solid #6ea8fe;
+  border-left: 2px solid var(--dn-accent);
   padding-left: 0.45rem;
   margin-left: -0.45rem;
-  background: rgba(110, 168, 254, 0.07);
+  background: var(--dn-accent-tint);
 }
