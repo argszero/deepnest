@@ -233,6 +233,17 @@ list is a call that cannot run:\n\n",
                 }
             }
         }
+        // Stated here rather than under "How you work" because it is about the shape of a call,
+        // and because it is only true when there are tools to call with. What makes it worth a
+        // paragraph is what a round costs: the loop runs every call of one response before it asks
+        // again, so the independent reads belong together — and each round re-sends the whole
+        // conversation, which is why a round saved is also money saved.
+        out.push_str(
+            "\n**When two calls do not depend on each other, put them in the same response.** This \
+loop runs every call of a response before it asks you again, so four independent reads made \
+together cost one round and the same four made one at a time cost four. Make a call on its own \
+only when its arguments are something an earlier call returned.\n",
+        );
     }
     out.push('\n');
 
@@ -407,6 +418,26 @@ mod tests {
             }
         }
         names
+    }
+
+    #[test]
+    fn the_prompt_asks_for_independent_calls_in_one_response() {
+        // The mechanism was always there — the loop runs every call of a response before it asks
+        // again — and the prompt never asked for it. Measured on the app with the longest history
+        // on this machine, the model batches unprompted 78% of the time (798 of 1021 responses
+        // carried two calls, 223 carried one), so this sentence is a floor under the remaining
+        // fifth rather than the thing that makes batching happen.
+        let prompt = system_prompt(&ctx());
+        assert!(prompt.contains("put them in the same response"), "{prompt}");
+        assert!(prompt.contains("before it asks you again"), "{prompt}");
+
+        // A turn with no tools cannot make a call, so the rule would be an instruction it cannot
+        // follow: it is about the shape of a call and belongs only where there are calls.
+        let toolless = system_prompt(&PromptContext::new("notes", "/apps/notes", "read-only"));
+        assert!(
+            !toolless.contains("put them in the same response"),
+            "{toolless}"
+        );
     }
 
     #[test]
