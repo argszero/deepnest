@@ -498,6 +498,13 @@ impl Agent {
             }
 
             for call in &turn.tool_calls {
+                // The context every call of this turn runs under. Built once per turn so that the
+                // borrowed path inside `dispatch_in` still borrows, and so that a call which
+                // escalates inherits the same stop signal for free.
+                let call_ctx = self.ctx.clone().with_stop({
+                    let cancel = cancel.clone();
+                    move || cancel.is_cancelled()
+                });
                 if cancel.is_cancelled() {
                     // The calls that did not run are named in the file, so a reader can tell a
                     // cancelled batch from a model that asked for less.
@@ -512,11 +519,26 @@ impl Agent {
                         usage,
                     });
                 }
-                let result = self.dispatch(call);
+                let result = self.dispatch_in(call, &call_ctx);
                 // Read the ending before the content is moved into the message: both come from
                 // the same result, and only one of them is for the model.
                 let outcome = result.outcome();
                 self.append_result(&Message::tool(call.id.clone(), result.content), outcome)?;
+                // A call that was abandoned reports it, and the turn ends here rather than at the
+                // top of the next one: the checkpoint before the next round would work too, and
+                // it would ask the model for another request first — the one thing a stop exists
+                // to prevent. The tool that ran already wrote its own ending to the record, so
+                // the file keeps the whole of what happened.
+                if cancel.is_cancelled() {
+                    self.note(
+                        "the turn was stopped while a tool was running; the tool was abandoned \
+                         and no further call was made",
+                    )?;
+                    return Ok(TurnOutcome::Cancelled {
+                        note: "the turn was stopped; the running tool was abandoned".to_string(),
+                        usage,
+                    });
+                }
             }
         }
 
@@ -537,6 +559,16 @@ impl Agent {
     /// or that names a tool this agent does not have, comes back as a refusal naming what is
     /// wrong and what exists. A model told only "error" will make the same call again.
     pub fn dispatch(&self, call: &deepnest_llm::ToolCall) -> ToolResult {
+        self.dispatch_in(call, &self.ctx)
+    }
+
+    /// The same dispatch, under a context that carries this turn's stop signal.
+    ///
+    /// The context is the parameter rather than the field because the one thing a turn adds to it
+    /// is something only the turn has: [`Cancellation`]. Everything else — the policy, the working
+    /// directory, the scanner — is what `self.ctx` already holds, and the widening path below still
+    /// builds its own rather than mutating either.
+    pub fn dispatch_in(&self, call: &deepnest_llm::ToolCall, base: &ToolContext) -> ToolResult {
         let name = call.function.name.as_str();
         let Some(tool) = self.tools.iter().find(|tool| tool.name() == name) else {
             let available: Vec<&str> = self.tools.iter().map(|tool| tool.name()).collect();
@@ -566,7 +598,7 @@ impl Agent {
                 }
             }
         };
-        let (arguments, wanted) = match approve::take_request(&arguments, self.ctx.policy.mode()) {
+        let (arguments, wanted) = match approve::take_request(&arguments, base.policy.mode()) {
             Ok(pair) => pair,
             Err(reason) => return ToolResult::refused(name.to_string(), reason),
         };
@@ -575,7 +607,7 @@ impl Agent {
         // policy" is visible in the code that runs.
         let widened;
         let ctx = match &wanted {
-            None => &self.ctx,
+            None => base,
             Some(request) => {
                 // The jump table first, and before anybody is asked. A host shown "widen
                 // workspace-write to read-only?" is being asked to approve a narrowing; a host
@@ -632,11 +664,11 @@ impl Agent {
                 // Approved. The grant is built from the session's own policy, which is *borrowed*
                 // and never written to, and it is moved into this call's context and dropped with
                 // it: the next call starts from the session's mode again, whatever this one got.
-                match Grant::approve(request.clone(), &self.ctx.policy) {
+                match Grant::approve(request.clone(), &base.policy) {
                     Ok(grant) => {
-                        widened =
-                            ToolContext::new(grant.policy().clone(), self.ctx.workdir.clone())
-                                .with_scan(self.ctx.scan.clone());
+                        widened = ToolContext::new(grant.policy().clone(), base.workdir.clone())
+                            .with_scan(base.scan.clone())
+                            .stop_like(base);
                         &widened
                     }
                     Err(refusal) => {
@@ -659,7 +691,7 @@ impl Agent {
                     "[ran at {} — the host approved this widening for this call only; the session \
                      is still {}]\n{}",
                     request.to(),
-                    self.ctx.policy.mode(),
+                    base.policy.mode(),
                     result.content
                 ),
                 ..result
@@ -1812,6 +1844,72 @@ mod tests {
             .count();
         assert_eq!(responses, 1, "only the call that ran has a result");
         assert_eq!(model.calls(), 1, "no second request after the cancel");
+    }
+
+    /// A tool that was running when the stop arrived ends the turn there.
+    ///
+    /// The checkpoint before the next round already stopped the *next* request, and what it left
+    /// behind was the thing a person pressed stop to end: the call in flight. So the flag is
+    /// handed to the tool, the tool abandons its work — [`deepnest_tools::shell`] kills the child —
+    /// and the loop reads the ending it comes back with. Two things are asserted, because the
+    /// difference between them is the whole point: the turn ends as cancelled, and the model is
+    /// never asked again.
+    #[test]
+    fn a_stop_while_a_tool_is_running_ends_the_turn_without_another_request() {
+        struct StopsMidCall {
+            cancel: Cancellation,
+            saw_signal: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl Tool for StopsMidCall {
+            fn name(&self) -> &'static str {
+                "read"
+            }
+            fn definition(&self) -> ToolDefinition {
+                ToolDefinition::function("read", "reads", serde_json::json!({"type": "object"}))
+            }
+            fn call(&self, _args: &Value, ctx: &ToolContext) -> ToolResult {
+                // What a real tool does: ask the context, from inside the call, whether the turn
+                // it belongs to has been told to stop — and find out that the answer is yes.
+                self.saw_signal
+                    .store(ctx.stop.is_some(), std::sync::atomic::Ordering::SeqCst);
+                self.cancel.cancel();
+                assert!(ctx.stopped(), "the context carries the turn\'s own answer");
+                ToolResult::error("read", "abandoned while running")
+            }
+        }
+        let scratch = Scratch::new("cancel-running-tool");
+        let cancel = Cancellation::new();
+        let saw = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let model = ScriptedModel::new(vec![
+            Ok(asks(vec![call("read", "{}")])),
+            Ok(answer("should never be asked for")),
+        ]);
+        let agent = scratch.agent_with_tools(
+            model.clone(),
+            vec![Box::new(StopsMidCall {
+                cancel: cancel.clone(),
+                saw_signal: saw.clone(),
+            })],
+        );
+        let outcome = agent.run_turn("read one thing", &cancel).unwrap();
+        assert!(
+            saw.load(std::sync::atomic::Ordering::SeqCst),
+            "the tool was given a stop handle, not an empty context"
+        );
+        assert!(
+            matches!(outcome, TurnOutcome::Cancelled { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(model.calls(), 1, "the stop saved the second request");
+        let records = agent.session().records().unwrap();
+        assert!(
+            records.iter().any(|record| record.role == "agent"
+                && record
+                    .content
+                    .as_deref()
+                    .is_some_and(|text| text.contains("abandoned"))),
+            "the turn's own note says the tool was abandoned"
+        );
     }
 
     /// The cost of a turn is the sum of its rounds, not the last round's number.

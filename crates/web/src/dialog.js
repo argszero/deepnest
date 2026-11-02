@@ -139,12 +139,17 @@
 
   // A stop that has been asked for and has not happened yet.
   //
-  // The route answers "the turn was asked to stop; it ends before its next request or tool call",
-  // which is the truth — the flag is read at the loop's own checkpoints, so a turn in the middle of
-  // a model call goes on until that call returns. Measured on this page: pressing Stop during a
-  // model call changed nothing a person could see for tens of seconds, because the button kept
-  // saying "Stop" and the progress line underneath it went on counting. That is the reading the
-  // host reported as "pressing stop does not stop".
+  // The route answers "the turn was asked to stop", which is the truth, and what that means has
+  // one half a person can rely on and one they cannot. A tool that is running is abandoned: the
+  // call is told to stop and the command it spawned is killed, so the seconds a stop saves are the
+  // ones a build or a search was spending. A model call in flight cannot be — an HTTP request is
+  // already on the wire and there is nothing to kill — so a turn inside one ends when that call
+  // returns. Both are stated rather than the better one alone, because a person who presses stop
+  // during a model call and sees thirty more seconds is owed the reason.
+  //
+  // Measured on this page: pressing Stop during a model call changed nothing a person could see
+  // for tens of seconds, because the button kept saying "Stop" and the progress line underneath it
+  // went on counting. That is the reading the host reported as "pressing stop does not stop".
   //
   // So the press is said at the press. The button is the one place nothing else writes to: the
   // answer box belongs to the model's stream while it is writing, and the progress line is
@@ -3440,7 +3445,10 @@
     stopping = true;
     stop.disabled = true;
     stop.textContent = STOPPING_LABEL;
-    showStopping("Stopping \u2014 this ends before the turn's next request or tool call.");
+    showStopping(
+      "Stopping \u2014 a running command is killed now; a model call already sent ends when it " +
+        "returns."
+    );
     fetch(stoppingRoute(), {
       method: "POST",
       credentials: "same-origin",

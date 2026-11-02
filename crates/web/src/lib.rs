@@ -3210,7 +3210,8 @@ mod tests {
     fn a_stop_is_said_when_it_is_pressed_and_not_when_the_reply_arrives() {
         // The reported defect: "pressing stop does not stop". The handler was wired — the press
         // reached `POST .../cancel` and the server set the flag — but the route's whole answer is
-        // "the turn was asked to stop; it ends before its next request or tool call", and the page
+        // "the turn was asked to stop; it ends before its next request or tool call" (the wording
+        // then — a running command is killed now, see `crates/tools::shell`), and the page
         // waited for that reply before saying anything while the button went on reading "Stop".
         // For the tens of seconds a model call takes, the page said nothing at all.
         let press = &DIALOG_SCRIPT[DIALOG_SCRIPT

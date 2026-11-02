@@ -1436,10 +1436,12 @@ impl Router {
         let stopping = self.turns.stop(slug.as_str());
         let note = match stopping {
             0 => format!("no turn is running for `{slug}`"),
-            1 => "the turn was asked to stop; it ends before its next request or tool call"
+            1 => "the turn was asked to stop; a command it is running is killed, and a model \
+                  call already sent ends when that call returns"
                 .to_string(),
             n => format!(
-                "{n} turns were asked to stop; each ends before its next request or tool call"
+                "{n} turns were asked to stop; each has its running command killed, and a model \
+                 call already sent ends when that call returns"
             ),
         };
         Response::json(

@@ -45,6 +45,7 @@ pub mod skill;
 pub mod subagent;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use deepnest_llm::ToolDefinition;
 use serde_json::Value;
@@ -144,6 +145,11 @@ impl ToolResult {
 ///
 /// One context per call rather than one per session: the policy is a value the caller resolved
 /// for *this* tool call, so an escalation approved for one call cannot leak into the next.
+///
+/// `Clone` because a turn builds one of these and hands it to every call it makes: the stop handle
+/// has to reach a child that is already running, and rebuilding the context per call would be the
+/// allocation the borrowed path exists to avoid.
+#[derive(Clone)]
 pub struct ToolContext {
     /// The file-effect policy for this call.
     pub policy: deepnest_sandbox::Policy,
@@ -153,6 +159,17 @@ pub struct ToolContext {
     /// The command scanner's configuration. Carried here rather than read from a global so a
     /// test can set the program names it expects.
     pub scan: deepnest_command_scan::ScanConfig,
+    /// Asked, while a call is running, whether the turn it belongs to has been told to stop.
+    ///
+    /// A checkpoint between calls is not enough for the one thing a turn can spend minutes on: a
+    /// shell command is a child process, and a loop that only looks at the flag *before* the next
+    /// call leaves that child running after the person pressed stop and after the turn reported
+    /// itself finished. So the handle travels to the tool rather than the answer travelling back
+    /// from it — the process that can be abandoned is the only one that can abandon it.
+    ///
+    /// Absent for every call made outside a turn — a rebuild, an install, a test — because there
+    /// is nothing there to stop.
+    pub stop: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl ToolContext {
@@ -161,7 +178,28 @@ impl ToolContext {
             policy,
             workdir: workdir.into(),
             scan: deepnest_command_scan::ScanConfig::default(),
+            stop: None,
         }
+    }
+
+    /// Carry the turn's stop signal into every call this context is handed to.
+    pub fn with_stop(mut self, stop: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        self.stop = Some(Arc::new(stop));
+        self
+    }
+
+    /// Borrow another context's stop signal, and nothing else.
+    ///
+    /// The widening path builds a new context for one call, and that call is no less abandonable
+    /// than the ones around it: an escalation moves the policy, never the turn.
+    pub fn stop_like(mut self, other: &ToolContext) -> Self {
+        self.stop = other.stop.clone();
+        self
+    }
+
+    /// Whether the turn has been asked to stop.
+    pub fn stopped(&self) -> bool {
+        self.stop.as_ref().is_some_and(|stop| stop())
     }
 
     pub fn with_scan(mut self, scan: deepnest_command_scan::ScanConfig) -> Self {
