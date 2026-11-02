@@ -1400,6 +1400,42 @@
   margin: var(--dn-space-xs) 0 0;
 }
 
+/* One batch of calls — a response that asked for several things — folded to a single line. The
+ * rows inside are the ones a lone call draws, so a call is not a different shape for having
+ * siblings. */
+#deepnest-dialog-transcript .deepnest-calls-group {
+  display: block;
+  box-sizing: border-box;
+  margin: var(--dn-space-2xs) 0 0;
+  font: var(--dn-text-meta)/var(--dn-leading) ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Same reason as the output disclosure below: `all: initial` leaves a `summary` an inline box with
+ * no marker of its own, so the count would be a sentence with nothing on screen saying it opens. */
+#deepnest-dialog-transcript .deepnest-calls-group > summary {
+  display: block;
+  cursor: pointer;
+  color: var(--dn-ink-3);
+}
+
+#deepnest-dialog-transcript .deepnest-calls-group > summary::before {
+  content: "\25B8\00a0";
+  color: var(--dn-ink-5);
+}
+
+#deepnest-dialog-transcript .deepnest-calls-group[open] > summary::before {
+  content: "\25BE\00a0";
+}
+
+/* An open batch is indented: without it the rows read as the turn's own list resumed rather than
+ * as the inside of the one line above them. */
+#deepnest-dialog-transcript .deepnest-calls-group-rows {
+  display: block;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0 0 0 var(--dn-space-xl);
+}
+
 #deepnest-dialog-transcript .deepnest-call {
   display: flex;
   box-sizing: border-box;
