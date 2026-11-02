@@ -27,6 +27,7 @@
 //! answer carries the app's own content type and headers, so the response type has to hold them,
 //! and a type that can hold an arbitrary header belongs with the code that forwards them.
 
+pub mod appcontrol;
 pub mod cancel;
 pub mod capture;
 pub mod chat;
