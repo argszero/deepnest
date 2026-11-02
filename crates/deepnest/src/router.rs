@@ -973,12 +973,21 @@ impl Router {
                     "apps": listing
                         .apps
                         .iter()
-                        .map(|app| json!({
-                            "slug": app.slug.as_str(),
-                            "name": app.display_name(),
-                            "template": app.manifest.app.template,
-                            "path": app.dir.display().to_string(),
-                        }))
+                        .map(|app| {
+                            // Listing is a directory read, so it cannot know what is up; the
+                            // supervisor can. Without one, `process_fields` says "cannot say"
+                            // rather than "stopped".
+                            let state = self
+                                .lifecycle
+                                .as_ref()
+                                .map(|lifecycle| lifecycle.supervisor.state(&app.slug));
+                            let mut entry = process_fields(state.as_ref());
+                            entry.insert("slug".to_string(), json!(app.slug.as_str()));
+                            entry.insert("name".to_string(), json!(app.display_name()));
+                            entry.insert("template".to_string(), json!(app.manifest.app.template));
+                            entry.insert("path".to_string(), json!(app.dir.display().to_string()));
+                            Value::Object(entry)
+                        })
                         .collect::<Vec<_>>(),
                     "skipped": listing
                         .skipped
@@ -1910,24 +1919,42 @@ fn started(slug: &Slug, outcome: Result<State, StartError>) -> Response {
     }
 }
 
+/// What is true about an app's process, as the fields every answer about one carries.
+///
+/// `None` is "this process cannot be asked" — a router started without a lifecycle — and it is
+/// written as four nulls rather than as `stopped`. "Not running" and "nothing here can say" are
+/// different claims, and a listing that answered the first when it meant the second would make a
+/// working app look stopped.
+///
+/// Shared by [`state_body`] and the app listing so the two cannot drift: a listing that learnt
+/// `state` from one place and `port` from another is how an app comes to read `running` with no
+/// port for "Open" to point at.
+fn process_fields(state: Option<&State>) -> serde_json::Map<String, Value> {
+    let (word, port, pid, reason) = match state {
+        None => (Value::Null, Value::Null, Value::Null, Value::Null),
+        Some(state) => {
+            let (port, pid, reason) = match state {
+                State::Stopped => (Value::Null, Value::Null, Value::Null),
+                State::Running { port, pid } => (json!(port), json!(pid), Value::Null),
+                State::Failed { reason } => (Value::Null, Value::Null, json!(reason)),
+            };
+            (json!(state.word()), port, pid, reason)
+        }
+    };
+
+    let mut fields = serde_json::Map::new();
+    fields.insert("state".to_string(), word);
+    fields.insert("port".to_string(), port);
+    fields.insert("pid".to_string(), pid);
+    fields.insert("reason".to_string(), reason);
+    fields
+}
+
 /// What is true about an app, as JSON.
 fn state_body(slug: &Slug, state: &State) -> Response {
-    let (port, pid, reason) = match state {
-        State::Stopped => (Value::Null, Value::Null, Value::Null),
-        State::Running { port, pid } => (json!(port), json!(pid), Value::Null),
-        State::Failed { reason } => (Value::Null, Value::Null, json!(reason)),
-    };
-    Response::json(
-        200,
-        json!({
-            "slug": slug.as_str(),
-            "state": state.word(),
-            "port": port,
-            "pid": pid,
-            "reason": reason,
-        })
-        .to_string(),
-    )
+    let mut body = process_fields(Some(state));
+    body.insert("slug".to_string(), json!(slug.as_str()));
+    Response::json(200, Value::Object(body).to_string())
 }
 
 fn error_body(message: &str) -> String {
@@ -2491,6 +2518,65 @@ mod tests {
         let response = router.respond(&authorized_get("/api/apps")).complete();
         assert_eq!(response.status, 500);
         assert!(body(&response).contains("cannot list"), "{:?}", response);
+    }
+
+    /// One app out of a listing, by slug.
+    fn listed(listing: &str, slug: &str) -> Value {
+        let value: Value = serde_json::from_str(listing).expect("the listing is not JSON");
+        value["apps"]
+            .as_array()
+            .expect("the listing has no apps array")
+            .iter()
+            .find(|app| app["slug"] == slug)
+            .unwrap_or_else(|| panic!("{slug} is not in {listing}"))
+            .clone()
+    }
+
+    #[test]
+    fn the_listing_says_which_app_is_running_and_not_only_which_ones_exist() {
+        // A directory read cannot know what is up, so the panel drew the same row for an app that
+        // was serving and one that was not, and the only way to find out was to press "Open" and
+        // read the answer. The supervisor already knew: this is the listing asking it, so a row
+        // can say what it is before it is pressed.
+        let scratch = Scratch::new("apps-state");
+        scratch.built_app("notes", "Notes");
+        scratch.app("todo", "Todo");
+        let router = supervised(&scratch);
+
+        let before = body(&router.respond(&authorized_get("/api/apps")).complete());
+        assert_eq!(listed(&before, "notes")["state"], "stopped", "{before}");
+        assert!(listed(&before, "notes")["port"].is_null(), "{before}");
+
+        let started = router.respond(&post("/api/apps/notes/start")).complete();
+        assert_eq!(started.status, 200, "{}", body(&started));
+
+        let after = body(&router.respond(&authorized_get("/api/apps")).complete());
+        assert_eq!(listed(&after, "notes")["state"], "running", "{after}");
+        // The port is the one the supervisor allocated: a row that reads "running" with no port
+        // has nothing for "Open" to point at, which is the half-truth this test exists to stop.
+        assert!(
+            listed(&after, "notes")["port"].as_u64().unwrap_or(0) > 0,
+            "{after}"
+        );
+        assert_eq!(listed(&after, "todo")["state"], "stopped", "{after}");
+    }
+
+    #[test]
+    fn a_router_that_cannot_ask_the_supervisor_does_not_call_its_apps_stopped() {
+        // The same listing served by a process with no lifecycle: it knows the app is on disk and
+        // nothing about whether it is up. "Stopped" would be a claim it cannot support, and one a
+        // user would act on by starting an app that was already running.
+        let scratch = Scratch::new("apps-state-unknown");
+        scratch.app("notes", "Notes");
+        let router = router().with_apps_dir(scratch.apps());
+
+        let raw = body(&router.respond(&authorized_get("/api/apps")).complete());
+        let notes = listed(&raw, "notes");
+        // Present and null, so a reader can tell "nobody can say" from "this answer is older than
+        // the field" — the two would be the same reading if the key were simply absent.
+        assert!(notes.get("state").is_some(), "{raw}");
+        assert!(notes["state"].is_null(), "{raw}");
+        assert!(notes["port"].is_null(), "{raw}");
     }
 
     #[test]
