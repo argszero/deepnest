@@ -1728,6 +1728,53 @@ mod tests {
         );
     }
 
+    /// The two levels the host asked for on 2026-11-02T21:14: a folded batch opens onto rows of
+    /// **tool name and intent**, and a row opens onto the **arguments it was given and the answer
+    /// it got**. Anything else is either a wall of arguments or a row that cannot be audited.
+    #[test]
+    fn a_call_is_read_by_its_intent_and_audited_by_its_arguments() {
+        let call = DIALOG_SCRIPT
+            .split("function renderCall(turn, call, index, live)")
+            .nth(1)
+            .expect("nothing draws a call");
+        let row = &call[..call.find("function callPart").unwrap_or(call.len())];
+
+        // The reason first, with the argument only as the fallback for a call that stated none.
+        assert!(
+            row.contains("call.intent || call.what"),
+            "the row does not lead with what the model said it was trying to do"
+        );
+        // The argument is still reachable from the same row, without a third press.
+        assert!(
+            row.contains("what.title = call.what"),
+            "the argument the call was about is thrown away when there is an intent"
+        );
+
+        // And one disclosure, holding both halves — arguments first, because that is the order
+        // they happened in.
+        let opened = row
+            .find("if (call.input || call.output)")
+            .expect("a call that carries arguments cannot be opened");
+        let input = row
+            .find(r#"callPart("input", call.input)"#)
+            .expect("the arguments the call was given are not drawn");
+        let output = row
+            .find(r#"callPart("output", call.output)"#)
+            .expect("the answer the call got is not drawn");
+        assert!(
+            opened < input && input < output,
+            "the disclosure does not hold the arguments and then the answer"
+        );
+        assert!(
+            row.contains(r#"summary.textContent = "input and output""#),
+            "the fold still says only `output`, so the arguments are unfindable"
+        );
+        assert!(
+            DIALOG_STYLE.contains(".deepnest-call-part-name"),
+            "the two halves are not labelled, so a row of JSON says nothing about which half it is"
+        );
+    }
+
     #[test]
     fn the_transcript_shows_each_call_and_not_only_how_many_there_were() {
         // The defect: the transcript said "ran 12 tools" and nothing else, so which file was read,

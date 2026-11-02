@@ -1546,8 +1546,26 @@
   margin: var(--dn-space-2xs) 0 0;
 }
 
+/* One half of a call's disclosure — the arguments it was given, or the answer it got. The label
+ * is dimmer than the text and one step smaller: which half this is matters, and the text is what
+ * the person came to read. */
+#deepnest-dialog-transcript .deepnest-call-part {
+  display: block;
+  box-sizing: border-box;
+  margin: var(--dn-space-xs) 0 0;
+}
+
+#deepnest-dialog-transcript .deepnest-call-part-name {
+  display: block;
+  margin: 0;
+  font: var(--dn-text-micro)/var(--dn-leading) ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--dn-ink-5);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 /* `all: initial` above leaves a `summary` an inline box with no marker of its own, so the fold
- * reads as the bare word "output" and nothing on screen says it opens. The caret is drawn here. */
+ * reads as the bare word and nothing on screen says it opens. The caret is drawn here. */
 #deepnest-dialog-transcript .deepnest-call-out summary {
   display: block;
   cursor: pointer;
