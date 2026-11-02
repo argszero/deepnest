@@ -76,6 +76,8 @@ macOS 会记住这一份副本的这个决定。已经用 Developer ID 签名并
 
 v1 所依据的设计 —— 模块边界、数据布局、端口模型，以及每条决定的出处 —— 见 [docs/design.zh.md](docs/design.zh.md)（[English](docs/design.md)）。
 
+怎么写一个 skill —— 两个目录、两种形态、头部字段，以及加载器会「报告而不加载」的那些情形 —— 见 [docs/skills.zh.md](docs/skills.zh.md)（[English](docs/skills.md)）。
+
 ## 许可证
 
 MIT，见 [LICENSE](LICENSE)。
