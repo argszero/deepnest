@@ -91,6 +91,63 @@
   --dn-warn-surface-raised: #33291a;
 }
 
+
+/* The rest of the block: type, leading, corners and rhythm.
+ *
+ * The colour half landed first because a wrong colour is a fact and a wrong gap is an opinion. This
+ * half is the same argument one layer down: 6 sizes, 5 leadings, 9 radii and 19 spacings are not a
+ * scale, and the 0.05rem steps between them are 0.8 px — under a pixel, so nothing in the file could
+ * have been designed to them. What they are is the residue of nineteen separate afternoons.
+ *
+ * Declared here rather than on `:root` for the reason the colour block states: this panel is a guest
+ * on a page that declares its own `:root`.
+ */
+#deepnest-dialog {
+  /* Type. Six steps, and every one of them is in use: a timestamp, the meta line under a
+   * conversation's name, the answer's own body, the composer and its controls, the panel's title,
+   * the glyph on the ball. Named rather than spelled so a rule can say "this is meta" instead of
+   * deciding again whether that means 11 or 12 px. */
+  --dn-text-micro: 10px;
+  --dn-text-meta: 11px;
+  --dn-text-body: 12px;
+  --dn-text-ui: 13px;
+  --dn-text-title: 14px;
+  --dn-text-ball: 15px;
+
+  /* Leading. Five values were in use, three of them within 0.05 of each other — which is not a
+   * hierarchy, it is a coin toss repeated. Three remain: solid for a single glyph, tight for a
+   * control that must not grow, and one reading leading for everything made of sentences. 1.45 and
+   * 1.4 both land on it, so the deepest text in the panel moves by 0.05 of a line. */
+  --dn-leading-solid: 1;
+  --dn-leading-tight: 1.2;
+  --dn-leading: 1.4;
+  --dn-leading-loose: 1.5;
+
+  /* Corners. Nine values ran 3, 4, 5, 6, 7, 8, 10 — a continuum, not a scale, so a new control could
+   * pick any of them and be "right". Four steps and a pill: inside a glyph, a control, a surface, the
+   * panel itself. */
+  --dn-radius-s: 4px;
+  --dn-radius-m: 6px;
+  --dn-radius-l: 8px;
+  --dn-radius-xl: 10px;
+  --dn-radius-pill: 999px;
+
+  /* Rhythm. Nineteen lengths at 0.05rem — 0.8 px — apart, which is a grid nobody can design on and
+   * nobody chose: each rule added a step beside its neighbour to look right in isolation. Eight on a
+   * scale, so a gap is a decision between neighbours rather than an interpolation. No padding or
+   * margin moves by more than 1.6 px, and the two indents stay distinct so a nested list still reads
+   * as nested. */
+  --dn-space-2xs: 0.1rem;
+  --dn-space-xs: 0.2rem;
+  --dn-space-s: 0.3rem;
+  --dn-space-m: 0.4rem;
+  --dn-space-l: 0.5rem;
+  --dn-space-xl: 0.6rem;
+  --dn-space-2xl: 0.7rem;
+  --dn-space-3xl: 0.85rem;
+  --dn-space-4xl: 1.15rem;
+}
+
 /* The reset, and the one thing it must not take with it.
  *
  * `all: initial` puts every descendant back to the *browser's* defaults, and that is not what this
@@ -125,7 +182,7 @@
   z-index: 2147483647;
   display: block;
   box-sizing: border-box;
-  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: var(--dn-text-title)/var(--dn-leading-loose) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   color: var(--dn-ink);
   text-align: left;
   direction: ltr;
@@ -142,7 +199,7 @@
   border-radius: 50%;
   background: var(--dn-surface);
   color: var(--dn-ink);
-  font: 700 15px/1 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 700 var(--dn-text-ball)/var(--dn-leading-solid) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   cursor: pointer;
   box-shadow: 0 6px 20px var(--dn-shadow);
 }
@@ -178,9 +235,9 @@
   bottom: 2.9rem;
   width: 22rem;
   max-height: min(44rem, 78vh);
-  padding: 0.85rem 0.95rem;
+  padding: var(--dn-space-3xl) var(--dn-space-3xl);
   border: 1px solid var(--dn-line);
-  border-radius: 10px;
+  border-radius: var(--dn-radius-xl);
   background: var(--dn-surface);
   color: var(--dn-ink);
   box-shadow: 0 10px 30px var(--dn-shadow);
@@ -198,8 +255,8 @@
   box-sizing: border-box;
   align-items: baseline;
   justify-content: space-between;
-  gap: 0.5rem;
-  margin: 0 0 0.3rem;
+  gap: var(--dn-space-l);
+  margin: 0 0 var(--dn-space-s);
 }
 
 #deepnest-dialog-title {
@@ -207,7 +264,7 @@
   flex: 1 1 auto;
   min-width: 0;
   margin: 0;
-  font: 600 14px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 600 var(--dn-text-title)/var(--dn-leading) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   color: var(--dn-ink-strong);
   overflow-wrap: anywhere;
 }
@@ -220,11 +277,11 @@
   flex: none;
   box-sizing: border-box;
   margin: 0;
-  padding: 0.15rem 0.45rem;
+  padding: var(--dn-space-2xs) var(--dn-space-m);
   border: 1px solid var(--dn-line);
-  border-radius: 999px;
+  border-radius: var(--dn-radius-pill);
   background: transparent;
-  font: 11px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: var(--dn-text-meta)/var(--dn-leading) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   color: var(--dn-ink-3);
   cursor: pointer;
   white-space: nowrap;
@@ -247,10 +304,10 @@
 #deepnest-dialog-sessions {
   display: block;
   box-sizing: border-box;
-  margin: 0 0 0.6rem;
-  padding: 0.35rem 0.4rem;
+  margin: 0 0 var(--dn-space-xl);
+  padding: var(--dn-space-s) var(--dn-space-m);
   border: 1px solid var(--dn-line-soft);
-  border-radius: 8px;
+  border-radius: var(--dn-radius-l);
   background: var(--dn-veil);
 }
 
@@ -279,7 +336,7 @@
 }
 
 #deepnest-dialog-sessions-list::-webkit-scrollbar-thumb {
-  border-radius: 4px;
+  border-radius: var(--dn-radius-s);
   background: var(--dn-line-strong);
 }
 
@@ -289,11 +346,11 @@
   display: block;
   box-sizing: border-box;
   width: 100%;
-  margin: 0.1rem 0 0;
-  padding: 0.3rem 0.4rem;
+  margin: var(--dn-space-2xs) 0 0;
+  padding: var(--dn-space-s) var(--dn-space-m);
   border: 0;
   border-left: 2px solid transparent;
-  border-radius: 5px;
+  border-radius: var(--dn-radius-m);
   background: transparent;
   text-align: left;
   cursor: pointer;
@@ -317,7 +374,7 @@
 
 #deepnest-dialog-sessions .deepnest-session-title {
   display: block;
-  font: 500 12px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 500 var(--dn-text-body)/var(--dn-leading) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   color: var(--dn-ink-1);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -329,15 +386,15 @@
 
 #deepnest-dialog-sessions .deepnest-session-meta {
   display: block;
-  margin: 0.1rem 0 0;
-  font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  margin: var(--dn-space-2xs) 0 0;
+  font: var(--dn-text-meta)/var(--dn-leading) ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--dn-ink-5);
 }
 
 #deepnest-dialog-sessions .deepnest-session-none {
   display: block;
-  margin: 0.2rem 0.4rem;
-  font: 11px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  margin: var(--dn-space-xs) var(--dn-space-m);
+  font: var(--dn-text-meta)/var(--dn-leading) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   color: var(--dn-ink-5);
 }
 
@@ -347,12 +404,12 @@
   display: block;
   box-sizing: border-box;
   width: 100%;
-  margin: 0.4rem 0 0;
-  padding: 0.3rem 0.4rem;
+  margin: var(--dn-space-m) 0 0;
+  padding: var(--dn-space-s) var(--dn-space-m);
   border: 1px dashed var(--dn-line-strong);
-  border-radius: 5px;
+  border-radius: var(--dn-radius-m);
   background: transparent;
-  font: 500 12px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 500 var(--dn-text-body)/var(--dn-leading) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   color: var(--dn-ink-2);
   text-align: left;
   cursor: pointer;
@@ -370,14 +427,14 @@
 
 #deepnest-dialog-note {
   display: block;
-  margin: 0 0 0.6rem;
-  font: 12px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  margin: 0 0 var(--dn-space-xl);
+  font: var(--dn-text-body)/var(--dn-leading-loose) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   color: var(--dn-ink-3);
 }
 
 #deepnest-dialog-link {
   display: inline-block;
-  font: 600 13px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 600 var(--dn-text-ui)/var(--dn-leading) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   color: var(--dn-accent-dim);
   text-decoration: underline;
   cursor: pointer;
@@ -393,7 +450,7 @@
 
 #deepnest-dialog-form {
   display: block;
-  margin: 0.7rem 0 0;
+  margin: var(--dn-space-2xl) 0 0;
 }
 
 #deepnest-dialog-input {
@@ -401,12 +458,12 @@
   box-sizing: border-box;
   width: 100%;
   min-height: 3.2rem;
-  padding: 0.45rem 0.5rem;
+  padding: var(--dn-space-m) var(--dn-space-l);
   border: 1px solid var(--dn-line-strong);
-  border-radius: 7px;
+  border-radius: var(--dn-radius-m);
   background: var(--dn-well);
   color: var(--dn-ink);
-  font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: var(--dn-text-ui)/var(--dn-leading) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   text-align: left;
   resize: vertical;
 }
@@ -424,14 +481,14 @@
 #deepnest-dialog-attach,
 #deepnest-dialog-capture {
   display: inline-block;
-  margin-top: 0.45rem;
-  margin-right: 0.35rem;
-  padding: 0.35rem 0.7rem;
+  margin-top: var(--dn-space-m);
+  margin-right: var(--dn-space-s);
+  padding: var(--dn-space-s) var(--dn-space-2xl);
   border: 1px solid var(--dn-line);
-  border-radius: 6px;
+  border-radius: var(--dn-radius-m);
   background: transparent;
   color: var(--dn-ink-2);
-  font: 500 13px/1.2 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 500 var(--dn-text-ui)/var(--dn-leading-tight) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   cursor: pointer;
 }
 
@@ -515,14 +572,14 @@
   transform: translateX(-50%);
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
+  gap: var(--dn-space-l);
   align-items: center;
   justify-content: center;
   box-sizing: border-box;
   max-width: calc(100vw - 2rem);
-  padding: 0.5rem 0.7rem;
+  padding: var(--dn-space-l) var(--dn-space-2xl);
   border: 1px solid var(--dn-line);
-  border-radius: 8px;
+  border-radius: var(--dn-radius-l);
   background: var(--dn-surface);
   color: var(--dn-ink);
   cursor: default;
@@ -532,19 +589,19 @@
   display: block;
   margin: 0;
   color: var(--dn-ink-2);
-  font: 500 12px/1.2 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 500 var(--dn-text-body)/var(--dn-leading-tight) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
 #deepnest-dialog-shot-use,
 #deepnest-dialog-shot-whole,
 #deepnest-dialog-shot-cancel {
   display: inline-block;
-  padding: 0.3rem 0.6rem;
+  padding: var(--dn-space-s) var(--dn-space-xl);
   border: 1px solid var(--dn-line-strong);
-  border-radius: 6px;
+  border-radius: var(--dn-radius-m);
   background: var(--dn-raised);
   color: var(--dn-ink);
-  font: 600 12px/1.2 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 600 var(--dn-text-body)/var(--dn-leading-tight) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   cursor: pointer;
 }
 
@@ -567,13 +624,13 @@
 
 #deepnest-dialog-send {
   display: inline-block;
-  margin-top: 0.45rem;
-  padding: 0.35rem 0.7rem;
+  margin-top: var(--dn-space-m);
+  padding: var(--dn-space-s) var(--dn-space-2xl);
   border: 1px solid var(--dn-line-strong);
-  border-radius: 6px;
+  border-radius: var(--dn-radius-m);
   background: var(--dn-raised);
   color: var(--dn-ink);
-  font: 600 13px/1.2 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 600 var(--dn-text-ui)/var(--dn-leading-tight) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   cursor: pointer;
 }
 
@@ -592,14 +649,14 @@
  * `display`, so the attribute on its own would leave it on screen. */
 #deepnest-dialog-stop {
   display: inline-block;
-  margin-top: 0.45rem;
-  margin-left: 0.4rem;
-  padding: 0.35rem 0.7rem;
+  margin-top: var(--dn-space-m);
+  margin-left: var(--dn-space-m);
+  padding: var(--dn-space-s) var(--dn-space-2xl);
   border: 1px solid var(--dn-line-strong);
-  border-radius: 6px;
+  border-radius: var(--dn-radius-m);
   background: transparent;
   color: var(--dn-ink-2);
-  font: 600 13px/1.2 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 600 var(--dn-text-ui)/var(--dn-leading-tight) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   cursor: pointer;
 }
 
@@ -626,9 +683,9 @@
    many there are, so a person who cannot see the picture still has to be told it is there. */
 #deepnest-dialog-picture-note {
   display: block;
-  margin: 0.4rem 0 0;
+  margin: var(--dn-space-m) 0 0;
   color: var(--dn-ink-4);
-  font: 11px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: var(--dn-text-meta)/var(--dn-leading) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   text-align: left;
 }
 
@@ -640,10 +697,10 @@
 #deepnest-dialog-asked {
   display: block;
   box-sizing: border-box;
-  margin: 0.7rem 0 0;
-  padding: 0.6rem 0.65rem;
+  margin: var(--dn-space-2xl) 0 0;
+  padding: var(--dn-space-xl) var(--dn-space-xl);
   border: 1px solid var(--dn-warn-edge);
-  border-radius: 7px;
+  border-radius: var(--dn-radius-m);
   background: var(--dn-warn-surface);
 }
 
@@ -654,8 +711,8 @@
 #deepnest-dialog-asked-what,
 #deepnest-dialog-asked-why {
   display: block;
-  margin: 0 0 0.4rem;
-  font: 12px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  margin: 0 0 var(--dn-space-m);
+  font: var(--dn-text-body)/var(--dn-leading) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   color: var(--dn-ink);
   overflow-wrap: anywhere;
 }
@@ -673,13 +730,13 @@
   box-sizing: border-box;
   width: 100%;
   min-height: 2.4rem;
-  margin: 0 0 0.5rem;
-  padding: 0.4rem 0.5rem;
+  margin: 0 0 var(--dn-space-l);
+  padding: var(--dn-space-m) var(--dn-space-l);
   border: 1px solid var(--dn-line-strong);
-  border-radius: 7px;
+  border-radius: var(--dn-radius-m);
   background: var(--dn-well);
   color: var(--dn-ink);
-  font: 12px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: var(--dn-text-body)/var(--dn-leading) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   text-align: left;
   resize: vertical;
 }
@@ -696,13 +753,13 @@
 #deepnest-dialog-allow,
 #deepnest-dialog-refuse {
   display: inline-block;
-  margin: 0 0.35rem 0 0;
-  padding: 0.3rem 0.6rem;
+  margin: 0 var(--dn-space-s) 0 0;
+  padding: var(--dn-space-s) var(--dn-space-xl);
   border: 1px solid var(--dn-line-strong);
-  border-radius: 6px;
+  border-radius: var(--dn-radius-m);
   background: var(--dn-raised);
   color: var(--dn-ink);
-  font: 600 12px/1.2 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 600 var(--dn-text-body)/var(--dn-leading-tight) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   cursor: pointer;
 }
 
@@ -731,10 +788,10 @@
 #deepnest-dialog-answer {
   display: block;
   box-sizing: border-box;
-  margin: 0.6rem 0 0;
+  margin: var(--dn-space-xl) 0 0;
   max-height: 9rem;
   overflow: auto;
-  font: 12px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: var(--dn-text-body)/var(--dn-leading-loose) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   color: var(--dn-ink-1);
   /* The agent's answer is Markdown and arrives as plain text; keeping the newlines is the
    * difference between a paragraph and a wall. */
@@ -753,7 +810,7 @@
 /* A turn that is still running, as opposed to an answer. Monospace and dimmer because it is a
  * reading of the machine's state that will be replaced, not something the agent said. */
 #deepnest-dialog-answer.live {
-  font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  font: var(--dn-text-meta)/var(--dn-leading) ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--dn-ink-4);
 }
 
@@ -796,7 +853,7 @@
 #deepnest-dialog-transcript {
   display: block;
   box-sizing: border-box;
-  margin: 0 0 0.6rem;
+  margin: 0 0 var(--dn-space-xl);
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -833,7 +890,7 @@
 }
 
 #deepnest-dialog-transcript::-webkit-scrollbar-thumb {
-  border-radius: 4px;
+  border-radius: var(--dn-radius-s);
   background: var(--dn-line-strong);
 }
 
@@ -852,7 +909,7 @@
 #deepnest-dialog-transcript .deepnest-turn {
   display: block;
   box-sizing: border-box;
-  padding: 0.4rem 0 0.5rem;
+  padding: var(--dn-space-m) 0 var(--dn-space-l);
   border-top: 1px solid var(--dn-line-soft);
 }
 
@@ -865,12 +922,12 @@
   display: block;
   box-sizing: border-box;
   width: 100%;
-  margin: 0 0 0.35rem;
-  padding: 0.3rem 0.45rem;
+  margin: 0 0 var(--dn-space-s);
+  padding: var(--dn-space-s) var(--dn-space-m);
   border: 1px dashed var(--dn-line-strong);
-  border-radius: 4px;
+  border-radius: var(--dn-radius-s);
   background: transparent;
-  font: 11px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: var(--dn-text-meta)/var(--dn-leading) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   color: var(--dn-ink-3);
   text-align: center;
   cursor: pointer;
@@ -895,9 +952,9 @@
   box-sizing: border-box;
   align-items: baseline;
   justify-content: space-between;
-  gap: 0.4rem;
+  gap: var(--dn-space-m);
   margin: 0;
-  font: 600 12px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 600 var(--dn-text-body)/var(--dn-leading) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   color: var(--dn-ink-strong);
 }
 
@@ -919,7 +976,7 @@
   display: block;
   flex: none;
   box-sizing: border-box;
-  font: 10px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  font: var(--dn-text-micro)/var(--dn-leading) ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--dn-ink-5);
   white-space: nowrap;
   /* Read in the reader's zone, so the digits are the ones on their own clock; the full stamp stays
@@ -930,8 +987,8 @@
 #deepnest-dialog-transcript .deepnest-did {
   display: block;
   box-sizing: border-box;
-  margin: 0.1rem 0 0;
-  font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  margin: var(--dn-space-2xs) 0 0;
+  font: var(--dn-text-meta)/var(--dn-leading) ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--dn-ink-4);
 }
 
@@ -946,8 +1003,8 @@
 #deepnest-dialog .deepnest-said {
   display: block;
   box-sizing: border-box;
-  margin: 0.25rem 0 0;
-  font: 12px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  margin: var(--dn-space-xs) 0 0;
+  font: var(--dn-text-body)/var(--dn-leading-loose) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   color: var(--dn-ink-1);
   overflow-wrap: anywhere;
 }
@@ -969,7 +1026,7 @@
 /* The answer is Markdown, so its blocks come with their own margins — flattened here so the
  * spacing between them belongs to the transcript rather than to the browser's defaults. */
 #deepnest-dialog .deepnest-said > * {
-  margin: 0.3rem 0 0;
+  margin: var(--dn-space-s) 0 0;
 }
 
 #deepnest-dialog .deepnest-said > *:first-child {
@@ -978,18 +1035,18 @@
 
 #deepnest-dialog .deepnest-said ul,
 #deepnest-dialog .deepnest-said ol {
-  padding-left: 1.1rem;
+  padding-left: var(--dn-space-4xl);
 }
 
 #deepnest-dialog .deepnest-said li {
-  margin: 0.1rem 0 0;
+  margin: var(--dn-space-2xs) 0 0;
 }
 
 #deepnest-dialog .deepnest-said h3,
 #deepnest-dialog .deepnest-said h4,
 #deepnest-dialog .deepnest-said h5,
 #deepnest-dialog .deepnest-said h6 {
-  font: 600 12px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 600 var(--dn-text-body)/var(--dn-leading) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   color: var(--dn-ink-strong);
 }
 
@@ -1013,14 +1070,14 @@
 }
 
 #deepnest-dialog .deepnest-said p {
-  margin: 0.3rem 0 0;
+  margin: var(--dn-space-s) 0 0;
 }
 
 /* Headings shrink as they nest, and none of them reaches the panel's own title: the answer is a
  * reply inside someone's app, not a document that outranks it. */
 #deepnest-dialog .deepnest-said h3 {
-  margin: 0.5rem 0 0;
-  font-size: 13px;
+  margin: var(--dn-space-l) 0 0;
+  font-size: var(--dn-text-ui);
   font-weight: 600;
   line-height: 1.35;
   color: var(--dn-ink-strong);
@@ -1029,8 +1086,8 @@
 #deepnest-dialog .deepnest-said h4,
 #deepnest-dialog .deepnest-said h5,
 #deepnest-dialog .deepnest-said h6 {
-  margin: 0.45rem 0 0;
-  font-size: 12px;
+  margin: var(--dn-space-m) 0 0;
+  font-size: var(--dn-text-body);
   font-weight: 600;
   line-height: 1.35;
   color: var(--dn-ink-1);
@@ -1041,8 +1098,8 @@
  * first instead of under the bullet. */
 #deepnest-dialog .deepnest-said ul,
 #deepnest-dialog .deepnest-said ol {
-  margin: 0.3rem 0 0;
-  padding-left: 1.15rem;
+  margin: var(--dn-space-s) 0 0;
+  padding-left: var(--dn-space-4xl);
   list-style-position: outside;
 }
 
@@ -1056,7 +1113,7 @@
 
 #deepnest-dialog .deepnest-said li {
   display: list-item;
-  margin: 0.15rem 0 0;
+  margin: var(--dn-space-2xs) 0 0;
 }
 
 /* The reset reaches the `li` too, so its `list-style-type` is the initial `disc` whatever the `ol`
@@ -1071,8 +1128,8 @@
  * column. `display` needs no rule here — the `ul`/`ol` rule above reaches a sub-list too. */
 #deepnest-dialog .deepnest-said li > ul,
 #deepnest-dialog .deepnest-said li > ol {
-  margin-top: 0.1rem;
-  padding-left: 0.85rem;
+  margin-top: var(--dn-space-2xs);
+  padding-left: var(--dn-space-3xl);
 }
 
 /* A table. Every one of `table`, `thead`, `tbody`, `tr`, `th` and `td` names its own `display`,
@@ -1088,10 +1145,10 @@
   box-sizing: border-box;
   width: 100%;
   max-width: 100%;
-  margin: 0.4rem 0 0;
+  margin: var(--dn-space-m) 0 0;
   border-collapse: collapse;
   table-layout: fixed;
-  font: 11px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: var(--dn-text-meta)/var(--dn-leading) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   color: var(--dn-ink-1);
 }
 
@@ -1111,7 +1168,7 @@
 #deepnest-dialog .deepnest-said td {
   display: table-cell;
   box-sizing: border-box;
-  padding: 0.22rem 0.32rem;
+  padding: var(--dn-space-xs) var(--dn-space-s);
   border: 1px solid var(--dn-line);
   text-align: left;
   vertical-align: top;
@@ -1141,9 +1198,9 @@
  * binary, the way a person would have found it: `pre > code` was rgb(0, 0, 0) on a 35%-black block,
  * which is a code block nobody can read. */
 #deepnest-dialog .deepnest-said code {
-  font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
-  padding: 0 0.2rem;
-  border-radius: 3px;
+  font: var(--dn-text-meta)/var(--dn-leading) ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 0 var(--dn-space-xs);
+  border-radius: var(--dn-radius-s);
   background: var(--dn-tint);
   color: var(--dn-ink);
 }
@@ -1156,9 +1213,9 @@
   display: block;
   box-sizing: border-box;
   max-width: 100%;
-  margin: 0.3rem 0 0;
-  padding: 0.4rem 0.5rem;
-  border-radius: 4px;
+  margin: var(--dn-space-s) 0 0;
+  padding: var(--dn-space-m) var(--dn-space-l);
+  border-radius: var(--dn-radius-s);
   background: var(--dn-code-ground);
   overflow-x: auto;
 }
@@ -1193,7 +1250,7 @@
   text-indent: -2ch;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  font: var(--dn-text-meta)/var(--dn-leading) ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--dn-ink);
 }
 
@@ -1206,7 +1263,7 @@
   display: block;
   box-sizing: border-box;
   max-width: 100%;
-  margin: 0.45rem 0 0;
+  margin: var(--dn-space-m) 0 0;
   color: inherit;
   font: inherit;
 }
@@ -1226,8 +1283,8 @@
   width: 100%;
   align-items: baseline;
   justify-content: space-between;
-  gap: 0.4rem;
-  padding: 0 0.1rem 0.15rem;
+  gap: var(--dn-space-m);
+  padding: 0 var(--dn-space-2xs) var(--dn-space-2xs);
 }
 
 /* The way past a folded block, in the row under it rather than inside the `pre`: `pre` is what
@@ -1239,12 +1296,12 @@
   all: initial;
   display: block;
   box-sizing: border-box;
-  margin: 0.15rem 0 0;
-  padding: 0.1rem 0.35rem;
+  margin: var(--dn-space-2xs) 0 0;
+  padding: var(--dn-space-2xs) var(--dn-space-s);
   border: 1px solid var(--dn-accent-edge);
-  border-radius: 4px;
+  border-radius: var(--dn-radius-s);
   background: var(--dn-accent-tint);
-  font: 10px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: var(--dn-text-micro)/var(--dn-leading) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   color: var(--dn-accent-ink);
   cursor: pointer;
 }
@@ -1259,7 +1316,7 @@
 #deepnest-dialog-transcript .deepnest-code-language {
   all: initial;
   display: block;
-  font: 10px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  font: var(--dn-text-micro)/var(--dn-leading) ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--dn-ink-5);
 }
 
@@ -1268,11 +1325,11 @@
   all: initial;
   display: inline-block;
   box-sizing: border-box;
-  padding: 0.1rem 0.35rem;
+  padding: var(--dn-space-2xs) var(--dn-space-s);
   border: 1px solid var(--dn-line);
-  border-radius: 3px;
+  border-radius: var(--dn-radius-s);
   background: transparent;
-  font: 10px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: var(--dn-text-micro)/var(--dn-leading) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   color: var(--dn-ink-3);
   white-space: nowrap;
   cursor: pointer;
@@ -1305,7 +1362,7 @@
  * paragraph every time it changed its word from `Copy` to `Copied`. */
 #deepnest-dialog-transcript .deepnest-answer-copy {
   display: block;
-  margin: 0.35rem 0 0 auto;
+  margin: var(--dn-space-s) 0 0 auto;
 }
 
 /* `text-decoration` too, for the same reason as `color` above: `all: initial` leaves a link
@@ -1321,7 +1378,7 @@
 #deepnest-dialog-transcript .deepnest-calls {
   display: block;
   box-sizing: border-box;
-  margin: 0.25rem 0 0;
+  margin: var(--dn-space-xs) 0 0;
 }
 
 #deepnest-dialog-transcript .deepnest-call {
@@ -1329,9 +1386,9 @@
   box-sizing: border-box;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 0.3rem;
-  padding: 0.12rem 0;
-  font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  gap: var(--dn-space-s);
+  padding: var(--dn-space-2xs) 0;
+  font: var(--dn-text-meta)/var(--dn-leading) ui-monospace, SFMono-Regular, Menlo, monospace;
   overflow-wrap: anywhere;
 }
 
@@ -1379,7 +1436,7 @@
 
 #deepnest-dialog-transcript .deepnest-call-out {
   flex-basis: 100%;
-  margin: 0.1rem 0 0;
+  margin: var(--dn-space-2xs) 0 0;
 }
 
 /* `all: initial` above leaves a `summary` an inline box with no marker of its own, so the fold
@@ -1405,11 +1462,11 @@
   display: block;
   box-sizing: border-box;
   max-width: 100%;
-  margin: 0.2rem 0 0;
-  padding: 0.35rem 0.45rem;
+  margin: var(--dn-space-xs) 0 0;
+  padding: var(--dn-space-s) var(--dn-space-m);
   max-height: 12rem;
   overflow: auto;
-  border-radius: 4px;
+  border-radius: var(--dn-radius-s);
   background: var(--dn-code-ground);
   color: var(--dn-ink-2);
   white-space: pre-wrap;
@@ -1423,12 +1480,12 @@
   all: initial;
   display: block;
   box-sizing: border-box;
-  margin: 0.15rem 0 0.6rem;
-  padding: 0.15rem 0.4rem;
+  margin: var(--dn-space-2xs) 0 var(--dn-space-xl);
+  padding: var(--dn-space-2xs) var(--dn-space-m);
   border: 1px solid var(--dn-accent-edge);
-  border-radius: 999px;
+  border-radius: var(--dn-radius-pill);
   background: var(--dn-accent-tint);
-  font: 11px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: var(--dn-text-meta)/var(--dn-leading) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   color: var(--dn-accent-ink);
   cursor: pointer;
 }
@@ -1446,12 +1503,12 @@
   display: block;
   box-sizing: border-box;
   width: 100%;
-  margin: 0.2rem 0 0.35rem;
-  padding: 0.25rem 0.5rem;
+  margin: var(--dn-space-xs) 0 var(--dn-space-s);
+  padding: var(--dn-space-xs) var(--dn-space-l);
   border: 1px solid var(--dn-line);
-  border-radius: 0.35rem;
+  border-radius: var(--dn-radius-m);
   background: var(--dn-tint);
-  font: 12px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: var(--dn-text-body)/var(--dn-leading-loose) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   color: var(--dn-ink);
   caret-color: var(--dn-accent);
 }
@@ -1468,8 +1525,8 @@
   all: initial;
   display: block;
   box-sizing: border-box;
-  margin: 0 0 0.4rem;
-  font: 11px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  margin: 0 0 var(--dn-space-m);
+  font: var(--dn-text-meta)/var(--dn-leading) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   color: var(--dn-ink-4);
 }
 
@@ -1481,8 +1538,8 @@
 #deepnest-dialog-transcript .deepnest-pictures {
   display: block;
   box-sizing: border-box;
-  margin: 0.1rem 0 0;
-  font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  margin: var(--dn-space-2xs) 0 0;
+  font: var(--dn-text-meta)/var(--dn-leading) ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--dn-accent);
   overflow-wrap: anywhere;
 }
@@ -1491,11 +1548,11 @@
 #deepnest-dialog-transcript .deepnest-note {
   display: block;
   box-sizing: border-box;
-  margin: 0.3rem 0 0;
-  padding: 0.3rem 0.45rem;
+  margin: var(--dn-space-s) 0 0;
+  padding: var(--dn-space-s) var(--dn-space-m);
   border-left: 2px solid var(--dn-warn);
   background: var(--dn-warn-tint);
-  font: 11px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: var(--dn-text-meta)/var(--dn-leading) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   color: var(--dn-warn-ink);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -1506,7 +1563,7 @@
  * on the page buys nothing. */
 #deepnest-dialog-transcript .deepnest-running {
   border-left: 2px solid var(--dn-accent);
-  padding-left: 0.45rem;
-  margin-left: -0.45rem;
+  padding-left: var(--dn-space-m);
+  margin-left: calc(var(--dn-space-m) * -1);
   background: var(--dn-accent-tint);
 }

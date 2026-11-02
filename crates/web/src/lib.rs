@@ -1231,9 +1231,22 @@ mod tests {
         }
         // `all: initial` resets `display` to `inline` and the font and colour to the page's own,
         // which inside this panel is 16 px black on a dark box — so each of those is written back.
-        for needed in ["all: initial", "display: block", "font: 10px"] {
+        // The size itself is read from the token block now, so the assertion is that the rule states
+        // a font at all rather than that it states a particular one.
+        for needed in ["all: initial", "display: block", "font: "] {
             assert!(DIALOG_STYLE.contains(needed), "{needed} is missing");
         }
+        let rule = DIALOG_STYLE
+            .split("#deepnest-dialog-transcript .deepnest-code-more {")
+            .nth(1)
+            .expect("the fold control has a selector and no rule");
+        let rule = &rule[..rule
+            .find('}')
+            .expect("the fold control's rule never closes")];
+        assert!(
+            rule.contains("font: "),
+            "the fold control writes no font, so `all: initial` leaves it the browser's"
+        );
     }
 
     #[test]
@@ -2951,8 +2964,11 @@ mod tests {
 
         // 2. Every name in the block carries the prefix, so no two palettes can meet by name.
         let close = at + css[at..].find('}').expect("the token block never closes");
-        let (block, rules) = (&css[at..close], &css[close..]);
-        let declared = names_in(block, ":");
+        let rules = &css[close..];
+        // Every name the stylesheet declares anywhere, and every name it reads anywhere: there is
+        // more than one block now, and a check that looked inside one of them would call the other
+        // one's tokens undeclared.
+        let declared = names_in(&css, ":");
         assert!(declared.len() > 20, "the token block is not a vocabulary");
         for name in &declared {
             assert!(
@@ -2972,7 +2988,7 @@ mod tests {
         // 4. The two directions of use agree: nothing is read that was never declared — a typo here
         //    is not a compile error, it is a property that silently resolves to nothing — and nothing
         //    is declared that nothing reads, which is a colour described and then abandoned.
-        let read = names_in(rules, ")");
+        let read = names_in(&css, ")");
         for name in &read {
             assert!(
                 declared.iter().any(|d| d == name),
@@ -2985,5 +3001,173 @@ mod tests {
                 "{name} is declared and never read"
             );
         }
+    }
+
+    /// Every `prop: value` pair in a stylesheet, with the selector in front of it dropped and
+    /// anything after the rule's closing brace cut away. Enough to ask what a declaration says.
+    fn declarations(css: &str) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for chunk in css.split(';') {
+            let chunk = chunk.rsplit('{').next().unwrap_or(chunk);
+            let Some(colon) = chunk.find(':') else {
+                continue;
+            };
+            let value = &chunk[colon + 1..];
+            out.push((
+                chunk[..colon].trim().to_string(),
+                value.split('}').next().unwrap_or(value).trim().to_string(),
+            ));
+        }
+        out
+    }
+
+    /// The value with every `var(...)` taken out, so what is left is what the rule spells itself.
+    fn without_var(value: &str) -> String {
+        let mut out = String::new();
+        let mut rest = value;
+        while let Some(at) = rest.find("var(") {
+            out.push_str(&rest[..at]);
+            match rest[at..].find(')') {
+                Some(close) => rest = &rest[at + close + 1..],
+                None => return out,
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    fn spells_a_length(value: &str) -> bool {
+        let bytes = value.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i].is_ascii_digit() {
+                let mut end = i;
+                while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b'.') {
+                    end += 1;
+                }
+                let number: f64 = value[i..end].parse().unwrap_or(0.0);
+                let tail = &value[end..];
+                // A one-pixel offset is a hairline that overlaps its neighbour — `margin: -1px`
+                // pulls a rule up onto the one above it. That is a border, not a step on a spacing
+                // scale, and naming it would put a value in the block that means nothing.
+                if tail.starts_with("px") && number > 1.0 {
+                    return true;
+                }
+                if tail.starts_with("rem") {
+                    return true;
+                }
+                i = end;
+                continue;
+            }
+            i += 1;
+        }
+        false
+    }
+
+    #[test]
+    fn the_dialogs_type_and_rhythm_are_named_too() {
+        // The colour half of this block landed first. This is the rest of it, and the argument is the
+        // same one layer down: 6 sizes, 5 leadings, 9 radii and 18 spacings are not a scale, and the
+        // spacings ran at 0.05rem — 0.8 px — apart, which is a grid nothing could have been designed
+        // to. What they were was the residue of many separate afternoons.
+        let css = without_comments(DIALOG_STYLE);
+
+        // 1. The block is the dialog's own, for the reason the colour block states: a generated app
+        //    declares its palette and its rhythm on `:root`, and this panel is a guest on that page.
+        let at = css
+            .find("--dn-space-2xs")
+            .expect("the stylesheet names no spacing at all");
+        let open = css[..at]
+            .rfind('{')
+            .expect("the first spacing token is outside any rule");
+        let line = css[..open].rfind('\n').map(|n| n + 1).unwrap_or(0);
+        assert_eq!(
+            css[line..open].trim(),
+            "#deepnest-dialog",
+            "type and rhythm are declared somewhere other than the dialog's own root"
+        );
+
+        // 2. Each family is a vocabulary rather than one value renamed.
+        for (prefix, least) in [
+            ("--dn-text-", 6),
+            ("--dn-leading", 4),
+            ("--dn-radius-", 5),
+            ("--dn-space-", 9),
+        ] {
+            let names: Vec<&str> = css
+                .match_indices(prefix)
+                .map(|(at, _)| {
+                    let rest = &css[at..];
+                    let end = rest
+                        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                        .unwrap_or(rest.len());
+                    &rest[..end]
+                })
+                .collect();
+            let distinct: std::collections::BTreeSet<&&str> = names.iter().collect();
+            assert!(
+                distinct.len() >= least,
+                "{prefix} holds {} names, not the {least} the scale needs",
+                distinct.len()
+            );
+        }
+
+        // 3. Nothing in the four families spells a length of its own. This is the assertion the
+        //    change is for: a value added below the block in a later change fails here.
+        let families = |prop: &str| {
+            prop == "font"
+                || prop == "font-size"
+                || prop == "gap"
+                || prop == "row-gap"
+                || prop == "column-gap"
+                || prop.ends_with("radius")
+                || prop.starts_with("padding")
+                || prop.starts_with("margin")
+        };
+        let spelled: Vec<String> = declarations(&css)
+            .into_iter()
+            .filter(|(prop, _)| families(prop))
+            .filter(|(_, value)| spells_a_length(&without_var(value)))
+            .map(|(prop, value)| format!("{prop}: {value}"))
+            .collect();
+        assert!(
+            spelled.is_empty(),
+            "lengths are still written into the rules: {spelled:?}"
+        );
+
+        // 4. Every name the rules read is one the block declares. A typo here is not a compile error
+        //    — it is a property that silently resolves to nothing.
+        let declared: std::collections::BTreeSet<String> = declarations(&css)
+            .into_iter()
+            .filter(|(prop, _)| prop.starts_with("--dn-"))
+            .map(|(prop, _)| prop)
+            .collect();
+        for name in names_in(&css, ")") {
+            assert!(
+                declared.contains(&name),
+                "{name} is read but never declared"
+            );
+        }
+
+        // 5. The two list indents stay apart. Measured: the answer's list indented 1.15rem and a list
+        //    nested inside it 0.85rem, and collapsing both onto one token made the nesting invisible
+        //    — a design regression no colour-and-contrast check would have caught, because nothing
+        //    about it is a colour.
+        let value_of = |name: &str| {
+            let needle = format!("{name}:");
+            let found = css
+                .find(&needle)
+                .unwrap_or_else(|| panic!("{name} is not declared"));
+            let rest = &css[found + needle.len()..];
+            rest[..rest.find(';').expect("the token never ends")]
+                .trim()
+                .to_string()
+        };
+        let outer = value_of("--dn-space-4xl");
+        let nested = value_of("--dn-space-3xl");
+        assert_ne!(
+            outer, nested,
+            "a list inside a list indents the same as its parent, so the nesting is invisible"
+        );
     }
 }
