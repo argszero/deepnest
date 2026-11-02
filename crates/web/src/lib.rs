@@ -755,6 +755,160 @@ mod tests {
         );
     }
 
+    /// One `:root` block's custom properties, as declared.
+    ///
+    /// Reads the stylesheet rather than a copy of it, so the values this file is measured against
+    /// are the ones the browser gets.
+    fn tokens_in(css: &str, marker: &str) -> Vec<(String, String)> {
+        let at = css
+            .find(marker)
+            .unwrap_or_else(|| panic!("the stylesheet has no {marker}"));
+        let open = at + css[at..].find('{').expect("the marker opens no block") + 1;
+        let close = open + css[open..].find('}').expect("the block never closes");
+        css[open..close]
+            .lines()
+            .filter_map(|line| {
+                let (name, value) = line.trim().strip_prefix("--")?.split_once(':')?;
+                Some((
+                    format!("--{name}"),
+                    value.trim().trim_end_matches(';').trim().to_string(),
+                ))
+            })
+            .collect()
+    }
+
+    /// A `#rrggbb` token as three channels in 0..=255.
+    fn hex(token: &str) -> [f64; 3] {
+        let digits = token
+            .strip_prefix('#')
+            .unwrap_or_else(|| panic!("{token} is not a hex colour"));
+        assert_eq!(digits.len(), 6, "{token} is not a six-digit hex colour");
+        let channel = |from: usize| {
+            u8::from_str_radix(&digits[from..from + 2], 16).expect("two hex digits") as f64
+        };
+        [channel(0), channel(2), channel(4)]
+    }
+
+    /// An `rgba(r, g, b, a)` token as its colour and its alpha.
+    fn rgba(token: &str) -> ([f64; 3], f64) {
+        let inside = token
+            .strip_prefix("rgba(")
+            .and_then(|rest| rest.strip_suffix(')'))
+            .unwrap_or_else(|| panic!("{token} is not an rgba colour"));
+        let parts: Vec<f64> = inside
+            .split(',')
+            .map(|part| part.trim().parse().expect("a number"))
+            .collect();
+        assert_eq!(parts.len(), 4, "{token} is not r, g, b, a");
+        ([parts[0], parts[1], parts[2]], parts[3])
+    }
+
+    /// What WCAG calls the contrast ratio, from relative luminance.
+    fn contrast(one: [f64; 3], other: [f64; 3]) -> f64 {
+        fn luminance(rgb: [f64; 3]) -> f64 {
+            let channel = |value: f64| {
+                let v = value / 255.0;
+                if v <= 0.039_28 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(rgb[0]) + 0.7152 * channel(rgb[1]) + 0.0722 * channel(rgb[2])
+        }
+        let (one, other) = (luminance(one), luminance(other));
+        (one.max(other) + 0.05) / (one.min(other) + 0.05)
+    }
+
+    /// Every step of the ink ramp, and every verdict colour a chip can carry as text, clears AA on
+    /// the ground its own scheme declares.
+    ///
+    /// This is the scheme a first page is read in on most desktops, and the panel had it as a
+    /// second rendering of the dark tokens rather than a measured one: an alpha ramp keeps the same
+    /// *ink* but not the same *contrast*, because compositing it over a near-white ground leaves far
+    /// less room than compositing it over a near-black one. Measured, `--dn-ink-4` — the line under
+    /// every app name — came out at 3.5:1 and `--dn-ink-5` at 2.5:1 in the light scheme while both
+    /// sat near 6:1 in the dark, which is the same stylesheet reading two different ways.
+    ///
+    /// 4.5:1 is the AA floor for text this size. The ramps are also asserted to stay ordered: a fix
+    /// that made every step pass by making them all the same colour would say the reading order is
+    /// gone, and the reading order is the reason there are five steps.
+    #[test]
+    fn every_text_token_clears_aa_in_the_scheme_that_declares_it() {
+        const AA: f64 = 4.5;
+        let light = tokens_in(STYLE, "\n:root {");
+        let dark = tokens_in(STYLE, "@media (prefers-color-scheme: dark) {");
+        let value = |block: &[(String, String)], name: &str| {
+            block
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| panic!("the block declares no {name}"))
+        };
+
+        for (scheme, block) in [("light", &light), ("dark", &dark)] {
+            let grounds = [
+                ("surface", hex(&value(block, "--dn-surface"))),
+                ("well", hex(&value(block, "--dn-well"))),
+            ];
+            let mut ladder: Vec<(String, f64)> = Vec::new();
+            // `--dn-ink` is spelled opaque and the five steps below it are alpha, so the reader
+            // takes either: one colour, and how much of it shows.
+            let ink = |name: &str| -> ([f64; 3], f64) {
+                let token = value(block, name);
+                if token.starts_with('#') {
+                    (hex(&token), 1.0)
+                } else {
+                    rgba(&token)
+                }
+            };
+            let step = |name: &str| -> f64 {
+                let (colour, alpha) = ink(name);
+                grounds
+                    .iter()
+                    .map(|(_, ground)| {
+                        let composited: [f64; 3] =
+                            [0, 1, 2].map(|i| colour[i] * alpha + ground[i] * (1.0 - alpha));
+                        contrast(composited, *ground)
+                    })
+                    .fold(f64::INFINITY, f64::min)
+            };
+            for name in [
+                "--dn-ink",
+                "--dn-ink-1",
+                "--dn-ink-2",
+                "--dn-ink-3",
+                "--dn-ink-4",
+                "--dn-ink-5",
+            ] {
+                let worst = step(name);
+                assert!(
+                    worst >= AA,
+                    "in the {scheme} scheme {name} reads at {worst:.2}:1 on its own ground, below AA"
+                );
+                ladder.push((name.to_string(), worst));
+            }
+            for name in ["--dn-ok", "--dn-bad", "--dn-warn"] {
+                let colour = hex(&value(block, name));
+                let worst = grounds
+                    .iter()
+                    .map(|(_, ground)| contrast(colour, *ground))
+                    .fold(f64::INFINITY, f64::min);
+                assert!(
+                    worst >= AA,
+                    "in the {scheme} scheme {name} reads at {worst:.2}:1 on its own ground, below AA"
+                );
+            }
+            for pair in ladder.windows(2) {
+                let ((louder, one), (quieter, other)) = (&pair[0], &pair[1]);
+                assert!(
+                    one > other,
+                    "in the {scheme} scheme {quieter} is not quieter than {louder}: {other:.2} vs {one:.2}"
+                );
+            }
+        }
+    }
+
     /// The two surfaces are one system, and a token is the thing that says so.
     ///
     /// The panel's colours were written as literals while the dialog had a named block, so the two
@@ -3211,6 +3365,14 @@ mod tests {
         assert!(
             SCRIPT.contains(r#"shut.title = "not running — start it first";"#),
             "a row that is not running says why its Open is not a link"
+        );
+        // And it looks unavailable rather than merely being one: a span styled to *look* disabled
+        // and a disabled button read the same to a pointer and differently to everything else —
+        // the accessibility tree, the keyboard, and any reader asking why the press does nothing.
+        assert!(
+            SCRIPT.contains(r#"var shut = element("button", "btn off small", "Open");"#)
+                && SCRIPT.contains("shut.disabled = true;"),
+            "the Open of an app that is not running is not a disabled control"
         );
     }
 

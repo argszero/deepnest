@@ -49,14 +49,23 @@
 
   /* The ink: one near-black, and five steps of how much of it shows. The ramp is a reading order,
    * not a palette: `-1` is body text, `-3` a line you read second, `-5` a line you read only if
-   * you are looking for it. */
+   * you are looking for it.
+   *
+   * The five alphas are not the dark block's five alphas, and that is the whole point of the light
+   * block existing. An alpha over a near-white ground loses contrast far faster than the same alpha
+   * over a near-black one — the dark ground sits at one twentieth of white, so `0.45` of ink over it
+   * is still four steps from black, while `0.52` over white lands at 3.5:1. The panel had the dark
+   * alphas copied across, which made the quietest three lines on the page — the path under every app
+   * name, the section count, the template name — fail AA in the scheme most desktops use, while
+   * reading fine in the other. Measured on both grounds, the light ramp is compressed to
+   * 0.92 / 0.86 / 0.78 / 0.68 / 0.62, and a test asserts every step clears 4.5:1 in its own scheme. */
   --dn-ink: #1b1b20;
   --dn-ink-strong: #000000;
   --dn-ink-1: rgba(27, 27, 32, 0.92);
-  --dn-ink-2: rgba(27, 27, 32, 0.78);
-  --dn-ink-3: rgba(27, 27, 32, 0.64);
-  --dn-ink-4: rgba(27, 27, 32, 0.52);
-  --dn-ink-5: rgba(27, 27, 32, 0.4);
+  --dn-ink-2: rgba(27, 27, 32, 0.86);
+  --dn-ink-3: rgba(27, 27, 32, 0.78);
+  --dn-ink-4: rgba(27, 27, 32, 0.68);
+  --dn-ink-5: rgba(27, 27, 32, 0.62);
 
   /* The lines: three weights, the weight a hover lifts to, and the tint under a chosen row. */
   --dn-line-soft: rgba(0, 0, 0, 0.07);
@@ -75,16 +84,21 @@
   --dn-accent-edge-strong: rgba(47, 111, 228, 0.7);
 
   /* The three verdicts. Only these say that something went well, badly or nowhere, and the tint
-   * beside each is the same verdict at reading strength. */
-  --dn-ok: #2f8a4a;
-  --dn-ok-ink: #1e6b36;
+   * beside each is the same verdict at reading strength.
+   *
+   * `ok` and `warn` are also chip labels — eleven-pixel monospace text on a row — so they answer to
+   * the text standard, not to the pip standard: the greens and ambers that read well as a six-pixel
+   * dot sat at 4.3:1 and 4.3:1 once they became a word. Darkened until they clear AA on both
+   * grounds, with `-ink` kept the stronger reading of the pair as it already was. */
+  --dn-ok: #1f7038;
+  --dn-ok-ink: #175a2c;
   --dn-ok-edge: rgba(47, 138, 74, 0.5);
   --dn-bad: #c2403a;
   --dn-bad-ink: #a02f2a;
   --dn-bad-edge: rgba(194, 64, 58, 0.5);
   --dn-bad-tint: rgba(194, 64, 58, 0.07);
-  --dn-warn: #9a6c14;
-  --dn-warn-ink: #7d560f;
+  --dn-warn: #7a5208;
+  --dn-warn-ink: #5e3f06;
   --dn-warn-tint: rgba(154, 108, 20, 0.1);
   --dn-warn-edge: rgba(154, 108, 20, 0.5);
 
@@ -150,7 +164,9 @@
     --dn-ink-2: rgba(244, 244, 246, 0.79);
     --dn-ink-3: rgba(244, 244, 246, 0.68);
     --dn-ink-4: rgba(244, 244, 246, 0.58);
-    --dn-ink-5: rgba(244, 244, 246, 0.45);
+    /* The quietest step was the one step either scheme got wrong: at `0.45` the template name beside
+     * an app read at 4.1:1, under AA. The dark ground is the forgiving one, not the exempt one. */
+    --dn-ink-5: rgba(244, 244, 246, 0.54);
 
     --dn-line-soft: rgba(255, 255, 255, 0.11);
     --dn-line: rgba(255, 255, 255, 0.17);
@@ -329,8 +345,16 @@ code {
   box-shadow: var(--dn-focus);
 }
 
+/* A control that is not available is greyed, and the greying is one value for the whole page.
+ *
+ * `0.65` rather than something fainter: the label still has to be read. Measured, at the `0.45`
+ * this was, the word `Open` on a stopped app sat at 2.2:1 in the light scheme — technically allowed,
+ * since inactive controls are exempt from the contrast floor, but the row then has a hole where its
+ * first control should be, and a hole is what sends someone hunting for another way in. At `0.65`
+ * the same label reads at 3.4:1 light and 4.0:1 dark: plainly quieter than the verbs beside it,
+ * plainly still a word. */
 .btn:disabled {
-  opacity: 0.45;
+  opacity: 0.65;
   cursor: default;
 }
 
