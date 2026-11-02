@@ -22,9 +22,14 @@
   var PORT = meta("deepnest-port");
 
   var status = document.getElementById("status");
-  var endpointLine = document.getElementById("endpoint");
   var firstRun = document.getElementById("first-run");
   var appsBox = document.getElementById("apps");
+  var appsFact = document.getElementById("apps-fact");
+  var appsCount = document.getElementById("apps-count");
+  var verdict = document.getElementById("verdict");
+  var verdictText = document.getElementById("verdict-text");
+  var modelFact = document.getElementById("model-fact");
+  var modelValue = document.getElementById("model-value");
 
   // One place the answer is parsed, so a refusal the server wrote reaches the user as text rather
   // than as "[object Object]" or as silence.
@@ -75,8 +80,8 @@
     return node;
   }
 
-  function button(label, onClick) {
-    var node = element("button", "", label);
+  function button(label, className, onClick) {
+    var node = element("button", className || "", label);
     node.type = "button";
     node.addEventListener("click", function () {
       node.disabled = true;
@@ -95,22 +100,33 @@
 
   // ---- the model endpoint -------------------------------------------------------------------
 
+  // The verdict is one word and one colour, and both come from the same fact: whether a model is
+  // configured. "Ready" is a claim this page is allowed to make because it is the claim the answer
+  // depends on — an app list is readable without a model, and nothing can be *written* without one.
+  function setVerdict(kind, text) {
+    verdict.className = "verdict " + kind;
+    verdictText.textContent = text;
+  }
+
   function renderEndpoint(state) {
-    endpointLine.textContent = "";
-    if (state && state.configured) {
-      endpointLine.appendChild(document.createTextNode("Model endpoint: configured ("));
-      endpointLine.appendChild(element("code", "", state.model || "unnamed model"));
-      endpointLine.appendChild(document.createTextNode(")."));
+    var configured = !!(state && state.configured);
+    var model = configured ? state.model || "unnamed model" : "none yet";
+    setVerdict(configured ? "ok" : "warn", configured ? "Ready" : "No model");
+    modelFact.textContent = "";
+    modelFact.appendChild(element("code", "", model));
+    modelValue.textContent = model;
+    modelValue.className = "value" + (configured ? "" : " unset");
+    if (configured) {
       firstRun.hidden = true;
-    } else {
-      endpointLine.appendChild(document.createTextNode("Model endpoint: "));
-      endpointLine.appendChild(element("strong", "bad", "not configured"));
-      endpointLine.appendChild(
-        document.createTextNode(" — deepnest needs one before it can write anything.")
-      );
-      firstRun.hidden = false;
     }
   }
+
+  // The form is behind the row rather than always open. On the first run it is already open,
+  // because the markup says so — the server knows whether a model exists, and a reader with script
+  // off needs the one form that has to be filled in.
+  document.getElementById("model-change").addEventListener("click", function () {
+    firstRun.hidden = !firstRun.hidden;
+  });
 
   function refreshEndpoint() {
     // `/api/config` rather than `/api/health`: the health probe carries no user data and therefore
@@ -174,39 +190,50 @@
     if (app.state === "running" && app.port) {
       text = "running :" + app.port;
     }
-    return element("span", "chip " + app.state, text);
+    var chip = element("span", "chip " + app.state);
+    chip.appendChild(element("span", "pip"));
+    chip.appendChild(document.createTextNode(text));
+    return chip;
   }
 
+  // A row, not a card. Three columns on a wide page — what it is, what state it is in, what may be
+  // done to it — so the list reads down one edge instead of through five equal-weight buttons
+  // repeated per app.
   function renderApp(app) {
     var running = app.state === "running";
     var failed = app.state === "failed";
     var known = running || app.state === "stopped" || failed;
 
-    var card = element("div", failed ? "app broken" : "app");
-    var head = element("div", "row");
-    head.appendChild(element("h3", "", app.name || app.slug));
-    head.appendChild(element("span", "slug", app.slug));
+    var row = element("div", failed ? "app-row broken" : "app-row");
+
+    var who = element("div", "who");
+    who.appendChild(element("div", "name", app.name || app.slug));
+    // Where it lives and which template built it, as one meta line: the path is the only thing here
+    // a person copies, and the template is the one fact that explains what they will find inside.
+    var meta = element("div", "meta", app.slug);
     if (app.template) {
-      head.appendChild(element("span", "slug", app.template));
+      meta.appendChild(element("span", "arch", " · " + app.template));
     }
-    var chip = stateChip(app);
-    if (chip) {
-      head.appendChild(chip);
-    }
-    card.appendChild(head);
     if (app.path) {
-      card.appendChild(element("div", "note path", app.path));
+      meta.appendChild(document.createTextNode(" · " + app.path));
     }
+    who.appendChild(meta);
 
     // A failed app says why on its own row. That reason is the one fact deciding whether the next
     // press is Start or a look at the log, and it used to arrive only after a press that failed.
     if (failed && app.reason) {
-      card.appendChild(element("div", "reason bad", app.reason));
+      who.appendChild(element("div", "reason", app.reason));
+    }
+    row.appendChild(who);
+
+    var chip = stateChip(app);
+    if (chip) {
+      row.appendChild(chip);
     }
 
-    var actions = element("div", "actions");
+    var actions = element("div", "verbs");
     if (running || !known) {
-      var open = element("a", "", "Open");
+      var open = element("a", "btn primary small", "Open");
       open.href = "/app/" + encodeURIComponent(app.slug) + "/";
       open.target = "_blank";
       open.rel = "noopener";
@@ -214,7 +241,7 @@
     } else {
       // The same word in the same place, so the row does not change shape between states — but not
       // a link, because following it answers `503` with a page whose text says to start the app.
-      var shut = element("span", "note", "Open");
+      var shut = element("span", "btn off small", "Open");
       shut.title = "not running — start it first";
       actions.appendChild(shut);
     }
@@ -223,7 +250,7 @@
     // "something went wrong".
     (known ? VERBS[app.state] : VERBS_UNKNOWN).forEach(function (action) {
       actions.appendChild(
-        button(action, function () {
+        button(action, "btn quiet small", function () {
           say("Requesting " + action + " for " + app.slug + "…");
           var path = "/api/apps/" + encodeURIComponent(app.slug) + "/" + action;
           return api(path, { method: "POST" }).then(
@@ -239,15 +266,27 @@
         })
       );
     });
-    card.appendChild(actions);
-    return card;
+    row.appendChild(actions);
+    return row;
+  }
+
+  // The count is stated twice on the page — beside the section's own heading, and in the line of
+  // facts at the top — and both are the same number or they are a bug. Written from the listing
+  // that was just read, not from the one the server rendered, because a directory can appear
+  // between the two.
+  function setAppCount(n) {
+    appsFact.textContent = n === 1 ? "1 app" : n + " apps";
+    appsCount.textContent = String(n);
   }
 
   function renderApps(listing) {
     appsBox.textContent = "";
     var apps = (listing && listing.apps) || [];
+    setAppCount(apps.length);
     if (!apps.length) {
-      appsBox.appendChild(element("p", "note", "No apps yet. Create one below."));
+      var empty = element("div", "app-row");
+      empty.appendChild(element("p", "note", "No apps yet. Use “+ New app” below."));
+      appsBox.appendChild(empty);
     }
     apps.forEach(function (app) {
       appsBox.appendChild(renderApp(app));
@@ -257,7 +296,7 @@
     // must not look like an app that does not exist.
     var skipped = (listing && listing.skipped) || [];
     if (skipped.length) {
-      var box = element("div", "app");
+      var box = element("div", "app-row broken");
       box.appendChild(element("h3", "bad", "Not usable as apps"));
       skipped.forEach(function (entry) {
         box.appendChild(element("p", "note", entry.path + " — " + entry.reason));
@@ -349,7 +388,7 @@
           }
           var row = element("p", "note");
           row.id = "refresh-" + skill.name;
-          var press = button("Refresh " + skill.name, function () {
+          var press = button("Refresh " + skill.name, "btn quiet small", function () {
             return askRefresh(skill.name, row, press);
           });
           row.appendChild(press);
@@ -434,7 +473,7 @@
 
   function bindOffer(row) {
     var name = row.getAttribute("data-offer");
-    var press = button("Install " + name, function () {
+    var press = button("Install " + name, "btn quiet small", function () {
       return askRefresh(name, row, press, "Install");
     });
     row.appendChild(press);

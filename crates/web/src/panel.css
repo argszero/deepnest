@@ -9,241 +9,683 @@
  * Two consequences hold this file together:
  *
  * - **Nothing here is inline.** A `style="…"` attribute anywhere in the page is blocked by the
- *   policy, silently, so the two spacings the markup used to spell that way are `.row.submit` and
- *   `.app .path` below.
+ *   policy, silently, so every spacing the markup needs is a class in this file.
  * - **A class that carries a background is for text inside a line, not for a block.** `.mono` was
  *   on both, and on the path line — a `div` — it painted a full-width band of grey across the card,
- *   which reads as a progress bar rather than as a path. The path is `.path`: monospaced, no
+ *   which reads as a progress bar rather than as a path. The path is `.who .meta`: monospaced, no
  *   background, wrapped rather than cut.
+ *
+ * ## The token block
+ *
+ * `docs/design.md` states the standard for the apps deepnest generates: "the look is one token
+ * block, not a stylesheet". The dialog already follows it and the panel did not, so the panel's
+ * rules were written in raw colours and raw `rem`s — two surfaces on one screen that happened to
+ * look related. The names and values below are the dialog's, copied rather than referenced: the
+ * dialog's block is scoped to `#deepnest-dialog` because the dialog is a guest on a page deepnest
+ * does not own, and this page *is* deepnest's, so the block is declared on `:root` here.
+ *
+ * Copying is a maintenance debt and it is the cheaper one. The alternative — one file shared by
+ * both surfaces — would mean the dialog importing a page's `:root`, which is exactly the guest
+ * rule its own block exists to keep. A test in `lib.rs` pins the names that both blocks must
+ * spell, so a rename lands in both files or in neither.
  */
 
 :root {
   color-scheme: light dark;
-  --line: rgba(127, 127, 127, 0.32);
-  --dim: 0.66;
+
+  /* The ground: four surfaces, deepest last. Light first: this page follows the system scheme,
+   * and the dark block below is the second rendering rather than the only one. */
+  --dn-surface: #ffffff;
+  --dn-well: #f5f5f7;
+  --dn-raised: #ececf1;
+  --dn-deep: #ffffff;
+
+  /* What is laid over a surface: elevation, the ground a code block sits on, and the tint a row
+   * gets when it is chosen or the pointer is on it. */
+  --dn-veil: rgba(0, 0, 0, 0.04);
+  --dn-code-ground: rgba(0, 0, 0, 0.05);
+  --dn-shadow: rgba(0, 0, 0, 0.08);
+  --dn-scrim: rgba(0, 0, 0, 0.3);
+
+  /* The ink: one near-black, and five steps of how much of it shows. The ramp is a reading order,
+   * not a palette: `-1` is body text, `-3` a line you read second, `-5` a line you read only if
+   * you are looking for it. */
+  --dn-ink: #1b1b20;
+  --dn-ink-strong: #000000;
+  --dn-ink-1: rgba(27, 27, 32, 0.92);
+  --dn-ink-2: rgba(27, 27, 32, 0.78);
+  --dn-ink-3: rgba(27, 27, 32, 0.64);
+  --dn-ink-4: rgba(27, 27, 32, 0.52);
+  --dn-ink-5: rgba(27, 27, 32, 0.4);
+
+  /* The lines: three weights, the weight a hover lifts to, and the tint under a chosen row. */
+  --dn-line-soft: rgba(0, 0, 0, 0.07);
+  --dn-line: rgba(0, 0, 0, 0.12);
+  --dn-line-strong: rgba(0, 0, 0, 0.2);
+  --dn-line-hover: rgba(0, 0, 0, 0.45);
+  --dn-tint: rgba(0, 0, 0, 0.04);
+
+  /* The one emphasis, and the tints it is made of. */
+  --dn-accent: #2f6fe4;
+  --dn-accent-dim: #4b84ea;
+  --dn-accent-ink: #1d4fae;
+  --dn-accent-tint: rgba(47, 111, 228, 0.09);
+  --dn-accent-tint-strong: rgba(47, 111, 228, 0.16);
+  --dn-accent-edge: rgba(47, 111, 228, 0.45);
+  --dn-accent-edge-strong: rgba(47, 111, 228, 0.7);
+
+  /* The three verdicts. Only these say that something went well, badly or nowhere, and the tint
+   * beside each is the same verdict at reading strength. */
+  --dn-ok: #2f8a4a;
+  --dn-ok-ink: #1e6b36;
+  --dn-ok-edge: rgba(47, 138, 74, 0.5);
+  --dn-bad: #c2403a;
+  --dn-bad-ink: #a02f2a;
+  --dn-bad-edge: rgba(194, 64, 58, 0.5);
+  --dn-bad-tint: rgba(194, 64, 58, 0.07);
+  --dn-warn: #9a6c14;
+  --dn-warn-ink: #7d560f;
+  --dn-warn-tint: rgba(154, 108, 20, 0.1);
+  --dn-warn-edge: rgba(154, 108, 20, 0.5);
+
+  /* Type. Six steps, all in use: a count or a chip label, a meta line, a body line, a control,
+   * the page's title. Named rather than spelled so a rule can say "this is meta". */
+  --dn-text-micro: 10px;
+  --dn-text-meta: 11px;
+  --dn-text-body: 12px;
+  --dn-text-ui: 13px;
+  --dn-text-title: 14px;
+
+  /* Leading. Three values: solid for a single line in a control, tight for a heading, and one
+   * reading leading for everything made of sentences. */
+  --dn-leading-solid: 1;
+  --dn-leading-tight: 1.2;
+  --dn-leading: 1.5;
+
+  /* Corners. Four steps and a pill: inside a glyph, a control, a box, the page itself. */
+  --dn-radius-s: 4px;
+  --dn-radius-m: 6px;
+  --dn-radius-l: 8px;
+  --dn-radius-xl: 10px;
+  --dn-radius-pill: 999px;
+
+  /* Rhythm. Eight on a scale, so a gap is a decision between neighbours rather than an
+   * interpolation between whatever two afternoons happened to land on. */
+  --dn-space-2xs: 0.1rem;
+  --dn-space-xs: 0.2rem;
+  --dn-space-s: 0.3rem;
+  --dn-space-m: 0.4rem;
+  --dn-space-l: 0.5rem;
+  --dn-space-xl: 0.6rem;
+  --dn-space-2xl: 0.7rem;
+  --dn-space-3xl: 0.85rem;
+  --dn-space-4xl: 1.15rem;
+
+  /* Two families, named once. The page carries no webfont: a local-first tool that waited on a
+   * font request would be a tool that needs the network to draw its own front page. */
+  --dn-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --dn-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --dn-focus: 0 0 0 2px var(--dn-accent-edge-strong);
 }
 
+/* The second rendering, and not the first one with different text. Every token that describes a
+ * surface, an ink or a line has to move here, because a dark page built out of light tokens is
+ * black text on a black box. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --dn-surface: #1e1e23;
+    --dn-well: #16161a;
+    --dn-raised: #2b2b32;
+    --dn-deep: #0b0b0e;
+
+    --dn-veil: rgba(0, 0, 0, 0.22);
+    --dn-code-ground: rgba(0, 0, 0, 0.35);
+    --dn-shadow: rgba(0, 0, 0, 0.35);
+    --dn-scrim: rgba(0, 0, 0, 0.5);
+
+    --dn-ink: #f4f4f6;
+    --dn-ink-strong: #ffffff;
+    --dn-ink-1: rgba(244, 244, 246, 0.9);
+    --dn-ink-2: rgba(244, 244, 246, 0.79);
+    --dn-ink-3: rgba(244, 244, 246, 0.68);
+    --dn-ink-4: rgba(244, 244, 246, 0.58);
+    --dn-ink-5: rgba(244, 244, 246, 0.45);
+
+    --dn-line-soft: rgba(255, 255, 255, 0.11);
+    --dn-line: rgba(255, 255, 255, 0.17);
+    --dn-line-strong: rgba(255, 255, 255, 0.25);
+    --dn-line-hover: rgba(255, 255, 255, 0.5);
+    --dn-tint: rgba(255, 255, 255, 0.08);
+
+    --dn-accent: #7aa7ff;
+    --dn-accent-dim: #9dbbff;
+    --dn-accent-ink: #cfe0ff;
+    --dn-accent-tint: rgba(110, 168, 254, 0.12);
+    --dn-accent-tint-strong: rgba(110, 168, 254, 0.22);
+    --dn-accent-edge: rgba(110, 168, 254, 0.5);
+    --dn-accent-edge-strong: rgba(110, 168, 254, 0.75);
+
+    --dn-ok: #6bbf7a;
+    --dn-ok-ink: #a8e6bd;
+    --dn-ok-edge: rgba(122, 199, 145, 0.6);
+    --dn-bad: #e0716d;
+    --dn-bad-ink: #ff9d90;
+    --dn-bad-edge: rgba(226, 129, 129, 0.6);
+    --dn-bad-tint: rgba(224, 113, 109, 0.1);
+    --dn-warn: #d8a53a;
+    --dn-warn-ink: #f0d9a8;
+    --dn-warn-tint: rgba(216, 165, 58, 0.12);
+    --dn-warn-edge: rgba(255, 189, 106, 0.6);
+  }
+}
+
+/* ---- the page ----------------------------------------------------------------------------- */
+
+/* The page answers to its own width. In a real tab that is the window's; inside a narrow frame it
+ * is not, and a viewport query would never fire there. */
 body {
-  font:
-    16px/1.55 ui-sans-serif,
-    system-ui,
-    -apple-system,
-    "Segoe UI",
-    sans-serif;
   margin: 0;
+  min-height: 100vh;
+  box-sizing: border-box;
+  padding: var(--dn-space-4xl) var(--dn-space-4xl) 4rem;
+  background: var(--dn-well);
+  color: var(--dn-ink-1);
+  font: var(--dn-text-ui) / var(--dn-leading) var(--dn-sans);
+  container-type: inline-size;
+  container-name: panel;
 }
 
-main {
-  max-width: 44rem;
-  margin: 8vh auto 4rem;
-  padding: 0 1.5rem;
+.sheet {
+  max-width: 46rem;
+  margin: 0 auto;
 }
 
-h1 {
-  font-size: 1.6rem;
-  margin: 0 0 0.2rem;
+/* ---- the brand, and the one line that says what state this is ------------------------------ */
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: var(--dn-space-s);
+  margin: 0 0 var(--dn-space-m);
+}
+
+.brand h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: var(--dn-leading-tight);
   letter-spacing: -0.02em;
+  color: var(--dn-ink-strong);
 }
 
-h2 {
-  font-size: 1.05rem;
-  margin: 2rem 0 0.6rem;
-  letter-spacing: -0.01em;
+.brand .tag {
+  font-size: var(--dn-text-meta);
+  color: var(--dn-ink-4);
 }
 
-.sub {
-  margin: 0 0 1.6rem;
-  opacity: var(--dim);
-  font-size: 0.9rem;
+/* Four facts on one line, where three sentences used to be. It answers "is it ready, and what do
+ * I have" without the reader assembling it from prose. */
+.ready {
+  display: flex;
+  align-items: center;
+  gap: var(--dn-space-xs);
+  flex-wrap: wrap;
+  margin: 0 0 var(--dn-space-4xl);
+  font-size: var(--dn-text-body);
+  color: var(--dn-ink-2);
 }
 
-p {
-  margin: 0 0 0.85rem;
+.verdict {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--dn-space-xs);
+  font-weight: 600;
 }
 
+.verdict .pip {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--dn-radius-pill);
+  background: currentColor;
+}
+
+.verdict.ok {
+  color: var(--dn-ok);
+}
+
+.verdict.warn {
+  color: var(--dn-warn);
+}
+
+.verdict.bad {
+  color: var(--dn-bad);
+}
+
+.sep {
+  color: var(--dn-ink-5);
+}
+
+.fact code,
 code {
-  font:
-    0.875em ui-monospace,
-    SFMono-Regular,
-    Menlo,
-    monospace;
-  background: rgba(127, 127, 127, 0.14);
-  padding: 0.1em 0.35em;
-  border-radius: 4px;
+  font: var(--dn-text-body) / var(--dn-leading-solid) var(--dn-mono);
 }
 
-section {
-  border-top: 1px solid var(--line);
-  padding-top: 0.4rem;
-  margin-top: 1.6rem;
+.fact code {
+  color: var(--dn-ink-2);
+}
+
+/* ---- the model: a state, not a form ------------------------------------------------------- */
+
+/* A form standing permanently open on a page you look at every day is a page that asks a question
+ * it already knows the answer to. The form is behind the button now; the answer is the row. */
+.model {
+  display: flex;
+  align-items: center;
+  gap: var(--dn-space-xs);
+  padding: var(--dn-space-s) var(--dn-space-m);
+  margin: 0 0 var(--dn-space-4xl);
+  border: 1px solid var(--dn-line);
+  border-radius: var(--dn-radius-l);
+  background: var(--dn-surface);
+}
+
+.model .label {
+  font-size: var(--dn-text-body);
+  color: var(--dn-ink-3);
+}
+
+.model .value {
+  font: var(--dn-text-body) / var(--dn-leading-solid) var(--dn-mono);
+  color: var(--dn-ink);
+}
+
+.model .value.unset {
+  color: var(--dn-warn-ink);
+}
+
+.model .spacer {
+  flex: 1;
+}
+
+/* ---- controls ----------------------------------------------------------------------------- */
+
+.btn {
+  font: 500 var(--dn-text-body) / var(--dn-leading-solid) var(--dn-sans);
+  padding: 7px 12px;
+  border: 1px solid var(--dn-line-strong);
+  border-radius: var(--dn-radius-m);
+  background: transparent;
+  color: var(--dn-ink-1);
+  cursor: pointer;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--dn-line-hover);
+}
+
+.btn:focus-visible {
+  outline: none;
+  box-shadow: var(--dn-focus);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.btn.primary {
+  border-color: var(--dn-accent-edge);
+  background: var(--dn-accent-tint);
+  color: var(--dn-accent-ink);
+  font-weight: 600;
+}
+
+.btn.quiet {
+  border-color: transparent;
+  color: var(--dn-ink-2);
+  padding: 6px 8px;
+}
+
+.btn.small {
+  font-size: var(--dn-text-body);
+  padding: 5px 9px;
+}
+
+/* `Open` keeps one position in the row across every state. When the app is not running it is a
+ * span rather than a link, so it is styled as a disabled-looking label with the same footprint —
+ * and still present, because hiding the door because the room is dark is how the gateway becomes
+ * the only way to find out. */
+.btn.off {
+  border-color: var(--dn-line);
+  color: var(--dn-ink-3);
+  cursor: default;
 }
 
 label {
   display: block;
-  margin: 0.7rem 0 0.2rem;
-  font-size: 0.875rem;
-  opacity: 0.85;
+  margin: var(--dn-space-2xl) 0 var(--dn-space-xs);
+  font-size: var(--dn-text-body);
+  color: var(--dn-ink-2);
 }
 
 input {
   width: 100%;
   box-sizing: border-box;
-  padding: 0.45rem 0.55rem;
-  font: inherit;
-  font-size: 0.9rem;
-  color: inherit;
-  background: transparent;
-  border: 1px solid var(--line);
-  border-radius: 6px;
+  padding: var(--dn-space-l) var(--dn-space-xl);
+  font: var(--dn-text-body) / var(--dn-leading) var(--dn-sans);
+  color: var(--dn-ink);
+  background: var(--dn-deep);
+  border: 1px solid var(--dn-line-strong);
+  border-radius: var(--dn-radius-m);
 }
 
-button {
-  font: inherit;
-  font-size: 0.875rem;
-  padding: 0.35rem 0.7rem;
-  color: inherit;
-  background: transparent;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  cursor: pointer;
-}
-
-button:hover:not(:disabled) {
-  border-color: currentColor;
-}
-
-button:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-
-button.primary {
-  border-color: currentColor;
-  font-weight: 600;
+input:focus-visible {
+  outline: none;
+  border-color: var(--dn-accent-edge-strong);
+  box-shadow: var(--dn-focus);
 }
 
 .row {
   display: flex;
-  gap: 0.5rem;
+  gap: var(--dn-space-l);
   align-items: baseline;
   flex-wrap: wrap;
 }
 
 /* The button that submits a form sits below its last field. It used to be a `style` attribute,
-   which the policy now blocks. */
+ * which the policy now blocks. */
 .row.submit {
-  margin-top: 0.9rem;
+  margin-top: var(--dn-space-3xl);
 }
 
-.app {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 0.7rem 0.85rem;
-  margin: 0 0 0.6rem;
-}
+/* ---- section heads ------------------------------------------------------------------------ */
 
-.app.broken {
-  border-color: #c0392b;
-}
-
-.app h3 {
-  font-size: 0.95rem;
-  margin: 0;
-}
-
-.app .slug {
-  opacity: var(--dim);
-  font-size: 0.8rem;
-}
-
-/* Where the app lives. Wrapped rather than cut: a truncated path is one a reader cannot copy, and
-   the last segment is the part that says which app this is. */
-.app .path {
-  font:
-    0.8em/1.4 ui-monospace,
-    SFMono-Regular,
-    Menlo,
-    monospace;
-  margin: 0.2rem 0 0;
-  word-break: break-all;
-}
-
-.app .reason {
-  font-size: 0.85rem;
-  margin: 0.35rem 0 0;
-  word-break: break-word;
-}
-
-.app .actions {
-  margin-top: 0.55rem;
+.sec-head {
   display: flex;
-  gap: 0.4rem;
-  flex-wrap: wrap;
   align-items: baseline;
+  gap: var(--dn-space-xs);
+  margin: var(--dn-space-4xl) 0 var(--dn-space-s);
 }
 
-/* The state, as a claim about a process rather than as a label on a card. Drawn only when the
-   listing could ask a supervisor, so its absence means "nobody could say". */
+.sec-head h2 {
+  margin: 0;
+  font-size: var(--dn-text-ui);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--dn-ink);
+}
+
+.sec-head .count {
+  font: var(--dn-text-meta) / var(--dn-leading-solid) var(--dn-mono);
+  color: var(--dn-ink-4);
+}
+
+/* ---- a box of rows ------------------------------------------------------------------------ */
+
+/* One border around the list, one line between rows. A card per row with five equal-weight
+ * buttons made the page a wall of identical buttons; a list makes it scannable. */
+.box {
+  border: 1px solid var(--dn-line);
+  border-radius: var(--dn-radius-l);
+  background: var(--dn-surface);
+  overflow: hidden;
+}
+
+.box > :first-child {
+  border-top: 0;
+}
+
+/* ---- an app row --------------------------------------------------------------------------- */
+
+/* Three columns on a wide page: what it is, what state it is in, what may be done to it. The state
+ * and the verbs are `auto`, so the name column absorbs every spare pixel and the row never
+ * re-flows between a long name and a short one. */
+.app-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--dn-space-4xl);
+  padding: var(--dn-space-s) var(--dn-space-m);
+  border-top: 1px solid var(--dn-line-soft);
+}
+
+.app-row.broken {
+  background: var(--dn-bad-tint);
+}
+
+.who {
+  min-width: 0;
+}
+
+.who .name {
+  display: flex;
+  align-items: center;
+  gap: var(--dn-space-xs);
+  font-size: var(--dn-text-title);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--dn-ink);
+}
+
+/* Where the app lives, and which template built it. The path is the only thing on this row a
+ * person needs to copy, so it wraps instead of being cut — "todo …" is a path nobody can use. */
+.who .meta {
+  margin-top: 2px;
+  font: var(--dn-text-meta) / var(--dn-leading) var(--dn-mono);
+  color: var(--dn-ink-4);
+  overflow-wrap: anywhere;
+}
+
+.who .arch {
+  color: var(--dn-ink-5);
+}
+
+/* A failed app says why on its own row: that reason is the one fact deciding whether the next
+ * press is Start or a look at the log. */
+.who .reason {
+  margin-top: 2px;
+  font-size: var(--dn-text-body);
+  color: var(--dn-bad);
+  overflow-wrap: anywhere;
+}
+
+/* The state, as a claim about a process rather than a label on a card. Drawn only when the listing
+ * could ask a supervisor, so its absence means "nobody could say" — never "stopped". */
 .chip {
-  font-size: 0.75rem;
-  padding: 0.05rem 0.45rem;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  opacity: 0.9;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  justify-self: start;
+  padding: 4px 8px;
+  border: 1px solid var(--dn-line-strong);
+  border-radius: var(--dn-radius-pill);
+  font: var(--dn-text-meta) / var(--dn-leading-solid) var(--dn-mono);
+  color: var(--dn-ink-2);
+  white-space: nowrap;
+}
+
+.chip .pip {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--dn-radius-pill);
+  background: var(--dn-ink-4);
 }
 
 .chip.running {
-  border-color: #2d7a46;
+  border-color: var(--dn-ok-edge);
+  color: var(--dn-ok);
 }
 
-.chip.stopped,
+.chip.running .pip {
+  background: var(--dn-ok);
+}
+
 .chip.failed {
-  opacity: 0.65;
+  border-color: var(--dn-bad-edge);
+  color: var(--dn-bad);
+}
+
+.chip.failed .pip {
+  background: var(--dn-bad);
+}
+
+.verbs {
+  display: flex;
+  align-items: center;
+  gap: var(--dn-space-2xs);
+}
+
+/* ---- the row that adds a row -------------------------------------------------------------- */
+
+.add-row {
+  border-top: 1px solid var(--dn-line-soft);
+}
+
+.add-row > summary {
+  padding: var(--dn-space-s) var(--dn-space-m);
+  font-size: var(--dn-text-body);
+  color: var(--dn-ink-4);
+  cursor: pointer;
+  list-style: none;
+}
+
+.add-row > summary::-webkit-details-marker {
+  display: none;
+}
+
+.add-row > summary:hover {
+  color: var(--dn-ink-2);
+}
+
+.add-row[open] > summary {
+  border-bottom: 1px solid var(--dn-line-soft);
+}
+
+.add-row form {
+  padding: var(--dn-space-s) var(--dn-space-m) var(--dn-space-m);
+}
+
+/* ---- skills: one line until you ask for the rest ------------------------------------------- */
+
+/* Skills are read once a month; the prose explaining them belongs behind the disclosure, not above
+ * a list you look at daily. */
+.skill-sum {
+  display: flex;
+  align-items: center;
+  gap: var(--dn-space-xs);
+  padding: var(--dn-space-s) var(--dn-space-m);
+  cursor: pointer;
+  list-style: none;
+}
+
+.skill-sum::-webkit-details-marker {
+  display: none;
+}
+
+.skill-sum .caret {
+  font-size: var(--dn-text-micro);
+  color: var(--dn-ink-4);
+}
+
+.skill-sum .t {
+  font-size: var(--dn-text-ui);
+  font-weight: 600;
+  color: var(--dn-ink);
+}
+
+.skill-sum .d {
+  font: var(--dn-text-meta) / var(--dn-leading-solid) var(--dn-mono);
+  color: var(--dn-ink-4);
+}
+
+.skills-body {
+  padding: 0 var(--dn-space-m) var(--dn-space-m);
+  border-top: 1px solid var(--dn-line-soft);
+}
+
+/* ---- text --------------------------------------------------------------------------------- */
+
+p {
+  margin: 0 0 var(--dn-space-3xl);
 }
 
 .note {
-  font-size: 0.85rem;
-  opacity: var(--dim);
-}
-
-ul {
-  margin: 0.3rem 0 0.9rem;
-  padding-left: 1.1rem;
-}
-
-li {
-  margin: 0.3rem 0;
+  font-size: var(--dn-text-body);
+  color: var(--dn-ink-3);
 }
 
 .state {
-  font-size: 0.9rem;
-  margin: 0.3rem 0 0.9rem;
+  font-size: var(--dn-text-body);
+  margin: var(--dn-space-s) 0 var(--dn-space-3xl);
+}
+
+/* The apps line is a caption on the box above it, so it takes the box's own rhythm rather than a
+ * paragraph's: one line of air, then nothing. */
+.apps-note {
+  margin: var(--dn-space-s) 0 var(--dn-space-3xl);
+}
+
+.apps-note.warn {
+  color: var(--dn-warn-ink);
 }
 
 .bad {
-  color: #c0392b;
+  color: var(--dn-bad);
 }
 
 .good {
-  color: #2d7a46;
+  color: var(--dn-ok);
 }
 
-@media (prefers-color-scheme: dark) {
-  .bad {
-    color: #ff8b7d;
-  }
-  .good {
-    color: #7ed6a1;
-  }
-  .chip.running {
-    border-color: #7ed6a1;
-  }
-  .app.broken {
-    border-color: #ff8b7d;
-  }
+code {
+  padding: 0.1em 0.35em;
+  border-radius: var(--dn-radius-s);
+  background: var(--dn-code-ground);
+  color: var(--dn-ink-1);
+  overflow-wrap: anywhere;
+}
+
+ul {
+  margin: var(--dn-space-s) 0 var(--dn-space-3xl);
+  padding-left: var(--dn-space-4xl);
+}
+
+li {
+  margin: var(--dn-space-s) 0;
+}
+
+li code {
+  font-size: var(--dn-text-body);
 }
 
 noscript p {
-  border-left: 3px solid var(--line);
-  padding-left: 0.8rem;
+  border-left: 3px solid var(--dn-line-strong);
+  padding-left: var(--dn-space-3xl);
+}
+
+/* ---- the page answers to its own width ---------------------------------------------------- */
+
+/* A container query, not a viewport one: a 390 px frame inside a 1300 px window is 390 px of page,
+ * and a `@media (max-width: …)` would silently never fire there. Below 34rem the row becomes a
+ * single column, because two columns of buttons on a phone is a row that reads as a grid. */
+@container panel (max-width: 34rem) {
+  .app-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--dn-space-s);
+  }
+
+  .verbs {
+    justify-content: flex-start;
+  }
+
+  /* The architecture is the one fact on this row that nothing acts on, and it is the first thing
+   * to go when the line has to fit. */
+  .arch {
+    display: none;
+  }
+
+  .ready {
+    font-size: var(--dn-text-meta);
+  }
 }

@@ -625,6 +625,7 @@ impl Router {
     /// file and then looks at this page — the round trip is the part that would hide the edit.
     fn panel(&self) -> String {
         let skills = self.skills_report();
+        let (apps_count, apps_line) = self.apps_summary();
         deepnest_web::page(&Panel {
             port: self.port,
             token: self
@@ -633,7 +634,8 @@ impl Router {
                 .map(|token| token.as_str().to_string())
                 .unwrap_or_default(),
             model: self.model(),
-            apps: self.apps_summary(),
+            apps: apps_line,
+            apps_count,
             skills: skills.summary,
             skill_list: skills.found,
             skill_problems: skills.skipped,
@@ -650,19 +652,31 @@ impl Router {
             .and_then(|model| model.as_ref().cloned())
     }
 
-    /// One plain-text line about the apps directory, for the panel.
+    /// One plain-text line about the apps directory, and the count that goes beside it.
     ///
-    /// It counts what could not be used and points at the route that explains each one: a page that
-    /// silently showed fewer apps than exist would leave the user with nothing to act on. Plain
-    /// text rather than markup, because the page escapes what it is given.
-    fn apps_summary(&self) -> String {
+    /// The line counts what could not be used and points at the route that explains each one: a
+    /// page that silently showed fewer apps than exist would leave the user with nothing to act on.
+    /// Plain text rather than markup, because the page escapes what it is given.
+    ///
+    /// The count is returned separately because the page states it twice in places a sentence does
+    /// not fit — in the line of facts at the top and beside the section's own heading — and reading
+    /// it back out of the sentence would be this function's punctuation deciding what the page
+    /// shows. `None` means there is no directory to count, which is not the same fact as zero.
+    ///
+    /// One `deepnest_apps::list` call answers both. Two calls would be two readings of a directory
+    /// that can change between them, and the page would then state a count the sentence beside it
+    /// contradicts.
+    fn apps_summary(&self) -> (Option<usize>, String) {
         let Some(dir) = &self.apps_dir else {
-            return "this process was started without an apps directory".to_string();
+            return (
+                None,
+                "this process was started without an apps directory".to_string(),
+            );
         };
         let shown = dir.display().to_string();
         match deepnest_apps::list(dir) {
             Ok(listing) if listing.is_empty() && listing.skipped.is_empty() => {
-                format!("none yet in {shown}")
+                (Some(0), format!("none yet in {shown}"))
             }
             Ok(listing) => {
                 let apps = listing.apps.len();
@@ -677,9 +691,9 @@ impl Router {
                         plural(skipped, "an app", "apps"),
                     );
                 }
-                line
+                (Some(apps), line)
             }
-            Err(error) => format!("cannot be listed — {shown}: {error}"),
+            Err(error) => (None, format!("cannot be listed — {shown}: {error}")),
         }
     }
 
@@ -2315,7 +2329,7 @@ mod tests {
         assert_eq!(answered.status, 200);
         assert_eq!(answered.content_type, "text/css; charset=utf-8");
         let css = body(&answered);
-        assert!(css.contains(".app .path"), "{css}");
+        assert!(css.contains(".who .meta"), "{css}");
         // No token, like the script: nothing about a stylesheet needs one.
         assert!(!css.contains("deepnest-token"), "{css}");
     }
@@ -2681,10 +2695,13 @@ mod tests {
                 .respond(&get("/", "127.0.0.1:4270"))
                 .complete(),
         );
-        // The whole line, not the phrase: the apps line says "none yet in" too, so an assertion
+        // The element, not the phrase: the apps line says "none yet in" too, so an assertion
         // matching either would pass whichever one the code got wrong.
-        assert!(page.contains("Skills: none yet in"), "{page}");
-        assert!(!page.contains("Skills: none usable"), "{page}");
+        assert!(
+            page.contains(r#"<p id="skills-detail" class="note">none yet in"#),
+            "{page}"
+        );
+        assert!(!page.contains("none usable"), "{page}");
         assert!(!page.contains("is not a skill"), "{page}");
     }
 
@@ -2699,8 +2716,16 @@ mod tests {
                 .respond(&get("/", "127.0.0.1:4270"))
                 .complete(),
         );
-        assert!(page.contains("Skills: none usable in"), "{page}");
-        assert!(!page.contains("Skills: none yet in"), "{page}");
+        assert!(
+            page.contains(r#"<p id="skills-detail" class="note">none usable in"#),
+            "{page}"
+        );
+        // The apps line says "none yet in" about its own empty directory, so the negative is
+        // pinned to the element that would carry the wrong claim about the skills.
+        assert!(
+            !page.contains(r#"<p id="skills-detail" class="note">none yet in"#),
+            "{page}"
+        );
         assert!(
             page.contains("1 entry under the skills root is not a skill"),
             "{page}"
@@ -2968,7 +2993,15 @@ mod tests {
         let router = Router::new(PORT, None, None);
         let response = router.respond(&get("/", "127.0.0.1:4270")).complete();
         assert_eq!(response.status, 200);
-        assert!(body(&response).contains("not configured"));
+        let page = body(&response);
+        assert!(
+            page.contains(r#"<span id="verdict-text">No model</span>"#),
+            "{page}"
+        );
+        assert!(
+            page.contains(r#"<span id="model-value" class="value unset">none yet</span>"#),
+            "{page}"
+        );
 
         let health = router
             .respond(&get("/api/health", "127.0.0.1:4270"))
@@ -3788,7 +3821,10 @@ mod tests {
             "{health}"
         );
         let page = body(&router.respond(&get("/", "127.0.0.1:4270")).complete());
-        assert!(page.contains("configured (deepseek-flash)"), "{page}");
+        assert!(
+            page.contains(r#"<span id="model-value" class="value">deepseek-flash</span>"#),
+            "{page}"
+        );
     }
 
     #[test]
