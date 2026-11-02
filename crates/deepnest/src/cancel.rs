@@ -1,8 +1,9 @@
 //! Stopping a turn that is already running.
 //!
 //! A turn is the longest thing this server does: it asks the model, runs the tools it asked for,
-//! asks again, and the measured worst case so far is 112 seconds and 24 rounds. Until now the page
-//! could only wait it out. `crates/agent` already had the flag — [`Cancellation`], checked before
+//! asks again, and the measured worst case when this module was written was 112 seconds, against a
+//! budget of 24 rounds — which the default no longer is, and a budget is a guard, never a reason to
+//! sit and wait. Until now the page could only wait it out. `crates/agent` already had the flag — [`Cancellation`], checked before
 //! every request and before every tool call in a batch — but [`crate::chat::answer`] created one
 //! per request, handed it to the loop and dropped it, so nothing outside that request ever held a
 //! handle to stop it, and `TurnOutcome::Cancelled` was a path no page could reach.
