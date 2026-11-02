@@ -3,8 +3,9 @@
 //! One JSON record per line, appended and flushed. Three consequences of that choice, all of
 //! them the reason for it:
 //!
-//! - **A crash costs the last record, not the file.** A rewritten file that fails halfway loses
-//!   the conversation, and the conversation is the one thing the user cannot regenerate.
+//! - **A crash costs the last record, not the file.** Appending is what a turn does; the one
+//!   rewrite in the file's life is a compaction, and it is written beside the old file and renamed
+//!   over it ([`Session::replace`]), so it either happened or did not.
 //! - **The file stays greppable**, so the agent can search its own past with the `grep` tool.
 //! - **Nothing has to be loaded to append.** A long-running app does not hold its history in
 //!   memory just to answer one more message.
@@ -218,6 +219,29 @@ impl Session {
         Ok(record)
     }
 
+    /// Replace the whole file with these records, atomically.
+    ///
+    /// The one write that is not an append, and it exists for one operation: compaction, which
+    /// replaces the older part of a long conversation with a summary of it ([`fold`]). Its contract
+    /// is what makes it safe to have at all — the new records are written to a file beside the old
+    /// one and renamed over it, so a failure at any point leaves the conversation exactly as it
+    /// was. A rewrite that filled the file in place would make a crash cost the whole history, and
+    /// the history is the one thing the user cannot regenerate.
+    pub fn replace(&self, records: &[Record]) -> std::io::Result<()> {
+        let mut body = String::new();
+        for record in records {
+            body.push_str(&serde_json::to_string(record).map_err(std::io::Error::other)?);
+            body.push('\n');
+        }
+        let beside = self.path.with_extension("jsonl.tmp");
+        {
+            let mut file = fs::File::create(&beside)?;
+            file.write_all(body.as_bytes())?;
+            file.flush()?;
+        }
+        fs::rename(&beside, &self.path)
+    }
+
     /// Append a tool result, recording how the call ended beside it.
     ///
     /// The ending is not part of what the model is sent — a refusal and a failure are the same
@@ -267,6 +291,73 @@ impl Session {
     pub fn message_count(&self) -> std::io::Result<usize> {
         Ok(self.messages()?.len())
     }
+}
+
+/// How a compaction's summary opens.
+///
+/// A summary is written as an **ordinary message**, with no new record kind, because this file's
+/// rule for everything it holds is that a record with any other kind is never sent to the model —
+/// and a summary that is never sent is a summary that changes nothing. It carries this prefix so a
+/// reader can tell it from something the person typed, and so a later compaction can recognise one
+/// it wrote itself rather than summarising a summary in a whisper.
+pub const SUMMARY_PREFIX: &str = "[summary of the conversation before this point]";
+
+/// Where a compaction cuts the file: the index of the first record it keeps as it is.
+///
+/// `None` means there is nothing worth folding, and it is returned in three cases rather than one
+/// because each of them is a real request: fewer than `keep` messages to work with (a conversation
+/// that has not filled up), `keep` of zero (which would fold the newest message too and leave the
+/// summary talking to itself), and a tail with no user turn in it at all.
+///
+/// The cut lands on a **user** message for the same reason [`fit_tail`] starts its tail at one: a
+/// conversation that begins with a tool result is a request a provider refuses, and folding at an
+/// arbitrary index makes exactly that request. The cut therefore moves *forward* to the next user
+/// turn, keeping fewer messages than asked rather than keeping a broken prefix.
+pub fn fold_start(records: &[Record], keep: usize) -> Option<usize> {
+    if keep == 0 {
+        return None;
+    }
+    let messages: Vec<usize> = records
+        .iter()
+        .enumerate()
+        .filter(|(_, record)| record.kind == "message")
+        .map(|(index, _)| index)
+        .collect();
+    if messages.len() <= keep {
+        return None;
+    }
+    let mut at = messages[messages.len() - keep];
+    while at < records.len() && !(records[at].kind == "message" && records[at].role == "user") {
+        at += 1;
+    }
+    if at >= records.len() {
+        return None;
+    }
+    Some(at)
+}
+
+/// Fold the conversation: replace everything before the cut with one summary message.
+///
+/// Two decisions worth stating, because both are choices a reader would otherwise have to guess:
+///
+/// - **Every note survives.** A note is the agent's own record of why something happened — a turn
+///   cancelled, a widening refused, a summary that could not be written — and it is never sent to
+///   the model, so keeping it costs the request nothing. Dropping it would delete the only account
+///   of how the conversation reached this point, which is what somebody reads the file for.
+/// - **The order is the file's.** Notes from before the cut are kept where they can be — after the
+///   summary and before the retained tail — rather than sorted back into place: the file is a
+///   sequence, and a rewrite that reshuffles it to make the history read better is a rewrite no
+///   later reader can trust.
+pub fn fold(records: &[Record], keep: usize, summary: &str) -> Option<Vec<Record>> {
+    let at = fold_start(records, keep)?;
+    let mut out = Vec::with_capacity(keep + 8);
+    out.push(Record::from_message(&Message::user(summary)));
+    for (index, record) in records.iter().enumerate() {
+        if record.kind == "note" || index >= at {
+            out.push(record.clone());
+        }
+    }
+    Some(out)
 }
 
 /// Fit a conversation into `budget` characters, keeping the tail.
@@ -507,6 +598,130 @@ mod tests {
             session.messages().unwrap().is_empty(),
             "a note must not reach the model"
         );
+    }
+
+    /// A conversation of user/assistant pairs, as the loop writes one.
+    fn spoken(session: &Session, turns: usize) {
+        for index in 0..turns {
+            session
+                .append_message(&Message::user(format!("ask {index}")))
+                .unwrap();
+            session
+                .append_message(&Message::assistant(format!("answer {index}")))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn replace_rewrites_the_file_and_leaves_nothing_beside_it() {
+        let scratch = Scratch::new("replace");
+        let session = scratch.session();
+        spoken(&session, 3);
+        let kept: Vec<Record> = session.records().unwrap().into_iter().take(2).collect();
+        session.replace(&kept).unwrap();
+        assert_eq!(session.records().unwrap(), kept);
+        assert!(
+            !session.path().with_extension("jsonl.tmp").exists(),
+            "the file the rewrite was built in must not be left behind"
+        );
+    }
+
+    #[test]
+    fn a_fold_replaces_the_older_messages_with_one_summary() {
+        let scratch = Scratch::new("fold");
+        let session = scratch.session();
+        spoken(&session, 4);
+        let folded = fold(&session.records().unwrap(), 2, "they talked four times").unwrap();
+        let messages: Vec<Message> = folded.iter().filter_map(Record::as_message).collect();
+        assert_eq!(messages.len(), 3, "{messages:?}");
+        assert_eq!(messages[0].role, "user");
+        assert!(messages[0]
+            .content
+            .as_deref()
+            .unwrap_or("")
+            .contains("they talked four times"));
+        assert_eq!(messages[1].content.as_deref(), Some("ask 3"));
+        assert_eq!(messages[2].content.as_deref(), Some("answer 3"));
+    }
+
+    #[test]
+    fn a_fold_keeps_every_note() {
+        // A note is never sent to the model, so folding costs the request nothing by keeping it —
+        // and dropping it would delete the only account of why the conversation looks like this.
+        let scratch = Scratch::new("fold-notes");
+        let session = scratch.session();
+        session
+            .append(&Record::note("the turn was cancelled"))
+            .unwrap();
+        spoken(&session, 4);
+        session
+            .append(&Record::note("a widening was refused"))
+            .unwrap();
+        let folded = fold(&session.records().unwrap(), 2, "sum").unwrap();
+        let notes: Vec<&str> = folded
+            .iter()
+            .filter(|record| record.kind == "note")
+            .filter_map(|record| record.content.as_deref())
+            .collect();
+        assert_eq!(
+            notes,
+            vec!["the turn was cancelled", "a widening was refused"]
+        );
+    }
+
+    #[test]
+    fn a_fold_starts_the_tail_at_a_user_turn() {
+        // Where the count would cut, the tail opens with a tool result — a request a provider
+        // refuses. The cut moves forward rather than keeping a broken prefix.
+        let scratch = Scratch::new("fold-tail");
+        let session = scratch.session();
+        let call = deepnest_llm::ToolCall {
+            id: "call_1".into(),
+            kind: "function".into(),
+            function: deepnest_llm::FunctionCall {
+                name: "read".into(),
+                arguments: "{}".into(),
+            },
+        };
+        session
+            .append_message(&Message::user("look at the file"))
+            .unwrap();
+        session
+            .append_message(&Message::assistant_with_tools(None, vec![call]))
+            .unwrap();
+        session
+            .append_message(&Message::tool("call_1", "the file"))
+            .unwrap();
+        session
+            .append_message(&Message::user("now change it"))
+            .unwrap();
+        session
+            .append_message(&Message::assistant("changed"))
+            .unwrap();
+        let folded = fold(&session.records().unwrap(), 3, "sum").unwrap();
+        let messages: Vec<Message> = folded.iter().filter_map(Record::as_message).collect();
+        assert_eq!(
+            messages[1].content.as_deref(),
+            Some("now change it"),
+            "{messages:?}"
+        );
+        assert!(
+            !messages.iter().any(|message| message.role == "tool"),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn there_is_nothing_to_fold_in_a_conversation_that_still_fits() {
+        let scratch = Scratch::new("fold-short");
+        let session = scratch.session();
+        spoken(&session, 2);
+        let records = session.records().unwrap();
+        assert!(fold_start(&records, 6).is_none());
+        assert!(fold(&records, 6, "sum").is_none());
+        // A window of zero would fold the newest message too, leaving a summary agreeing with
+        // itself. It is refused rather than obeyed.
+        assert!(fold_start(&records, 0).is_none());
     }
 
     #[test]
