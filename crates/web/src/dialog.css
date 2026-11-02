@@ -248,31 +248,57 @@
   display: none;
 }
 
-/* Expanded: the room the window has, less one margin, in both directions. Height comes from `top`
- * and `bottom` together rather than from a number, so the panel takes whatever the window leaves and
- * the transcript's `flex: 1` hands all of it to the conversation — the thing a fixed ceiling was
- * never able to do.
+/* Expanded: the whole window, edge to edge.
  *
- * The width is not the window's. A line of prose set the full width of a 1400 px window is one the
- * eye loses its place in, so the panel is capped at 38rem (608 px, 1.7× the small panel) and centred
- * with `left: 50%` and a transform, which is the one centring that needs no width on the root.
- * `min()` against the window is what keeps a narrow one uncut: below 38rem the panel takes the
- * window less the same margin, so nothing ever hangs off the edge.
+ * It used to be the window's height with a 38rem column floating in the middle of it, on the
+ * argument that a line of prose set the full width of a 1400 px window is one the eye loses its
+ * place in. That argument is about the *text*, and capping the panel was the wrong place to make
+ * it: the sheet stopped short of the window it had just been given, so the app showed through
+ * around a box that was already asking to be a page — and the person who pressed Expand was left
+ * looking at a big window with a small panel in it.
+ *
+ * So the sheet takes the window (`inset: 0`, no margin, no radius, no border) and the measure moves
+ * to the column inside it, below: 44rem of centred text on a sheet that is the whole window. Wide
+ * screens then buy the height and the room a code block or a table needs, and prose still breaks at
+ * about the line it broke at before.
  *
  * `position: fixed` rather than the small panel's `absolute` because the root is a shrink-to-fit
  * box pinned to the page's corner: a box sized by its own content cannot be the room its content is
- * asking for. `right: auto` is spelled out — the small panel's `right: 0` would otherwise still be
- * there, and an absolutely positioned box with `left`, `right` and `width` all set is over-
- * constrained. */
+ * asking for. `width: auto` and not `100vw`: `100vw` counts the scrollbar and hangs the sheet off
+ * the edge of a page that scrolls, while four offsets and no width cannot.
+ *
+ * The small panel's `background` is opaque, so the app underneath is covered rather than dimmed —
+ * a scrim over the page belongs to a sheet that leaves the page visible, and this one does not. */
 #deepnest-dialog-panel[data-expanded="yes"] {
   position: fixed;
-  top: var(--dn-space-3xl);
-  bottom: var(--dn-space-3xl);
-  right: auto;
-  left: 50%;
-  transform: translateX(-50%);
-  width: min(38rem, calc(100vw - 2 * var(--dn-space-3xl)));
+  inset: 0;
+  width: auto;
   max-height: none;
+  border: 0;
+  border-radius: 0;
+}
+
+/* The measure the sheet gave up. Every child of the panel sits in one centred column, so the
+ * transcript, the composer and the head all break at the same width and the conversation reads as
+ * one page. `min()` against the column's own box is what keeps a narrow window uncut — the sheet
+ * runs to the edges there and the column is simply all of it.
+ *
+ * `margin-left`/`margin-right` rather than the `margin` shorthand: each child already sets its own
+ * bottom margin, and `margin-inline: auto` leaves those alone while `margin: 0 auto` would take
+ * them away. */
+#deepnest-dialog-panel[data-expanded="yes"] > * {
+  width: 100%;
+  max-width: min(44rem, 100%);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* The ball does not float over the sheet it opened. It is the last sibling of the panel, so it
+ * paints on top of a full-screen panel and lands on whatever the sheet has in its bottom corner.
+ * `:not([hidden])` is what keeps the way back: a closed panel leaves the ball where it was, and a
+ * sheet that is up is undone by Escape or by Restore in its own head. */
+#deepnest-dialog-panel[data-expanded="yes"]:not([hidden]) ~ #deepnest-dialog-ball {
+  display: none;
 }
 
 /* The app's name and the way into its conversations, on one line: the drawer is a place to go,
