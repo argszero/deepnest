@@ -50,6 +50,17 @@ pub struct Turn {
     pub user: String,
     /// The agent's last prose in this turn, or empty when it never wrote any.
     pub reply: String,
+    /// The prose it wrote **before** it went and did something, one line per round that said
+    /// anything.
+    ///
+    /// This used to be dropped, on the argument that an agent which writes a line before each call
+    /// would leave a transcript of its own narration. What that cost is the shape of the turn
+    /// itself: with only the last prose kept, five rounds of calls and the two remarks that
+    /// separated them wrote down as one flat list of calls under one answer, and the reader could
+    /// not tell that the agent had changed what it was doing when it said so. A message is a
+    /// boundary — between one batch of calls and the next — and a boundary that is not written down
+    /// cannot be drawn.
+    pub said: Vec<Said>,
     /// How many tool calls the agent made about it — the number a reader has no other way to see.
     pub tools: usize,
     /// How many pictures were pasted with the question.
@@ -113,6 +124,20 @@ pub struct Call {
     pub id: String,
 }
 
+/// One thing the agent said in the middle of a turn, and which round it said it in.
+///
+/// The round is what makes it a boundary rather than a remark: a call carries the number of the
+/// response that asked for it ([`Call::round`]), so a line with the same number was written just
+/// before that batch and belongs above it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Said {
+    /// Which of this turn's responses wrote it, counting from 1 — the same numbering as
+    /// [`Call::round`].
+    pub round: usize,
+    /// What it said, cut to what a page polled every second can carry.
+    pub text: String,
+}
+
 /// How much of one call's output travels to the page.
 ///
 /// The route is polled every second while a turn runs, so this is a rate as much as a size: 1,200
@@ -129,6 +154,17 @@ const TURN_OUTPUT_CHARS: usize = 12_000;
 
 /// How much of the identifying argument a row shows.
 const WHAT_CHARS: usize = 80;
+
+/// How much of one mid-turn line travels to the page.
+///
+/// A line written before a call is a signpost — "the tests fail, let me look" — and not the
+/// answer, which is [`Turn::reply`] and uncut. The same rate limit as a call's output, for the
+/// same reason: the route is polled once a second while a turn runs.
+const SAID_CHARS: usize = 1_200;
+
+/// How much mid-turn prose one turn may carry in total. Past this a round keeps its calls and
+/// loses its words, and the page draws the calls it always did.
+const TURN_SAID_CHARS: usize = 6_000;
 
 /// The argument that best says what a call is about, in the order they are tried.
 ///
@@ -169,8 +205,42 @@ pub fn read_at(path: &Path) -> Vec<Turn> {
         };
         push(&mut turns, &record);
     }
+    cut_said(&mut turns);
     cut_outputs(&mut turns);
     turns
+}
+
+/// Cut the mid-turn prose to what a page polled every second can afford, and drop the one line
+/// that is not a boundary.
+///
+/// The turn that spoke and asked for calls in the same response — the round budget running out
+/// mid-thought — has its words both in [`Turn::said`] and as [`Turn::reply`]. Drawn in both places
+/// the page would say the same sentence twice, so it stays where the answer is drawn: last.
+fn cut_said(turns: &mut [Turn]) {
+    for turn in turns.iter_mut() {
+        let answer = turn.reply.trim().to_string();
+        let last = turn.rounds;
+        let mut kept: Vec<Said> = Vec::with_capacity(turn.said.len());
+        let mut spent = 0;
+        for line in std::mem::take(&mut turn.said) {
+            if line.round == last && line.text.trim() == answer {
+                continue;
+            }
+            let text = cut(line.text.trim(), SAID_CHARS);
+            // A turn past its budget keeps its calls and loses its words, which is the shape the
+            // page drew before this field existed: separate rows, no signpost between them.
+            let total = text.chars().count();
+            if spent + total > TURN_SAID_CHARS {
+                continue;
+            }
+            spent += total;
+            kept.push(Said {
+                round: line.round,
+                text,
+            });
+        }
+        turn.said = kept;
+    }
 }
 
 /// Cut what each call carries down to what a page polled every second can afford, saying where.
@@ -285,6 +355,7 @@ fn push(turns: &mut Vec<Turn>, record: &Record) {
             pictures: record.images.as_ref().map_or(0, Vec::len),
             files: files_named(&record.content.clone().unwrap_or_default()),
             reply: String::new(),
+            said: Vec::new(),
             tools: 0,
             rounds: 0,
             notes: Vec::new(),
@@ -311,13 +382,22 @@ fn push(turns: &mut Vec<Turn>, record: &Record) {
                     id: asked.id.clone(),
                 });
             }
-            // Only the newest prose is the answer; an agent that writes a line before each tool
-            // call would otherwise have a transcript of its own narration.
+            // The prose of a round that then went and did something is a line of the turn, kept in
+            // the order it was written. The prose of a round that asked for nothing is the answer,
+            // and there is only ever one of those: a round with no calls ends the turn.
+            //
+            // Both are recorded, and the answer is also the last line of `said` when the same round
+            // asked for calls — the round-budget ending, where the model spoke and asked in the
+            // same response. `cut_said` drops that duplicate so the page draws the answer once.
             if let Some(text) = record
                 .content
                 .as_ref()
                 .filter(|text| !text.trim().is_empty())
             {
+                turn.said.push(Said {
+                    round,
+                    text: text.clone(),
+                });
                 turn.reply = text.clone();
             }
         }
@@ -444,6 +524,70 @@ mod tests {
         assert_eq!(files_named("[file a.csv] and again [file a.csv]"), 1);
         // And a message with no files is returned whole, section or no section.
         assert_eq!(words_of("just words"), "just words");
+    }
+
+    /// A turn is not one list of calls with an answer under it. A model says what it is about to
+    /// do, does it, and says what it found before doing the next thing — and that remark is what
+    /// separates one batch of calls from the next. Keeping only the last prose (which is what this
+    /// file did) threw the separators away and left the reader with a flat list; the host reading
+    /// the transcript named it on 2026-11-02T21:14 ("every message separates the calls").
+    #[test]
+    fn the_prose_between_the_calls_is_kept_with_the_round_it_was_said_in() {
+        let scratch = Scratch::new("said");
+        let first = r#"{"type":"message","role":"assistant","content":"Let me look at the tests.","tool_calls":[{"id":"c1","type":"function","function":{"name":"bash","arguments":"{}"}},{"id":"c2","type":"function","function":{"name":"read","arguments":"{}"}}],"at":"2026-11-01T01:00:02Z"}"#;
+        let second = r#"{"type":"message","role":"assistant","content":"Two pass; running the suite.","tool_calls":[{"id":"c3","type":"function","function":{"name":"bash","arguments":"{}"}}],"at":"2026-11-01T01:00:06Z"}"#;
+        scratch.write(&[SYSTEM, ASK, first, RESULT, second, REPLY]);
+
+        let turns = read(&scratch.base);
+        assert_eq!(turns.len(), 1, "{turns:?}");
+        let said: Vec<(usize, &str)> = turns[0]
+            .said
+            .iter()
+            .map(|line| (line.round, line.text.as_str()))
+            .collect();
+        assert_eq!(
+            said,
+            vec![
+                (1, "Let me look at the tests."),
+                (2, "Two pass; running the suite."),
+            ],
+            "each remark belongs to the round whose calls it introduced"
+        );
+        // The last round asked for nothing, so it is the answer and not a boundary between two.
+        assert_eq!(
+            turns[0].reply, "Done: three files.",
+            "the answer is still the answer"
+        );
+        assert!(
+            turns[0].said.iter().all(|line| line.text != turns[0].reply),
+            "the answer is drawn once, under the calls, and never again as a boundary"
+        );
+        // The rounds are the same numbering the calls carry, which is what lets the page put each
+        // line above its own batch instead of guessing from the order of two lists.
+        assert_eq!(turns[0].calls[0].round, 1);
+        assert_eq!(turns[0].calls[2].round, 2);
+    }
+
+    /// The round budget running out is the one turn that ends with the model speaking and asking
+    /// in the same response. Its words are both the answer and a line before the calls, and the
+    /// page would print the same sentence twice.
+    #[test]
+    fn a_turn_that_ran_out_of_budget_says_its_last_words_once() {
+        let scratch = Scratch::new("budget");
+        let spoke_and_asked = r#"{"type":"message","role":"assistant","content":"Out of rounds; the last two files are unread.","tool_calls":[{"id":"c1","type":"function","function":{"name":"read","arguments":"{}"}}],"at":"2026-11-01T01:00:02Z"}"#;
+        scratch.write(&[SYSTEM, ASK, spoke_and_asked]);
+
+        let turns = read(&scratch.base);
+        assert_eq!(
+            turns[0].reply, "Out of rounds; the last two files are unread.",
+            "the last words of a turn are the answer even without a round that asked for nothing"
+        );
+        assert!(
+            turns[0].said.is_empty(),
+            "and they are not also drawn as a boundary: {:?}",
+            turns[0].said
+        );
+        assert_eq!(turns[0].calls.len(), 1, "the calls are still there");
     }
 
     #[test]

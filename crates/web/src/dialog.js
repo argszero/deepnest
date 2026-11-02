@@ -1619,6 +1619,75 @@
   // group and a call inside it are two different folds, both of which have to survive a poll.
   var openedGroups = {};
 
+  // The turn's body, in the order it happened: what the agent said in a round, the calls that
+  // round asked for, the next round's words, and so on.
+  //
+  // This is what the record always held and the transcript did not show. A model that says why it
+  // is about to do something, does it, and says what it found before doing the next thing leaves a
+  // turn whose shape is "words, batch, words, batch" — and the page drew every call of the turn as
+  // one flat list with the answer under all of them, so the remark that separated two batches was
+  // lost with it. The host reading the transcript named the rule on 2026-11-02T21:14: every
+  // message separates one batch of calls from the next.
+  //
+  // `null` when the turn has neither words nor calls, so the caller draws nothing at all.
+  function renderStream(turn, live) {
+    var calls = turn.calls || [];
+    var byRound = {};
+    (turn.said || []).forEach(function (line) {
+      var round = typeof line.round === "number" ? line.round : 0;
+      if (!byRound[round]) {
+        byRound[round] = [];
+      }
+      // A round that wrote twice (a message and its continuation) keeps its order.
+      byRound[round].push(String(line.text || ""));
+    });
+    var numbered = {};
+    Object.keys(byRound).forEach(function (round) {
+      numbered[round] = true;
+    });
+    calls.forEach(function (call) {
+      numbered[typeof call.round === "number" ? call.round : 0] = true;
+    });
+    var order = Object.keys(numbered)
+      .map(Number)
+      .sort(function (a, b) {
+        return a - b;
+      });
+    if (order.length === 0) {
+      return null;
+    }
+    var box = document.createElement("div");
+    box.className = "deepnest-stream";
+    order.forEach(function (round) {
+      (byRound[round] || []).forEach(function (text) {
+        if (text.trim()) {
+          box.appendChild(renderNarrated(turn, round, text));
+        }
+      });
+      var mine = calls.filter(function (call) {
+        var of = typeof call.round === "number" ? call.round : 0;
+        return of === round;
+      });
+      if (mine.length > 0) {
+        box.appendChild(renderCalls(turn, mine, live));
+      }
+    });
+    return box;
+  }
+
+  // A line the agent wrote before it went and did something. It is drawn with the answer's own
+  // renderer and dimmed, rather than through a second renderer of its own: the words are the same
+  // Markdown, and a second one would be a second thing to keep in step. `what` names the round it
+  // belongs to, because a code block's copy control has to be told apart from the answer's.
+  function renderNarrated(turn, round, text) {
+    var box = document.createElement("div");
+    box.className = "deepnest-said deepnest-narrated";
+    box.appendChild(
+      renderWords(text, "round " + round + " of " + copyNames(turn, 0).where)
+    );
+    return box;
+  }
+
   // What the agent ran, one row each: the tool, the argument that says what it was about, and how
   // it ended. The count this replaced — "ran 12 tools" — was the one thing a person could not
   // check, and the file had every call in it.
@@ -1630,10 +1699,10 @@
   // decision, not six, and six equal rows said otherwise; a turn of twenty calls was twenty rows
   // to read past before reaching the answer. A batch of one keeps its bare row — a fold around a
   // single line is a press that hides nothing.
-  function renderCalls(turn, live) {
+  function renderCalls(turn, calls, live) {
     var box = document.createElement("div");
     box.className = "deepnest-calls";
-    groupsOf(turn.calls || []).forEach(function (group) {
+    groupsOf(calls || []).forEach(function (group) {
       if (group.calls.length === 1) {
         box.appendChild(renderCall(turn, group.calls[0], group.index, live));
         return;
@@ -2398,8 +2467,11 @@
     if (did.textContent) {
       line.appendChild(did);
     }
-    if (calls.length > 0) {
-      line.appendChild(renderCalls(turn, live));
+    // The calls and the words between them, in the order they happened. The answer is drawn after
+    // it, because the answer is what the turn ended with.
+    var stream = renderStream(turn, live);
+    if (stream) {
+      line.appendChild(stream);
     }
     if (turn.reply) {
       var said = document.createElement("div");

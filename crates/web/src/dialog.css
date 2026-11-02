@@ -1432,6 +1432,26 @@
   margin: var(--dn-space-xs) 0 0;
 }
 
+/* The turn in the order it happened: a round's words, that round's calls, the next round's words.
+ * `display` is spelled out because `all: initial` leaves a `div` inline and the blocks below would
+ * then run together on one line. */
+#deepnest-dialog-transcript .deepnest-stream {
+  display: block;
+  box-sizing: border-box;
+}
+
+/* What the agent wrote before it went and did something, so that two batches of calls are two
+ * batches rather than one list. It is the answer's own renderer dimmed and hung on a rule, not a
+ * second kind of prose: the words are Markdown, and a second renderer would be a second thing to
+ * keep in step with the first. Quiet on purpose — it explains the calls under it, and the sentence
+ * a person came for is the answer at the end. */
+#deepnest-dialog .deepnest-narrated {
+  margin: var(--dn-space-m) 0 var(--dn-space-2xs);
+  padding-left: var(--dn-space-m);
+  border-left: 2px solid var(--dn-accent-edge);
+  color: var(--dn-ink-3);
+}
+
 /* One batch of calls — a response that asked for several things — folded to a single line. The
  * rows inside are the ones a lone call draws, so a call is not a different shape for having
  * siblings. */
