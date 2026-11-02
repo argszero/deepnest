@@ -87,10 +87,25 @@
   toggle.setAttribute("aria-expanded", "false");
   toggle.setAttribute("aria-controls", "deepnest-dialog-sessions");
 
+  // The way out of the small window. The panel is a floating block 22rem wide and 78vh tall at the
+  // most, and an exchange does not fit in that at any window size: an answer with a code block, the
+  // calls that produced it and the question after it came to 365 px on its own once the block folded
+  // (#85), against the 280 px window it has. Reading a conversation a few lines at a time out of a
+  // box that small is not reading it. This button gives the conversation the room the window has,
+  // and the same button, saying Restore, gives the room back — a second control to undo the first
+  // would be one more thing to find.
+  var expand = document.createElement("button");
+  expand.type = "button";
+  expand.id = "deepnest-dialog-expand";
+  expand.textContent = "Expand";
+  expand.title = "Fill the window with this conversation (Esc)";
+  expand.setAttribute("aria-pressed", "false");
+
   var head = document.createElement("div");
   head.id = "deepnest-dialog-head";
   head.appendChild(title);
   head.appendChild(toggle);
+  head.appendChild(expand);
 
   var note = document.createElement("p");
   note.id = "deepnest-dialog-note";
@@ -989,6 +1004,26 @@
   // panel is not.
   root.appendChild(shot);
   host.appendChild(root);
+
+  // Kept across a close and a reopen. The person chose a bigger window, and making them choose it
+  // again every time the panel is summoned would hand the small one back as a surprise.
+  var expanded = false;
+
+  // The state goes on the panel rather than on a class of the root, because the root is positioned
+  // by the page's own corner and holds the ball too: what changes size is this box.
+  function setExpanded(next) {
+    expanded = next;
+    panel.setAttribute("data-expanded", next ? "yes" : "no");
+    expand.setAttribute("aria-pressed", next ? "true" : "false");
+    expand.textContent = next ? "Restore" : "Expand";
+    expand.title = next
+      ? "Back to the small window (Esc)"
+      : "Fill the window with this conversation (Esc)";
+  }
+
+  expand.addEventListener("click", function () {
+    setExpanded(!expanded);
+  });
 
   function show(open) {
     panel.hidden = !open;
@@ -3367,6 +3402,13 @@
 
   document.addEventListener("keydown", function (event) {
     if (event.key === "Escape" && !panel.hidden) {
+      // One level at a time. On an expanded panel the step being undone is the expansion — the
+      // person asked for a bigger window and is backing out of that — so the next press is the one
+      // that closes the dialog. This is the same layering the screenshot sheet already uses.
+      if (expanded) {
+        setExpanded(false);
+        return;
+      }
       show(false);
       ball.focus();
     }

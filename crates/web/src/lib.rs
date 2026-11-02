@@ -1177,6 +1177,71 @@ mod tests {
         );
     }
 
+    /// The panel a conversation is read in is 22rem wide and `78vh` tall at the most, so a long
+    /// exchange could only be read through a 280 px window (#85). `Expand` is the way out of that
+    /// box, and what it must not do is grow the panel to the whole screen: `#deepnest-dialog` is a
+    /// shrink-to-fit box pinned to the page's own corner, so a panel asking for the room it needs
+    /// has to leave that box behind rather than inherit it.
+    #[test]
+    fn the_dialog_expands_to_the_window_and_gives_it_back() {
+        assert!(
+            DIALOG_SCRIPT.contains(r#"expand.id = "deepnest-dialog-expand""#),
+            "there is no control for the size of the panel"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("head.appendChild(expand)"),
+            "the control is created but never drawn, so the panel cannot be expanded"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#"panel.setAttribute("data-expanded""#),
+            "nothing the stylesheet can read says the panel is expanded"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#"expand.textContent = next ? "Restore" : "Expand""#),
+            "the button never says how to get back, so nothing undoes the expansion"
+        );
+
+        // Escape backs out one level at a time: the expansion first, because that is the step the
+        // person is asking to undo, and the dialog only on the press after it.
+        let escape = DIALOG_SCRIPT
+            .split(r#"if (event.key === "Escape" && !panel.hidden)"#)
+            .nth(1)
+            .expect("the dialog answers no Escape at all");
+        let restore = escape
+            .find("setExpanded(false)")
+            .expect("Escape closes the whole dialog and never gives the small window back");
+        let close = escape
+            .find("show(false)")
+            .expect("Escape never closes the dialog");
+        assert!(
+            restore < close,
+            "Escape closes the dialog before it restores the small window, so an expanded panel \
+             cannot be backed out of"
+        );
+
+        let rest = DIALOG_STYLE
+            .split(r#"#deepnest-dialog-panel[data-expanded="yes"] {"#)
+            .nth(1)
+            .expect("the expanded panel has no style, so the button changes nothing on screen");
+        let rule = &rest[..rest.find('}').expect("the expanded rule is never closed")];
+        assert!(
+            rule.contains("position: fixed"),
+            "the panel is still laid out inside the shrink-to-fit root, which cannot give it room"
+        );
+        assert!(
+            rule.contains("max-height: none"),
+            "the 78vh ceiling is still there, so the expanded panel is no taller than the small one"
+        );
+        assert!(
+            rule.contains("min(38rem"),
+            "the width is not capped, so on a wide window the prose runs the full screen"
+        );
+        assert!(
+            rule.contains("top:") && rule.contains("bottom:"),
+            "the height is not taken from the window, so expanding only widens the panel"
+        );
+    }
+
     #[test]
     fn the_dialog_sends_a_message_and_holds_no_credential_of_its_own() {
         // The box exists, and the one route it calls is the chat route whose path the server scopes
