@@ -132,6 +132,16 @@
   answer.setAttribute("role", "status");
   answer.setAttribute("aria-live", "polite");
 
+  // What the last turn cost, under the answer and quieter than it. Declared here rather than
+  // beside the function that fills it, because the block below appends it: `var` is hoisted and
+  // its value is not, so an element created further down the file is `undefined` at the moment the
+  // panel is assembled — measured in Chrome, that was `appendChild` throwing "parameter 1 is not of
+  // type 'Node'" and the whole dialog failing to appear.
+  var spend = document.createElement("p");
+  spend.id = "deepnest-dialog-spend";
+  spend.textContent = "";
+  spend.hidden = true;
+
   // Whether that line currently holds an answer still being written. It is what separates "the
   // model is thinking" from "the model is talking", and the two must not overwrite each other.
   var typing = false;
@@ -952,6 +962,7 @@
   panel.appendChild(form);
   panel.appendChild(asked);
   panel.appendChild(answer);
+  panel.appendChild(spend);
   panel.appendChild(link);
   root.appendChild(panel);
   root.appendChild(ball);
@@ -2460,9 +2471,54 @@
     return said + ", " + Math.round((Date.now() - sentAt) / 1000) + "s";
   }
 
+  // What the last turn cost, under the answer it paid for.
+  //
+  // The numbers are the provider's own, summed over the turn's rounds on the server: a turn is not
+  // one request but many, and each one sends the conversation again, so the cost of a turn is not
+  // the cost of its answer. Shown rather than calculated here — a page that multiplied a guessed
+  // price by the length of the text would be a second meter disagreeing with the one the provider
+  // sends, and the disagreement would be invisible.
+  // Thousands separators, because the numbers that matter here are five and six digits long and a
+  // reader counting zeroes is a reader not reading the number. `toLocaleString` rather than a
+  // hand-rolled grouping: it is the one piece of this that the platform already does correctly for
+  // every locale, and a turn's cost is not a place to have an opinion about separators.
+  function counted(n) {
+    return Number(n || 0).toLocaleString();
+  }
+
+  function showSpend(body) {
+    var usage = body && body.usage;
+    // Nothing reported and nothing spent are different readings with the same page: a provider that
+    // does not say (some self-hosted endpoints answer no `usage` at all) would otherwise be shown
+    // as a turn that was free. Silence is the honest rendering of "not reported".
+    if (!usage || !(Number(usage.prompt_tokens) || Number(usage.completion_tokens))) {
+      spend.textContent = "";
+      spend.hidden = true;
+      return;
+    }
+    var said = "This turn: " + counted(usage.prompt_tokens) + " tokens in";
+    if (Number(usage.cached_tokens)) {
+      // Worth naming rather than folding in: on a long turn most of the prompt is the same history
+      // sent again, and how much of it the provider served from its cache is the one number that
+      // says whether re-sending it is still being paid for at full price.
+      said += " (" + counted(usage.cached_tokens) + " from cache)";
+    }
+    said += ", " + counted(usage.completion_tokens) + " out";
+    var rounds = Number(body && body.rounds);
+    if (rounds) {
+      said += " \u2014 " + rounds + (rounds === 1 ? " round" : " rounds");
+    }
+    spend.textContent = said + ".";
+    spend.hidden = false;
+  }
+
   function watchTheTurn() {
     sentAt = Date.now();
     stopWatching();
+    // The last turn's cost leaves with the last turn: a number left under the box while a new turn
+    // runs is a number about something else, and this page has one line for the current turn only.
+    spend.textContent = "";
+    spend.hidden = true;
     // There is a turn now, and it can take minutes: this is the one moment the page can offer a
     // way out of it.
     stop.hidden = false;
@@ -2977,6 +3033,10 @@
           // The answer, drawn as the same blocks the transcript will draw it as: `say` is for this
           // page's own lines, and the agent's words are Markdown.
           sayAnswer(words);
+          // What it cost, under it. Read from the reply rather than from the transcript: the
+          // transcript is the conversation and knows nothing about money, and this line is the one
+          // thing on this page that is about the turn rather than about what was said in it.
+          showSpend(result.body);
           // The turn is on disk the moment the route answers, so this reads what was actually
           // recorded rather than echoing what came back in the reply.
           //

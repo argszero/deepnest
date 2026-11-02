@@ -839,6 +839,25 @@
   white-space: nowrap;
 }
 
+/* What the last turn cost.
+ *
+ * Under the answer and quieter than it, in the monospace this file already uses for a reading of
+ * the machine rather than something the agent said — a number about the turn must not be mistaken
+ * for the turn's words. It is not taken out of the layout with `.settled` above: the answer is
+ * handed to the transcript because the transcript holds the same words, and no other surface on
+ * this page holds this number.
+ */
+#deepnest-dialog-spend {
+  margin: var(--dn-space-s) 0 0;
+  font: var(--dn-text-meta)/var(--dn-leading) ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--dn-ink-4);
+  overflow-wrap: anywhere;
+}
+
+#deepnest-dialog-spend[hidden] {
+  display: none;
+}
+
 /* The conversation. Its own scroll box, because it is the one part of this panel that grows
  * without bound: a long session must not push the composer off the screen.
  *

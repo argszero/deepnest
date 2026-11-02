@@ -20,7 +20,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use deepnest_llm::{AssistantTurn, ChatRequest, LlmError, Message, ToolDefinition};
+use deepnest_llm::{AssistantTurn, ChatRequest, LlmError, Message, ToolDefinition, Usage};
 use deepnest_sandbox::Grant;
 use deepnest_tools::{Tool, ToolContext, ToolResult};
 use serde_json::Value;
@@ -171,15 +171,30 @@ impl Default for Limits {
     }
 }
 
-/// How a turn ended.
+/// How a turn ended, and what it cost.
+///
+/// Every variant carries [`Usage`] because every variant spent something: a turn the budget stopped
+/// and a turn the caller cancelled each made requests whose answers the provider billed for, and a
+/// cost that exists only on the successful ending is a cost that disappears exactly where the money
+/// went furthest. It is the sum over the turn's rounds — one round's price is the price of a
+/// history that the next round sends again — and only the loop can add it up, since only the loop
+/// sees each round.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnOutcome {
     /// The model answered and asked for nothing further.
-    Answered { text: String, rounds: usize },
+    Answered {
+        text: String,
+        rounds: usize,
+        usage: Usage,
+    },
     /// The caller cancelled. No further tool ran.
-    Cancelled { note: String },
+    Cancelled { note: String, usage: Usage },
     /// The round budget ran out with the model still asking for work.
-    RoundLimit { text: String, rounds: usize },
+    RoundLimit {
+        text: String,
+        rounds: usize,
+        usage: Usage,
+    },
 }
 
 impl TurnOutcome {
@@ -187,8 +202,17 @@ impl TurnOutcome {
     pub fn text(&self) -> &str {
         match self {
             TurnOutcome::Answered { text, .. } => text,
-            TurnOutcome::Cancelled { note } => note,
+            TurnOutcome::Cancelled { note, .. } => note,
             TurnOutcome::RoundLimit { text, .. } => text,
+        }
+    }
+
+    /// What the whole turn cost, added up over every request it made.
+    pub fn usage(&self) -> Usage {
+        match self {
+            TurnOutcome::Answered { usage, .. }
+            | TurnOutcome::Cancelled { usage, .. }
+            | TurnOutcome::RoundLimit { usage, .. } => *usage,
         }
     }
 }
@@ -356,10 +380,14 @@ impl Agent {
         // turn's budget learning the same thing.
         let mut compaction_failed = false;
         let mut last_text = String::new();
+        // What this turn has cost so far. Summed here rather than reported per round, because what
+        // a caller pays for is the turn: every round sends the conversation again, so the last
+        // round's count is the smallest part of the bill and the most misleading one to hand back.
+        let mut usage = Usage::default();
 
         for round in 0..self.limits.max_rounds {
             if cancel.is_cancelled() {
-                return Ok(self.cancel_note(round));
+                return Ok(self.cancel_note(round, usage));
             }
             let (messages, dropped) = self.request_messages(budget)?;
             // The moment a request has to leave records out is the moment this exists for: what
@@ -410,6 +438,12 @@ impl Agent {
                 }
             };
 
+            // Counted before the answer is acted on and before the refusal check below: either
+            // way the request was made and the provider billed for it, so a turn that is cut short
+            // reports its cost rather than losing it. A round that failed outright reaches neither
+            // (it `continue`s or returns inside the match above) and reported no usage to count.
+            usage = usage.plus(turn.usage);
+
             if turn.finish_reason.is_refusal() {
                 let reason = "the provider's finish reason was content_filter".to_string();
                 self.note(format!("turn refused: {reason}"))?;
@@ -428,6 +462,7 @@ impl Agent {
                 return Ok(TurnOutcome::Answered {
                     text: last_text,
                     rounds: round + 1,
+                    usage,
                 });
             }
 
@@ -443,6 +478,7 @@ impl Agent {
                     ))?;
                     return Ok(TurnOutcome::Cancelled {
                         note: "the turn was cancelled; no further tool was run".to_string(),
+                        usage,
                     });
                 }
                 let result = self.dispatch(call);
@@ -460,6 +496,7 @@ impl Agent {
         Ok(TurnOutcome::RoundLimit {
             text: last_text,
             rounds: self.limits.max_rounds,
+            usage,
         })
     }
 
@@ -830,11 +867,12 @@ impl Agent {
             })
     }
 
-    fn cancel_note(&self, round: usize) -> TurnOutcome {
+    fn cancel_note(&self, round: usize, usage: Usage) -> TurnOutcome {
         let note = "the turn was cancelled before it finished; nothing further was run";
         let _ = self.note(format!("{note} (round {round})"));
         TurnOutcome::Cancelled {
             note: note.to_string(),
+            usage,
         }
     }
 }
@@ -1441,7 +1479,8 @@ mod tests {
             outcome,
             TurnOutcome::Answered {
                 text: "here is your app".into(),
-                rounds: 1
+                rounds: 1,
+                usage: Usage::default()
             }
         );
         let messages = agent.session().messages().unwrap();
@@ -1600,6 +1639,38 @@ mod tests {
         assert_eq!(model.calls(), 1, "no second request after the cancel");
     }
 
+    /// The cost of a turn is the sum of its rounds, not the last round's number.
+    ///
+    /// A turn here is not one request: every round sends the conversation again, and on a long turn
+    /// that re-sending is most of the bill. Reported per round, the last round of a two-round turn
+    /// names the smaller half of what the turn cost — and on the 313-round turn this project
+    /// measured in its own history it would have named a third of one percent of it.
+    #[test]
+    fn the_turn_reports_the_cost_of_every_round_added_up() {
+        let scratch = Scratch::new("usage-sum");
+        // Two rounds costing two different amounts, so a sum and a last-round reading are two
+        // different numbers rather than one number spelled twice.
+        let mut asking = asks(vec![call("read", "{}")]);
+        asking.usage = deepnest_llm::Usage {
+            prompt_tokens: 900,
+            completion_tokens: 30,
+            total_tokens: 930,
+            cached_tokens: Some(450),
+        };
+        let model = ScriptedModel::new(vec![Ok(asking), Ok(answer_costing("done", 1_200, 40))]);
+        let agent = scratch.agent(model);
+
+        let outcome = agent.run_turn("do it", &Cancellation::new()).unwrap();
+        assert_eq!(outcome.text(), "done");
+        let usage = outcome.usage();
+        assert_eq!(usage.prompt_tokens, 2_100, "900 + 1,200");
+        assert_eq!(usage.completion_tokens, 70, "30 + 40");
+        assert_eq!(usage.total_tokens, 2_170, "930 + 1,240");
+        // Half of each round's prompt was served from the provider's cache, and adding them keeps
+        // both: 450 + 600.
+        assert_eq!(usage.cached_tokens, Some(1_050));
+    }
+
     #[test]
     fn an_over_long_request_shrinks_and_tries_again() {
         let scratch = Scratch::new("shrink");
@@ -1619,7 +1690,8 @@ mod tests {
             outcome,
             TurnOutcome::Answered {
                 text: "second time lucky".into(),
-                rounds: 2
+                rounds: 2,
+                usage: Usage::default()
             }
         );
         let seen = model.seen.lock().unwrap();
