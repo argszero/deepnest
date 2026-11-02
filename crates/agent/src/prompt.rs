@@ -16,8 +16,9 @@
 //!   request.
 //!
 //! The prompt is assembled from [`PromptContext`] so that everything it claims is a fact the
-//! caller supplied: the app's name and directory, the sandbox mode, the memory index, the skills
-//! that are actually installed, where the app is served, and the tools the turn was built with.
+//! caller supplied: the app's name and directory, the sandbox mode, the memory index and the
+//! directory it lives in, the skills that are actually installed, where the app is served, and the
+//! tools the turn was built with.
 
 use std::fmt::Write as _;
 
@@ -34,6 +35,14 @@ pub struct PromptContext {
     pub writable: Vec<String>,
     /// The memory index, already rendered. Empty when the agent has no memories yet.
     pub memory_index: String,
+    /// The directory that holds the index and the entry files, absolute.
+    ///
+    /// Empty when the caller has no memory directory to name, in which case the prompt describes
+    /// the layers without saying where they are rather than printing an empty path. It is a path
+    /// the agent must **write** to, so leaving it out is not cosmetic: an agent told to keep a
+    /// memory and not told where it lives has to invent a location, and a memory in an invented
+    /// location is one the next turn never reads.
+    pub memory_dir: String,
     /// The installed skills, as `(name, description, path)`. Only these three fields: a skill's
     /// body is read on demand, which is what keeps the prompt from growing with every skill.
     pub skills: Vec<(String, String, String)>,
@@ -60,6 +69,7 @@ impl PromptContext {
             mode: mode.into(),
             writable: Vec::new(),
             memory_index: String::new(),
+            memory_dir: String::new(),
             skills: Vec::new(),
             app_url: String::new(),
             tools: Vec::new(),
@@ -73,6 +83,12 @@ impl PromptContext {
 
     pub fn with_memory_index(mut self, index: impl Into<String>) -> Self {
         self.memory_index = index.into();
+        self
+    }
+
+    /// Where the memory files live, absolute. See the field's own note on the empty case.
+    pub fn with_memory_dir(mut self, dir: impl Into<String>) -> Self {
+        self.memory_dir = dir.into();
         self
     }
 
@@ -222,16 +238,35 @@ list is a call that cannot run:\n\n",
 
     out.push_str(
         "\n## Your memory\n\n\
-You have a memory that outlives this conversation. It has two layers: an index — the table \
-below — and one Markdown file per entry. Only the index is in front of you now; read an entry's \
-file with the `read` tool when its title says it matters.\n\n\
-Write an entry when you learn something that will still be true next week and that is not \
+You have a memory that outlives this conversation. It has two layers — an index, the table \
+below, and one Markdown file per entry — and both are on disk, in a directory of this app's. \
+Only the index is in front of you now; read an entry's file with the `read` tool when its title \
+says it matters.\n\n",
+    );
+    // The path is only claimed when the caller supplied one: an agent told to write memory and
+    // not told where writes it somewhere the next turn never reads.
+    if !ctx.memory_dir.trim().is_empty() {
+        let dir = ctx.memory_dir.trim();
+        out.push_str(&format!(
+            "- `{dir}/MEMORY.md` is the index: one row per entry, the columns \
+`| id | type | title | status | updated |`.\n\
+- `{dir}/<id>.md` is one entry: a `---` line, then `id`, `type`, `title`, `status`, \
+`created_at`, `updated_at` — plus `event_at` when the event happened at another time — then \
+`---`, the title again as a `#` heading, then the body. Use a lowercase hyphenated slug of the \
+title as the `id`.\n\n\
+An entry is written to both: the file, then its row in `MEMORY.md`. An entry with no row is one \
+you will never see again, because the index is the only part of the memory that reaches you.\n\n"
+        ));
+    }
+    out.push_str(
+        "Write an entry when you learn something that will still be true next week and that is not \
 obvious from the code: a decision the user made and why, a trap in this app, a preference. Do \
 not write down what you can read from the app directory in one tool call, and do not write a \
 diary of what you just did.\n\n\
-Retire an entry by changing its `status` — never delete it. `superseded` for a fact that \
-changed, `merged` when it moved into another entry. A deleted entry is a fact you will \
-confidently repeat; a retired one is a fact you can see you once believed.\n",
+Retire an entry by changing its `status` in the entry's file and in its index row — never delete \
+it. `superseded` for a fact that changed, `merged` when it moved into another entry. A deleted \
+entry is a fact you will confidently repeat; a retired one is a fact you can see you once \
+believed.\n",
     );
     if ctx.memory_index.trim().is_empty() {
         out.push_str("\nYou have no memories yet.\n");
@@ -466,6 +501,39 @@ mod tests {
         let without = system_prompt(&ctx());
         assert!(without.contains("You have no memories yet"), "{without}");
         assert!(!without.contains("What you remember now"), "{without}");
+    }
+
+    #[test]
+    fn the_memory_section_says_where_the_files_live_and_what_an_entry_looks_like() {
+        // A memory system whose location is described only as "a directory" is one the agent has
+        // to invent a location for — and an entry written somewhere else is never read back,
+        // because only the index reaches the prompt.
+        let dir = "/home/u/.deepnest/apps/notes/.agent/memory";
+        let prompt = system_prompt(&ctx().with_memory_dir(dir));
+        assert!(prompt.contains(&format!("{dir}/MEMORY.md")), "{prompt}");
+        assert!(prompt.contains(&format!("{dir}/<id>.md")), "{prompt}");
+        // The format the store actually parses: a `---` fence and these keys.
+        for key in ["id", "type", "title", "status", "created_at", "event_at"] {
+            assert!(prompt.contains(key), "{key} is not in the prompt");
+        }
+        // Both layers, or the entry exists and the next turn cannot see it.
+        assert!(prompt.contains("An entry with no row"), "{prompt}");
+
+        // The sentence is inside the block that needs the path: no directory, no claim.
+        let bare = system_prompt(&ctx());
+        assert!(!bare.contains("An entry with no row"), "{bare}");
+    }
+
+    #[test]
+    fn a_caller_with_no_memory_directory_gets_no_path_at_all() {
+        let prompt = system_prompt(&ctx());
+        assert!(!prompt.contains("MEMORY.md"), "{prompt}");
+        assert!(!prompt.contains("<id>.md"), "{prompt}");
+        // The layers are still described, so the section is not the one a caller forgot to fill.
+        assert!(
+            prompt.contains("You have a memory that outlives"),
+            "{prompt}"
+        );
     }
 
     #[test]

@@ -513,6 +513,7 @@ pub fn watched(
     )
     .with_writable(writable)
     .with_memory_index(memory)
+    .with_memory_dir(paths.memory_dir().display().to_string())
     .with_skills(skills)
     .with_app_url(format!("/app/{slug}/"));
 
