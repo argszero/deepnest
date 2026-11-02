@@ -76,6 +76,8 @@ English is the default for everything in this repository. A Chinese translation 
 
 The design v1 is built against — module boundaries, data layout, the port model, and where each decision came from — is in [docs/design.md](docs/design.md) ([中文](docs/design.zh.md)).
 
+Writing a skill — the two directories, both layouts, the header, and what the loader reports instead of loading — is in [docs/skills.md](docs/skills.md) ([中文](docs/skills.zh.md)).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

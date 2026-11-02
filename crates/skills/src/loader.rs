@@ -729,6 +729,108 @@ mod tests {
         assert_eq!(summary(&[]), "");
     }
 
+    /// The page a skill's author reads. `include_str!` rather than a runtime read: a renamed or
+    /// deleted guide is a build failure, not a doc that quietly stops matching the code.
+    const GUIDE: &str = include_str!("../../../docs/skills.md");
+
+    /// The same page in Chinese. The repository's rule is that every document has one.
+    const GUIDE_ZH: &str = include_str!("../../../docs/skills.zh.md");
+
+    #[test]
+    fn the_guide_names_the_two_roots_this_crate_actually_reads() {
+        // The failure this prevents is the expensive one: a guide that teaches a path the loader
+        // does not look at. Both are spelled from the constants, so a rename breaks here.
+        assert!(
+            GUIDE.contains(&format!("`~/.deepnest/{USER_DIR}/`")),
+            "the guide does not name the user root: {USER_DIR}"
+        );
+        assert!(
+            GUIDE.contains(&format!("<app>/{APP_DIR}/")),
+            "the guide does not name the app root: {APP_DIR}"
+        );
+        assert!(
+            GUIDE.contains(SKILL_FILE),
+            "the guide does not name {SKILL_FILE}, the file a directory skill is recognised by"
+        );
+    }
+
+    #[test]
+    fn the_guide_states_the_rules_the_loader_enforces() {
+        // Each line is a rule a `#[test]` in this module pins; a guide that skipped one would send
+        // an author to the panel to find out why their skill did not load.
+        for rule in [
+            // `read_skill` refuses a missing or empty description.
+            "description",
+            // `scan` reports a symlink rather than following it.
+            "symlink",
+            // `scan` prefers the directory layout inside one root and reports the loser.
+            "SKILL.md",
+        ] {
+            assert!(GUIDE.contains(rule), "the guide never mentions {rule}");
+        }
+        // The header's fields are the `frontmatter` module's, not this page's invention.
+        assert!(
+            GUIDE.contains("metadata:"),
+            "the guide does not show the nested block that must not overwrite the description"
+        );
+    }
+
+    #[test]
+    fn the_guide_exists_in_both_languages_and_says_the_same_shape() {
+        // Same section headings in both, which is what makes the Chinese one a translation rather
+        // than a shorter summary that drifts. Fenced examples are excluded by counting only the
+        // headings that are not inside a code block.
+        fn headings(doc: &str) -> Vec<String> {
+            let mut out = Vec::new();
+            let mut fenced = false;
+            for line in doc.lines() {
+                if line.trim_start().starts_with("```") {
+                    fenced = !fenced;
+                    continue;
+                }
+                if !fenced && line.starts_with('#') {
+                    out.push(line.trim_start_matches('#').trim().to_string());
+                }
+            }
+            out
+        }
+        let english = headings(GUIDE);
+        let chinese = headings(GUIDE_ZH);
+        assert_eq!(
+            english.len(),
+            chinese.len(),
+            "the two guides have different numbers of sections: {english:?} vs {chinese:?}"
+        );
+        assert!(
+            english.len() >= 6,
+            "the guide has too few sections: {english:?}"
+        );
+        assert!(
+            chinese[0].contains("skill"),
+            "the Chinese guide's title does not name the thing: {}",
+            chinese[0]
+        );
+    }
+
+    #[test]
+    fn both_readmes_point_at_the_guide_their_language_reads() {
+        // The guide is reachable from the front page or it is not reachable at all: the panel is
+        // served from a local origin and cannot link into the repository.
+        let english = include_str!("../../../README.md");
+        let chinese = include_str!("../../../README.zh.md");
+        assert!(
+            english.contains("[docs/skills.md](docs/skills.md)"),
+            "the English README does not link the guide"
+        );
+        assert!(
+            chinese.contains("[docs/skills.zh.md](docs/skills.zh.md)"),
+            "the Chinese README does not link the guide"
+        );
+        // And each links the other language, like the design documents already do.
+        assert!(english.contains("[中文](docs/skills.zh.md)"), "{english}");
+        assert!(chinese.contains("[English](docs/skills.md)"), "{chinese}");
+    }
+
     #[test]
     fn the_roots_are_the_two_the_design_names() {
         let home = Path::new("/home/u/.deepnest");
