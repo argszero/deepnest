@@ -4,8 +4,9 @@
 //!
 //! - **[`turn::Agent`]** — the loop. It asks the model, runs what it asked for, feeds the results
 //!   back, and stops. Three of its rules are load-bearing: the loop **checkpoints cancellation**
-//!   before every request and before every tool call (a cancelled turn that keeps looping holds
-//!   the round it was cancelled to end); it treats a **refusal** as an answer, never as an
+//!   before every request, before every tool call, and **inside the call itself** — a cancelled
+//!   turn that keeps looping holds the round it was cancelled to end, and a stop that could only
+//!   be read between calls was one that waited out the longest wait in the turn; it treats a **refusal** as an answer, never as an
 //!   over-long request (a provider's content filter also arrives as a 400, so shrinking and
 //!   retrying turns a refusal into an endless shrink loop); and it bounds the history **by
 //!   characters, not by entries** (four entries can be four sentences or four megabytes). What it

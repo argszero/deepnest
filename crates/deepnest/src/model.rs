@@ -81,6 +81,26 @@ impl Model for Endpoint {
             .with_tools(tools.to_vec());
         self.client.chat_stream_with(&request, on_text)
     }
+
+    /// The same streamed turn, abandoned the moment the person presses `Stop`.
+    ///
+    /// The adapter below is what makes the press reach *this* call: it shuts the socket down, so a
+    /// read that would otherwise have waited out the model's next token returns at once. Nothing
+    /// above this line has to know that — the loop sees a stopped call and ends the turn as
+    /// cancelled, exactly as it does for a stop between calls.
+    fn turn_until(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        on_text: &mut dyn FnMut(&str),
+        stop: &Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<AssistantTurn, LlmError> {
+        let request = ChatRequest::new(self.client.model().to_string(), messages.to_vec())
+            .streaming()
+            .with_tools(tools.to_vec());
+        self.client
+            .chat_stream_with_until(&request, on_text, Arc::clone(stop))
+    }
 }
 
 impl std::fmt::Debug for Endpoint {

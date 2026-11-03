@@ -54,6 +54,26 @@ pub trait Transport: Send + Sync {
         request: &HttpRequest,
         on_event: &mut dyn FnMut(SseEvent) -> Result<(), LlmError>,
     ) -> Result<(), LlmError>;
+
+    /// The same exchange, abandoned the moment `stop` says so.
+    ///
+    /// A streamed read is a loop of blocking reads, and the reading thread is the turn's own: a
+    /// caller that can only look at a flag *between* model calls is a caller that waits out
+    /// whichever call it is inside. That is what "pressing stop does nothing for a minute" was,
+    /// so the check belongs in the loop that waits rather than above it.
+    ///
+    /// The default is [`Self::post_stream`] with the signal ignored, which is the truthful report
+    /// of an adapter that cannot be interrupted: it still answers, it just cannot stop early. An
+    /// adapter that can — the real one does — overrides this.
+    fn post_stream_until(
+        &self,
+        request: &HttpRequest,
+        on_event: &mut dyn FnMut(SseEvent) -> Result<(), LlmError>,
+        stop: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<(), LlmError> {
+        let _ = stop;
+        self.post_stream(request, on_event)
+    }
 }
 
 /// Where the wait between attempts happens. Injected so a test can prove the schedule without
@@ -196,6 +216,28 @@ impl Client {
         request: &ChatRequest,
         on_text: &mut dyn FnMut(&str),
     ) -> Result<AssistantTurn, LlmError> {
+        // A caller with nothing to stop waits forever, which is what every caller but the loop is.
+        self.chat_stream_with_until(request, on_text, Arc::new(|| false))
+    }
+
+    /// The same streamed turn, abandoned as soon as `stop` says so.
+    ///
+    /// This is the method that makes the dialog's `Stop` mean what the button says. A model call is
+    /// the longest thing in a turn — tens of seconds — and a cancellation that is only read between
+    /// calls is one that waits out the call it is inside. Measured on the running page: every press
+    /// of `Stop` during a model call left the send box locked for exactly as long as that call had
+    /// left to run, so the person could not ask anything else until the work they had just ended
+    /// finished on its own.
+    ///
+    /// A stop is not a failure and is never retried: [`LlmError::stopped`] answers `false` from
+    /// [`LlmError::is_transient`], so the retry budget below cannot resend a request the person
+    /// asked to abandon.
+    pub fn chat_stream_with_until(
+        &self,
+        request: &ChatRequest,
+        on_text: &mut dyn FnMut(&str),
+        stop: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<AssistantTurn, LlmError> {
         let streaming = ChatRequest {
             stream: Some(true),
             // Asked here rather than left to the caller: this is the function that decides the
@@ -215,6 +257,12 @@ impl Client {
         let mut asked_for_usage = streaming.stream_options.is_some();
         let mut dropped_the_ask = false;
         loop {
+            // Read once per attempt rather than once per call: a stop that arrived during the
+            // attempt before this one must not be lost, and a stop that arrives *during* an
+            // attempt is the adapter's business — see `post_stream_until`.
+            if stop() {
+                return Err(LlmError::stopped());
+            }
             let mut turn = TurnAccumulator::new();
             let mut saw_done = false;
             let mut delivered = 0usize;
@@ -222,32 +270,42 @@ impl Client {
             // taken once is an observer the second attempt could not reach.
             let notify = &mut *on_text;
 
-            let outcome = self.transport.post_stream(&http, &mut |event| {
-                if event.is_done() {
-                    saw_done = true;
-                    return Ok(());
-                }
-                delivered += 1;
-                let chunk: StreamChunk = serde_json::from_str(&event.data).map_err(|e| {
-                    LlmError::transport(format!("stream carried a malformed chunk: {e}"))
-                })?;
-                turn.apply(&chunk);
-                // The text *this* chunk added. Read from the chunk rather than from the
-                // accumulator, because the accumulator holds the whole answer and a caller that
-                // has already drawn the earlier fragments needs only the new one.
-                if let Some(text) = chunk
-                    .choices
-                    .first()
-                    .and_then(|choice| choice.delta.content.as_deref())
-                {
-                    notify(text);
-                }
-                Ok(())
-            });
+            let outcome = self.transport.post_stream_until(
+                &http,
+                &mut |event| {
+                    if event.is_done() {
+                        saw_done = true;
+                        return Ok(());
+                    }
+                    delivered += 1;
+                    let chunk: StreamChunk = serde_json::from_str(&event.data).map_err(|e| {
+                        LlmError::transport(format!("stream carried a malformed chunk: {e}"))
+                    })?;
+                    turn.apply(&chunk);
+                    // The text *this* chunk added. Read from the chunk rather than from the
+                    // accumulator, because the accumulator holds the whole answer and a caller that
+                    // has already drawn the earlier fragments needs only the new one.
+                    if let Some(text) = chunk
+                        .choices
+                        .first()
+                        .and_then(|choice| choice.delta.content.as_deref())
+                    {
+                        notify(text);
+                    }
+                    Ok(())
+                },
+                Arc::clone(&stop),
+            );
 
             match outcome {
                 Err(error) => {
                     let error = self.scrub(error);
+                    // A stop is final, and named before anything else is considered: the retry
+                    // budget must not resend a request the person asked to abandon, and the
+                    // `stream_options` retry must not treat a stop as a refusal of the parameter.
+                    if error.is_stopped() {
+                        return Err(error);
+                    }
                     // An endpoint that refuses `stream_options` is refusing the parameter, not the
                     // request: drop it and send the same body again. Only for a 4xx, only when the
                     // body says what it objected to, and only once — anything wider would resend a
@@ -348,6 +406,7 @@ mod tests {
     use super::*;
     use crate::stream::SseDecoder;
     use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
 
     /// Serves scripted responses and records what it was asked to send.
@@ -822,5 +881,114 @@ mod tests {
             "key=***; again ***"
         );
         assert_eq!(redact("no secret here", ""), "no secret here");
+    }
+
+    /// A transport that streams one event and then waits for the caller's stop, the way a real
+    /// endpoint waits before writing its next token — except this one stops waiting when told.
+    struct WaitsForTheStop {
+        sent: Mutex<usize>,
+    }
+
+    impl Transport for WaitsForTheStop {
+        fn post(&self, _request: &HttpRequest) -> Result<HttpResponse, LlmError> {
+            Err(LlmError::unsupported("non-streaming"))
+        }
+
+        fn post_stream(
+            &self,
+            _request: &HttpRequest,
+            _on_event: &mut dyn FnMut(SseEvent) -> Result<(), LlmError>,
+        ) -> Result<(), LlmError> {
+            Err(LlmError::unsupported(
+                "this fake only answers the interrupted way",
+            ))
+        }
+
+        fn post_stream_until(
+            &self,
+            _request: &HttpRequest,
+            on_event: &mut dyn FnMut(SseEvent) -> Result<(), LlmError>,
+            stop: Arc<dyn Fn() -> bool + Send + Sync>,
+        ) -> Result<(), LlmError> {
+            *self.sent.lock().unwrap() += 1;
+            on_event(SseEvent {
+                event: None,
+                data: r#"{"choices":[{"index":0,"delta":{"content":"half a th"}}]}"#.into(),
+            })?;
+            // The wait a stop has to reach: nothing to deliver, and the answer not finished.
+            for _ in 0..2000 {
+                if stop() {
+                    return Err(LlmError::stopped());
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            panic!("the stop never arrived, so this is a call that would have hung the turn");
+        }
+    }
+
+    /// The defect stated as a test: a stop that arrives *inside* a model call ends the call.
+    ///
+    /// Before this, the flag was only read between calls, so a press of the dialog's `Stop` during
+    /// a streamed answer waited out that answer. Measured on the running page: the send box stayed
+    /// locked for 27 seconds — exactly the time the abandoned call had left to run.
+    #[test]
+    fn a_stop_during_a_model_call_ends_the_call_instead_of_waiting_it_out() {
+        let transport = Arc::new(WaitsForTheStop {
+            sent: Mutex::new(0),
+        });
+        let sleeper = Arc::new(RecordingSleeper::default());
+        let client = client_with(transport.clone(), sleeper.clone());
+
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&cancelled);
+        let stop: Arc<dyn Fn() -> bool + Send + Sync> =
+            Arc::new(move || flag.load(Ordering::SeqCst));
+        // Pressed from outside, on another thread, while the call is inside its wait — which is
+        // the shape of the real thing: the route that answers `POST …/cancel` is a different
+        // connection from the one the turn is running on.
+        let presser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            cancelled.store(true, Ordering::SeqCst);
+        });
+
+        let started = std::time::Instant::now();
+        let error = client
+            .chat_stream_with_until(&request(), &mut |_| {}, stop)
+            .expect_err("a stopped call is not an answer");
+        let took = started.elapsed();
+        presser.join().unwrap();
+
+        assert!(error.is_stopped(), "{error:?}");
+        assert_eq!(error.kind, crate::FailureKind::Stopped);
+        assert!(
+            took < Duration::from_secs(2),
+            "the call waited {took:?} after the stop, so the flag did not reach the read"
+        );
+        assert_eq!(
+            *transport.sent.lock().unwrap(),
+            1,
+            "the stopped call was re-sent"
+        );
+        assert!(
+            sleeper.waited.lock().unwrap().is_empty(),
+            "a stop must not be answered with the retry budget"
+        );
+    }
+
+    #[test]
+    fn a_call_already_stopped_is_never_sent() {
+        let transport = StreamTransport::new(vec![]);
+        let client = client_with(transport.clone(), Arc::new(RecordingSleeper::default()));
+        let stop: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(|| true);
+
+        let error = client
+            .chat_stream_with_until(&request(), &mut |_| {}, stop)
+            .expect_err("nothing is sent for a turn that is already stopped");
+        assert!(error.is_stopped(), "{error:?}");
+        assert_eq!(
+            transport.request_count(),
+            0,
+            "a request went out after the turn had already been stopped"
+        );
     }
 }

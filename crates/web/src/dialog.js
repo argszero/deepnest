@@ -149,13 +149,13 @@
 
   // A stop that has been asked for and has not happened yet.
   //
-  // The route answers "the turn was asked to stop", which is the truth, and what that means has
-  // one half a person can rely on and one they cannot. A tool that is running is abandoned: the
-  // call is told to stop and the command it spawned is killed, so the seconds a stop saves are the
-  // ones a build or a search was spending. A model call in flight cannot be — an HTTP request is
-  // already on the wire and there is nothing to kill — so a turn inside one ends when that call
-  // returns. Both are stated rather than the better one alone, because a person who presses stop
-  // during a model call and sees thirty more seconds is owed the reason.
+  // The route answers "the turn was asked to stop", which is the truth, and both halves of a turn
+  // are now reachable from it. A tool that is running is abandoned: the call is told to stop and
+  // the command it spawned is killed, so the seconds a stop saves are the ones a build or a search
+  // was spending. A model call in flight is abandoned too — the socket under the streamed read is
+  // shut down, so the read returns at once instead of waiting for the model's next token. Before
+  // that, a stop during a call waited the call out, and on this page that measured as the send box
+  // staying locked for the 27 seconds the abandoned call had left to run.
   //
   // Measured on this page: pressing Stop during a model call changed nothing a person could see
   // for tens of seconds, because the button kept saying "Stop" and the progress line underneath it
@@ -3446,8 +3446,8 @@
     stop.disabled = true;
     stop.textContent = STOPPING_LABEL;
     showStopping(
-      "Stopping \u2014 a running command is killed now; a model call already sent ends when it " +
-        "returns."
+      "Stopping \u2014 a running command is killed and a model call is abandoned, so the box is " +
+        "yours again in a moment."
     );
     // No body, and that is the whole of the bug this line carried: the route refuses a request
     // body by name — a server must not answer "done" about content it never read — so `body: "{}"`
@@ -3470,10 +3470,10 @@
       })
       .then(function (result) {
         if (result.status === 200 && result.body && typeof result.body.note === "string") {
-          // The turn is not over yet — the loop reads the flag before its next request and before
-          // every tool call of a batch — so this says what was asked rather than what has
-          // happened. The control stays as it is, disabled and reading "Stopping…": the turn is
-          // still running, and the only thing a second press could do is ask again.
+          // The turn may have a moment left — a command being killed, the flag reaching the loop — so
+          // this says what was asked rather than what has happened. The control stays as it is,
+          // disabled and reading "Stopping…": the ending is the turn's own request finishing, and
+          // the only thing a second press could do is ask again.
           showStopping("Stopping \u2014 " + result.body.note);
           return;
         }

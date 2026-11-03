@@ -11,11 +11,12 @@
 //! | the provider refuses the content | a refusal is an answer, and resending cannot change it |
 //! | the model cannot be reached | there is nothing to dispatch, and a fabricated answer is worse than none |
 //!
-//! The **cancellation checkpoint is not advisory**: it is checked before every request and before
-//! every tool call in a batch, so a turn cancelled mid-batch runs no further command. And a
-//! **refusal is never read as an over-long request**: a provider's content filter arrives as a
-//! 400, and treating it as a length problem shrinks the history and resends the refused text —
-//! forever.
+//! The **cancellation checkpoint is not advisory**: it is checked before every request, before
+//! every tool call in a batch, and *inside* the model call — `Model::turn_until` hands the signal
+//! to the adapter, which abandons the request at the socket. A turn cancelled mid-batch runs no
+//! further command, and one cancelled mid-call does not wait that call out. And a **refusal is
+//! never read as an over-long request**: a provider's content filter arrives as a 400, and treating
+//! it as a length problem shrinks the history and resends the refused text — forever.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -72,6 +73,27 @@ pub trait Model: Send + Sync {
         let _ = on_text;
         self.turn(messages, tools)
     }
+
+    /// The same turn, abandoned the moment `stop` says so.
+    ///
+    /// A model call is the longest thing in a turn, and this is the only hook that can reach
+    /// *inside* one. Without it a stop is read between calls, so pressing it during a call means
+    /// waiting out that call — measured on the running page as a send box locked for exactly as
+    /// long as the call had left to run.
+    ///
+    /// The default is [`Self::turn_with`] with the signal ignored: an adapter that cannot abandon
+    /// a request in flight still answers correctly, it just cannot end early. A model that can —
+    /// the real one does — overrides this.
+    fn turn_until(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        on_text: &mut dyn FnMut(&str),
+        stop: &Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<AssistantTurn, LlmError> {
+        let _ = stop;
+        self.turn_with(messages, tools, on_text)
+    }
 }
 
 impl Model for deepnest_llm::Client {
@@ -96,6 +118,19 @@ impl Model for deepnest_llm::Client {
             .streaming()
             .with_tools(tools.to_vec());
         self.chat_stream_with(&request, on_text)
+    }
+
+    fn turn_until(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        on_text: &mut dyn FnMut(&str),
+        stop: &Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<AssistantTurn, LlmError> {
+        let request = ChatRequest::new(self.model().to_string(), messages.to_vec())
+            .streaming()
+            .with_tools(tools.to_vec());
+        self.chat_stream_with_until(&request, on_text, Arc::clone(stop))
     }
 }
 
@@ -440,12 +475,30 @@ impl Agent {
             // What was sent is recorded before the answer is acted on: a request that is then
             // answered with a failure is exactly the one somebody comes to this file to read.
             self.record_request(&messages, &definitions)?;
-            let turn = match self.model.turn_with(&messages, &definitions, &mut *on_text) {
+            // The stop flag travels *into* the call, not just around it. This is the one wait in a
+            // turn long enough that reading the flag only between calls reads as a button that
+            // does nothing: a model call is tens of seconds, and a person who stopped the work
+            // must be free to ask something else in the meantime.
+            let stop = {
+                let cancel = cancel.clone();
+                Arc::new(move || cancel.is_cancelled()) as Arc<dyn Fn() -> bool + Send + Sync>
+            };
+            let turn = match self
+                .model
+                .turn_until(&messages, &definitions, &mut *on_text, &stop)
+            {
                 Ok(turn) => {
                     self.record_answer(&turn)?;
                     turn
                 }
                 Err(error) => {
+                    // A call the person abandoned is not a failure to report as one. The loop ends
+                    // the turn as cancelled, which is the same ending a stop between calls gets, so
+                    // the page says "stopped at your request" rather than naming a broken endpoint.
+                    if error.is_stopped() {
+                        self.record_failure(&error)?;
+                        return Ok(self.cancel_note(round, usage));
+                    }
                     self.record_failure(&error)?;
                     // A refusal is an answer about the content; a length complaint is an answer
                     // about the request. Only the second is worth acting on, and only twice.
@@ -1027,6 +1080,28 @@ mod tests {
         ) -> Result<AssistantTurn, LlmError> {
             self.seen.lock().unwrap().push(messages.to_vec());
             self.offered.lock().unwrap().push(tools.to_vec());
+            self.replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| Ok(answer("out of script")))
+        }
+
+        fn turn_until(
+            &self,
+            messages: &[Message],
+            tools: &[ToolDefinition],
+            _on_text: &mut dyn FnMut(&str),
+            stop: &Arc<dyn Fn() -> bool + Send + Sync>,
+        ) -> Result<AssistantTurn, LlmError> {
+            self.seen.lock().unwrap().push(messages.to_vec());
+            self.offered.lock().unwrap().push(tools.to_vec());
+            // Whatever this scripted model was going to answer is beside the point: the scripted
+            // reply is given only when nobody has stopped the turn, which is the one thing this
+            // fake has to model about a call that is still in flight.
+            if stop() {
+                return Err(LlmError::stopped());
+            }
             self.replies
                 .lock()
                 .unwrap()
@@ -1909,6 +1984,61 @@ mod tests {
                     .as_deref()
                     .is_some_and(|text| text.contains("abandoned"))),
             "the turn's own note says the tool was abandoned"
+        );
+    }
+
+    /// The other half of the stop, and the one the person actually feels.
+    ///
+    /// The test above stops a turn between calls. This one stops it *inside* one — the case that
+    /// used to make `Stop` look broken, because the flag was only read at round boundaries and a
+    /// model call is the longest stretch of a turn. The turn must end as cancelled, not as a
+    /// failure: the endpoint did nothing wrong, and reporting it as broken is a sentence about
+    /// something the person did not experience.
+    #[test]
+    fn a_stop_inside_a_model_call_ends_the_turn_as_cancelled() {
+        struct StoppedMidCall {
+            cancel: Cancellation,
+        }
+        impl Model for StoppedMidCall {
+            fn turn(
+                &self,
+                _messages: &[Message],
+                _tools: &[ToolDefinition],
+            ) -> Result<AssistantTurn, LlmError> {
+                panic!("the loop must ask the interruptible way, or a stop cannot reach it");
+            }
+
+            fn turn_until(
+                &self,
+                _messages: &[Message],
+                _tools: &[ToolDefinition],
+                _on_text: &mut dyn FnMut(&str),
+                _stop: &Arc<dyn Fn() -> bool + Send + Sync>,
+            ) -> Result<AssistantTurn, LlmError> {
+                // What a stop during a streamed answer does: the call comes back abandoned.
+                self.cancel.cancel();
+                Err(LlmError::stopped())
+            }
+        }
+        let scratch = Scratch::new("cancel-inside-call");
+        let cancel = Cancellation::new();
+        let model: Arc<dyn Model> = Arc::new(StoppedMidCall {
+            cancel: cancel.clone(),
+        });
+        let agent = scratch.agent(model);
+        let outcome = agent.run_turn("write me an app", &cancel).unwrap();
+        assert!(
+            matches!(outcome, TurnOutcome::Cancelled { .. }),
+            "a call abandoned by the person is a turn they ended, not a broken endpoint: {outcome:?}"
+        );
+        let records = agent.session().records().unwrap();
+        assert!(
+            records.iter().any(|record| record.role == "agent"
+                && record
+                    .content
+                    .as_deref()
+                    .is_some_and(|text| text.contains("cancel"))),
+            "the record says the turn was cancelled"
         );
     }
 

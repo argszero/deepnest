@@ -690,7 +690,16 @@ one a fact the person needs while a turn is running or after it ended:
 - **`Stop` exists only while a turn is running**, because a permanent button that says stop is a
   button with no object. It says so at the press rather than when the reply arrives: the control
   turns into `Stopping…` and stays disabled, with a line naming what the stop will reach, because
-  the interesting moment is the one where nothing has happened yet.
+  the interesting moment is the one where nothing has happened yet. **What it reaches is both
+  halves of a turn** (`reported defect, 2026-11-03`): a running command is killed, and a model call
+  in flight is abandoned by shutting the socket under its streamed read, so the read returns at
+  once instead of waiting for the model's next token. Before that, the flag was only read between
+  calls, and a stop pressed during one waited it out — measured on the running page as the send box
+  locked for the 27 seconds the abandoned call had left to run, with the person unable to ask
+  anything else until work they had just ended finished on its own. The reach is a watcher thread
+  holding a clone of the socket (`crates/gateway/src/transport.rs::interruptible`) polling the flag
+  every 50 ms; a blocked read cannot check anything itself, which is why the reader is not the
+  thread that notices.
 - **`Conversations`** opens the app's conversations above the transcript rather than replacing it,
   so a person can see what they are leaving before they leave it; the row they are on is marked. The
   transcript is read back from `GET /history` rather than remembered in the page, so a reload shows
