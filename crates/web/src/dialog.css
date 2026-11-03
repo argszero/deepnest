@@ -862,77 +862,62 @@ html.deepnest-dialog-locked {
   outline-offset: 1px;
 }
 
-#deepnest-dialog-answer {
+/* The line under the box: what the turn is doing, and nothing else.
+ *
+ * It is a reading of the machine — which round, how many calls, how long — in the monospace this
+ * file already uses for that, so a status is never mistaken for something the agent said. One line,
+ * clipped rather than wrapped: a status that grew to two lines would push the box a person is typing
+ * in up the panel, and the number it carries is the least important thing on screen.
+ *
+ * There is no rule here for an answer, because an answer is not drawn here. It is a row in the
+ * transcript, which is the only surface this dialog has for words.
+ */
+#deepnest-dialog-status {
   display: block;
   box-sizing: border-box;
-  margin: var(--dn-space-xl) 0 0;
-  max-height: 9rem;
-  overflow: auto;
-  font: var(--dn-text-body)/var(--dn-leading-loose) ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  color: var(--dn-ink-1);
-  /* The agent's answer is Markdown and arrives as plain text; keeping the newlines is the
-   * difference between a paragraph and a wall. */
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  margin: var(--dn-space-s) 0 0;
+  font: var(--dn-text-meta)/var(--dn-leading) ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--dn-ink-4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-#deepnest-dialog-answer[hidden] {
+#deepnest-dialog-status[hidden] {
   display: none;
 }
 
-#deepnest-dialog-answer.bad {
-  color: var(--dn-bad-ink);
-}
-
-/* A turn that is still running, as opposed to an answer. Monospace and dimmer because it is a
- * reading of the machine's state that will be replaced, not something the agent said. */
-#deepnest-dialog-answer.live {
-  font: var(--dn-text-meta)/var(--dn-leading) ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: var(--dn-ink-4);
-}
-
-/* An answer still being written. The type is the answer's own — these are the agent's words, not a
- * reading of the machine — and the bar at the end is the only thing that says more is coming; it
- * leaves with the class, which `say` takes off when the answer is whole. */
-#deepnest-dialog-answer.typing::after {
+/* The sentence the model is writing right now, at the end of the running turn.
+ *
+ * It is drawn as the same block the record will draw those words as, so it needs no type of its own
+ * — only the bar at the end, which is the one thing saying more is coming. The bar goes with the
+ * node: when the round ends the record draws the whole sentence and this element is not rebuilt.
+ */
+#deepnest-dialog .deepnest-writing::after {
   content: "\258d";
   color: var(--dn-ink-5);
 }
 
-/* The answer has been handed to the transcript, which draws the same words one box down and is the
- * record. Announced, not drawn: `role="status"` is how an answer reaches someone who cannot see it,
- * and a `display: none` region announces nothing — so this keeps the box in the accessibility tree
- * and takes it out of the layout instead of hiding it. Every writer the page has takes the class
- * off again, because whatever it says next is newer than the answer that was handed over. */
-#deepnest-dialog-answer.settled {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  margin: -1px;
-  padding: 0;
-  border: 0;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
-
-/* What the last turn cost.
- *
- * Under the answer and quieter than it, in the monospace this file already uses for a reading of
- * the machine rather than something the agent said — a number about the turn must not be mistaken
- * for the turn's words. It is not taken out of the layout with `.settled` above: the answer is
- * handed to the transcript because the transcript holds the same words, and no other surface on
- * this page holds this number.
- */
-#deepnest-dialog-spend {
-  margin: var(--dn-space-s) 0 0;
+/* What this page has to report: a send that failed, a rebuild that did not work, a stop that was
+ * heard, what the turn cost. Rows at the end of the conversation, dimmer than anything said in it,
+ * because they are about the turn rather than part of it. */
+#deepnest-dialog .deepnest-report {
+  margin: var(--dn-space-m) 0 0;
   font: var(--dn-text-meta)/var(--dn-leading) ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--dn-ink-4);
+  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
-#deepnest-dialog-spend[hidden] {
-  display: none;
+#deepnest-dialog .deepnest-report-bad {
+  color: var(--dn-bad-ink);
+}
+
+/* The turn's cost. The one row here about money rather than about what happened, which is why it is
+ * the one set apart. */
+#deepnest-dialog .deepnest-report-cost {
+  margin-top: var(--dn-space-s);
+  color: var(--dn-ink-5);
 }
 
 /* The conversation. Its own scroll box, because it is the one part of this panel that grows

@@ -161,34 +161,32 @@
   var STOP_LABEL = "Stop";
   var STOPPING_LABEL = "Stopping\u2026";
 
-  // `role="status"` with `aria-live` announces the answer without moving focus out of the box,
-  // so a second message can follow the first.
+  // The line under the box, and the only surface a turn that is running writes to.
   //
-  // A `div` rather than a `p`: the answer is Markdown, and since this file renders it (below) the
-  // line holds headings, lists and code blocks — none of which a paragraph may contain.
-  var answer = document.createElement("div");
-  answer.id = "deepnest-dialog-answer";
-  answer.hidden = true;
-  answer.setAttribute("role", "status");
-  answer.setAttribute("aria-live", "polite");
+  // It is a reading of the machine — which round, how many calls, how long — and never the agent's
+  // words. The agent's words have one home, the transcript, because a second surface for them cost
+  // a hand-over to hide one of the two copies, two live regions announcing the same sentence, and a
+  // box that had to be both "what the model is saying" and "what the machine is doing" — which is
+  // what its three state classes were there to tell apart. All of that was machinery repairing the
+  // first mistake, which was having a second surface at all.
+  //
+  // `aria-live` is off while it counts: a region rewritten every second is a screen reader reading a
+  // new sentence every second. The one thing said here that is worth hearing — a stop that was asked
+  // for — turns it back on, once.
+  var status = document.createElement("div");
+  status.id = "deepnest-dialog-status";
+  status.hidden = true;
+  status.setAttribute("role", "status");
+  status.setAttribute("aria-live", "off");
 
-  // What the last turn cost, under the answer and quieter than it. Declared here rather than
-  // beside the function that fills it, because the block below appends it: `var` is hoisted and
-  // its value is not, so an element created further down the file is `undefined` at the moment the
-  // panel is assembled — measured in Chrome, that was `appendChild` throwing "parameter 1 is not of
-  // type 'Node'" and the whole dialog failing to appear.
-  var spend = document.createElement("p");
-  spend.id = "deepnest-dialog-spend";
-  spend.textContent = "";
-  spend.hidden = true;
-
-  // Whether that line currently holds an answer still being written. It is what separates "the
-  // model is thinking" from "the model is talking", and the two must not overwrite each other.
-  var typing = false;
-
-  // Which line the box is showing, counted. Every writer bumps it, so a hand-over that reaches the
-  // box after something newer was put there can tell it has been overtaken and keep its hands off.
-  var shownAnswer = 0;
+  // What this page itself has to say, and what the turn cost.
+  //
+  // In a conversation these are rows, not a box under the input: a failed send, a rebuild that did
+  // not work, a grant that expired, a stop that was heard. Held here rather than written straight
+  // into the transcript's DOM because the transcript is redrawn from the file every second, and a
+  // row only this page knows about would go with the next redraw.
+  var notices = [];
+  var spendLine = "";
 
   // The widening request. It appears only while a turn is waiting for one, which is why it is a
   // block that starts hidden rather than something the user opens: there is nothing to open when
@@ -921,6 +919,9 @@
   link.id = "deepnest-dialog-link";
   link.href = "/";
   link.textContent = "Open the control panel";
+  // In the head, beside the other ways out of this panel, rather than under the box a person types
+  // in: the input is the bottom edge and what is under it is the status line alone.
+  head.appendChild(link);
 
   // The conversation, read back from the server rather than remembered here. That is what makes
   // it survive the reload a finished rebuild performs: the page comes back empty and asks again,
@@ -999,11 +1000,13 @@
   panel.appendChild(transcript);
   panel.appendChild(jump);
   panel.appendChild(pictureNote);
-  panel.appendChild(form);
+  // The widening request sits in the composer area, above the box it is about to widen: it is a
+  // question about the next call, so it belongs with the next message rather than under it.
   panel.appendChild(asked);
-  panel.appendChild(answer);
-  panel.appendChild(spend);
-  panel.appendChild(link);
+  panel.appendChild(form);
+  // And under the box, one line: what the turn is doing. Nothing else. The input is the panel's
+  // bottom edge, and every word this dialog has to show is a row in the transcript above it.
+  panel.appendChild(status);
   root.appendChild(panel);
   root.appendChild(ball);
   // Last, and outside the panel: it covers the viewport, and it is shown at the one moment the
@@ -1062,91 +1065,53 @@
     }
   }
 
-  // Every writer below says something newer than what the box last held, so every one starts here:
-  // it takes the box back from a hand-over (further down) and counts the line it drew.
-  function drawAgain() {
-    answer.classList.remove("settled");
-    answer.hidden = false;
-    shownAnswer += 1;
-  }
-
-  // Put a line under the box. `bad` is a class rather than a colour inline: the stylesheet is where
-  // colours live, and `all: initial` means nothing here inherits one.
+  // What this page says when it has something to say.
   //
-  // This is the *final* line, so it is the one worth announcing: `aria-live` goes back on here
-  // after a progress line turned it off.
+  // A row in the conversation rather than a line under the input. The input is the panel's bottom
+  // edge, and everything above it is one scrolling record of what happened — the shape every chat
+  // window has, and the reason it has it: a second place for words is a second place to keep in
+  // step, to hide when it goes stale, and to explain to a reader who cannot see either.
   function say(text, bad) {
-    answer.textContent = text;
-    drawAgain();
-    answer.classList.remove("live");
-    // The answer is finished, so the mark that says more is coming leaves with the class that drew
-    // it. Nothing else has to remember to take it off.
-    answer.classList.remove("typing");
-    answer.setAttribute("aria-live", "polite");
-    if (bad) {
-      answer.classList.add("bad");
-    } else {
-      answer.classList.remove("bad");
-    }
+    notices.push({ text: String(text), bad: !!bad });
+    drawNow();
   }
 
-  // The line that takes over from the counter once a stop has been asked for.
+  // The line under the box.
   //
-  // Written straight to the box rather than through `showProgress`, which refuses while `stopping`
-  // is set — that refusal is what keeps the counter from coming back, and it would swallow this
-  // too. While the model is writing, the box is the model's and this leaves it alone: the button
-  // already says the same words, and a line the next token would overwrite is worse than none.
+  // A stop that has been asked for takes it over, because the counter is a claim that work is
+  // progressing and once the person has ended it that claim is the wrong one: the turn is finishing
+  // what it was in the middle of, not getting further. That is the one thing said here worth
+  // hearing, so it is the one thing announced — once, unlike a counter that rewrites itself.
   function showStopping(text) {
-    if (typing) {
-      return;
-    }
-    answer.textContent = text;
-    drawAgain();
-    answer.classList.remove("bad");
-    answer.classList.add("live");
-    // Announced once, unlike the counter: a person who pressed Stop needs to hear that it was
-    // heard, and this sentence does not rewrite itself every second.
-    answer.setAttribute("aria-live", "polite");
+    status.textContent = text;
+    status.hidden = false;
+    status.setAttribute("aria-live", "polite");
   }
 
-  // The line under the box *while* the turn runs.
-  //
-  // It turns the announcement off rather than leaving it on: a region that changes every second is
-  // a screen reader reading a new sentence every second, which is worse than silence. The answer
-  // that matters comes through `say` above, at the end.
   function showProgress(text) {
     if (stopping) {
-      // A stop has been asked for. The counter is a claim that work is progressing, and once the
-      // person has ended it that claim is the wrong one: the turn is finishing what it was in the
-      // middle of, not getting further.
       return;
     }
-    if (typing) {
-      // The model has stopped thinking and started writing. Its own words are a better account of
-      // the turn than a counter, and replacing them mid-sentence every second would be this page
-      // choosing its summary over the answer. The transcript beside it still updates, and the stop
-      // control stays where it is: a turn writing its answer is one a person may still end.
-      return;
-    }
-    answer.textContent = text;
-    drawAgain();
-    answer.classList.remove("bad");
-    answer.classList.add("live");
-    answer.setAttribute("aria-live", "off");
+    status.textContent = text;
+    status.hidden = false;
+    status.setAttribute("aria-live", "off");
   }
 
-  // The box's words, given up once the transcript holds the same answer.
-  //
-  // The box is the answer's *live* drawing — the only surface with text the record does not have
-  // yet — and the transcript is the record. Once the turn is on disk and drawn, the same answer in
-  // both is one copy too many: measured in Chrome, a settled turn showed the same 88 characters
-  // twice, in a 40 px box over a 148 px transcript, inside a panel 470 px wide.
-  //
-  // Not `hidden`, because `role="status"` is how an answer reaches someone who cannot see it and a
-  // hidden region announces nothing. This takes the box out of the layout and leaves it in the
-  // accessibility tree: the answer is heard once, and read once, where it is being read from.
-  function yieldToTranscript() {
-    answer.classList.add("settled");
+  // Nothing is running, so the line goes: a status left behind is a claim about a turn that ended.
+  function clearStatus() {
+    status.textContent = "";
+    status.hidden = true;
+    status.setAttribute("aria-live", "off");
+  }
+
+  // The turns as the last read of the file found them, and whether that read was taken mid-turn.
+  // Kept so a redraw this page starts on its own — a notice, a piece of the answer still being
+  // written — does not have to ask the server a second time to draw what it already has.
+  var read = [];
+  var isLive = false;
+
+  function drawNow() {
+    showTurns(read, isLive);
   }
 
   // The answer as the model writes it, rather than in one piece when the turn is over.
@@ -1235,124 +1200,71 @@
     return pump();
   }
 
-  // The first piece of an answer is the moment the line under the box stops being a reading of the
-  // machine and becomes the agent's own words — so it takes the answer's own type rather than the
-  // monospace of a progress line, and the mark that says more is coming.
-  function startTyping() {
-    typing = true;
-    written = "";
-    answer.textContent = "";
-    // An empty box has no line to be away from, so a mode left over from the previous turn would
-    // only be a way to start the next answer scrolled to a position it does not have.
-    placement = NEWEST;
-    drawAgain();
-    answer.classList.remove("bad");
-    answer.classList.remove("live");
-    answer.classList.add("typing");
-    // A line that grows word by word is not announced word by word; `say` turns this back on when
-    // the answer is whole, which is the moment there is a sentence worth reading out.
-    answer.setAttribute("aria-live", "off");
+  // The text in flight: the one round the model is writing right now, and nothing else.
+  //
+  // Every round of a turn is recorded as it ends — that is what a turn's `said` is — and the
+  // transcript draws every recorded round where it happened. So the only words the record does not
+  // have are the ones being written this second, and these are exactly those. Nothing is
+  // accumulated across rounds any more: that accumulation is what put round 1, 3 and 5 into one
+  // growing line under the input, out of order and beside a transcript already drawing them.
+  var writing = "";
+  var writingNode = null;
+  // How many rounds the running turn had when this page last looked, or null until it has looked
+  // once. A round is recorded the moment it ends, so a round count that has moved means the words
+  // being held here are in the file now and must not be drawn a second time.
+  var writingBase = null;
+  var writingTask = 0;
+
+  // A piece of the answer, drawn where it belongs: at the end of the running turn, which is where
+  // the recorded round will take its place when this one ends.
+  //
+  // Drawn through the transcript's own renderer rather than shown as text, because the answer is
+  // Markdown: measured in Chrome against the old line, a person watching an answer arrive read
+  // `##`, `**` and a pair of fences as literal characters, while the same words one redraw later
+  // were headings, bold runs and a code block.
+  function typeMore(piece) {
+    writing += piece;
+    // Coalesced to one draw per task rather than one per piece: a stream arrives in hundreds of
+    // pieces and each draw rebuilds this block, so drawing per piece would rebuild it a quadratic
+    // number of times. A trailing draw is what a reader sees — the last piece always lands, which
+    // is the difference between coalescing and dropping.
+    if (writingTask) {
+      return;
+    }
+    writingTask = setTimeout(function () {
+      writingTask = 0;
+      if (!writing) {
+        // The turn ended while the words were waiting to be drawn. There is nothing to draw: the
+        // round they belonged to is in the file, and the record draws it.
+        return;
+      }
+      if (writingNode === null) {
+        // The first piece can arrive before the read of the file that finds this turn, so there is
+        // nowhere yet to put it: one redraw is what makes the turn, and this line, exist.
+        drawNow();
+      } else {
+        fillWriting();
+      }
+    }, 0);
   }
 
-  // The answer being written, drawn rather than dumped. The model's answer is Markdown and used to
-  // arrive here as its own source: measured in Chrome against the running stream, the line under
-  // the box held `##`, `**` and a pair of fences as literal characters, with zero headings, zero
-  // bold runs and zero code blocks inside it — while the transcript above drew the same text as
-  // blocks. So a person watched Markdown being typed and read it as Markdown only once the turn had
-  // landed in the transcript.
-  //
-  // Redrawing is coalesced to one draw per task rather than one per event: a model's stream arrives
-  // in hundreds of pieces and each redraw rebuilds every block, so drawing per piece would rebuild
-  // the answer a quadratic number of times. A trailing draw is what a reader sees — the last piece
-  // always lands, which is the difference between coalescing and dropping.
-  var written = "";
-  var redrawal = 0;
-
-  // Where a redraw leaves the reader. The box is its own scroll window (`max-height` in the
-  // stylesheet), so an answer that outgrows it has to be given a position on every redraw —
-  // replacing the blocks throws the old one away. Three cases, and only these three:
-  //
-  //   NEWEST — the answer is still being written and the reader was on its newest line. Watching a
-  //            stream is watching the words arrive, and this box did not follow at all: measured in
-  //            Chrome against a sixteen-piece answer, it sat on its first line for the whole stream
-  //            while the newest line ended 636 px below a 144 px window — 780 px of answer, of
-  //            which the reader could see the first fifth and nothing else, ever.
-  //   FIRST  — the answer is whole. A finished answer is read from its first line, and that is
-  //            where the box sat in every version before this one.
-  //   HOLD   — the reader scrolled away while it was being written, so nothing in here may move
-  //            them. Pulling its own scroll to the end is a page a person cannot read while the
-  //            agent works, which is exactly when reading it is worth something; the transcript
-  //            above already yields to a reader for the same reason.
-  var NEWEST = "newest";
-  var FIRST = "first";
-  var HOLD = "hold";
-  var placement = HOLD;
-
-  // Whether the reader is on the newest line of the answer. The same 8 px the transcript allows: a
-  // box scrolled to its end rarely lands on the exact pixel, and demanding that would call a reader
-  // who followed by hand a reader who left.
-  function onTheNewest() {
-    return answer.scrollTop + answer.clientHeight >= answer.scrollHeight - 8;
-  }
-
-  function drawAnswer() {
-    redrawal = 0;
-    var where = placement;
-    // Read before the children are replaced: what HOLD restores is the pixel offset they were
-    // standing at, and after the replacement that reading is the box's own clamped value.
-    var held = answer.scrollTop;
+  function fillWriting() {
+    if (writingNode === null) {
+      return;
+    }
+    // Read before the words are replaced, the way the transcript reads its own scroll: a person who
+    // scrolled up to read something is not to be pulled back down by the next token.
+    var following = atTheLatest();
+    writingNode.textContent = "";
     var said = document.createElement("div");
     said.className = "deepnest-said";
-    // `null` is "this text is being shown, not copied from": the answer line carries no copy
-    // controls of its own, because the transcript above already offers one per block and a second
-    // set here would double the tab stops this panel spends on copying.
-    said.appendChild(renderWords(written, null));
-    answer.textContent = "";
-    answer.appendChild(said);
-    if (where === NEWEST) {
-      // The bottom of the content, which is the newest line.
-      answer.scrollTop = answer.scrollHeight;
-    } else if (where === FIRST) {
-      answer.scrollTop = 0;
-    } else {
-      // What was added is below the reader, so the same offset is the same line they were on.
-      answer.scrollTop = held;
+    // `null` is "this text is being shown, not copied from": a copy control over a sentence still
+    // growing would copy half of it, and the transcript offers one for the round once it is whole.
+    said.appendChild(renderWords(writing, null));
+    writingNode.appendChild(said);
+    if (following) {
+      transcript.scrollTop = transcript.scrollHeight;
     }
-  }
-
-  function scheduleAnswer() {
-    if (!redrawal) {
-      redrawal = setTimeout(drawAnswer, 0);
-    }
-  }
-
-  function typeMore(piece) {
-    if (!typing) {
-      startTyping();
-    }
-    // Read per piece rather than once: a reader who scrolled up mid-answer is left alone from the
-    // next piece on, and one who scrolled back down is followed again.
-    placement = onTheNewest() ? NEWEST : HOLD;
-    written += piece;
-    scheduleAnswer();
-  }
-
-  // The answer, whole. Same drawing, same renderer as the transcript uses — one renderer for the
-  // agent's words wherever they are shown, so the two can never drift apart.
-  function sayAnswer(text) {
-    written = text;
-    placement = FIRST;
-    if (redrawal) {
-      // A draw held back for the next task would paint a partial answer over the finished one.
-      clearTimeout(redrawal);
-      redrawal = 0;
-    }
-    drawAgain();
-    answer.classList.remove("bad");
-    answer.classList.remove("live");
-    answer.classList.remove("typing");
-    answer.setAttribute("aria-live", "polite");
-    drawAnswer();
   }
 
   // The question route: one path, one cookie, and nothing about it needs the control token.
@@ -2410,9 +2322,9 @@
     }
 
     var rows = String(source).split("\n");
-    // Only a block in the transcript folds. The one under the box is the answer being written, and
-    // what it must do is show its newest line; hiding the end of it behind a control would take
-    // away the one thing a reader watching a turn needs.
+    // Only a recorded block folds. The sentence being written goes through this same renderer with
+    // `what` null, and what it must do is show its newest line; hiding the end of it behind a
+    // control would take away the one thing a reader watching a turn needs.
     var key = what === null ? null : what + "\u0000" + ordinal;
     var folded = false;
     if (key !== null && !openedBlocks[key] && rows.length > BLOCK_LINES_SHOWN * 2) {
@@ -2556,6 +2468,18 @@
     if (stream) {
       line.appendChild(stream);
     }
+    // The text in flight is the round this turn is on, and it goes exactly where the record will
+    // put those same words when the round ends: at the end of the running turn. It is drawn with
+    // `fillWriting` rather than `renderNarrated` because a sentence still growing must not offer a
+    // copy control that would copy half of it.
+    if (live && writing) {
+      writingNode = document.createElement("div");
+      writingNode.className = "deepnest-narrated deepnest-writing";
+      line.appendChild(writingNode);
+      fillWriting();
+    } else if (live) {
+      writingNode = null;
+    }
     if (turn.reply) {
       var said = document.createElement("div");
       said.className = "deepnest-said";
@@ -2629,7 +2553,10 @@
       find.hidden = true;
       found.hidden = true;
       transcript.textContent = "";
-      transcript.hidden = true;
+      // A conversation with no exchange yet still has somewhere to say that the first message could
+      // not be sent, which is the one moment a person is looking at an empty transcript.
+      drawReports();
+      transcript.hidden = notices.length === 0 && !spendLine;
       return false;
     }
     // Numbered first: a search draws exchanges from anywhere in the conversation, and each one has
@@ -2670,7 +2597,12 @@
             numbered.length +
             (numbered.length === 1 ? " exchange" : " exchanges");
     }
-    var print = JSON.stringify(recent) + (live ? "+" : "") + "|" + finding;
+    // What the memo compares: the conversation as the file has it, whether a turn is running, the
+    // phrase being searched for, and the words in flight. The last of those is the one that was
+    // missing — a redraw asked for because the answer had grown compared equal to the one before it
+    // and was skipped, so a stream could run to its end with nothing on screen but the question.
+    var print =
+      JSON.stringify(recent) + (live ? "+" : "") + "|" + finding + "|" + writing;
     if (print === drawn) {
       // Nothing was redrawn, so there is no place to hold: a flag kept for a redraw that did not
       // happen would be spent on the next one, which moved something else.
@@ -2709,8 +2641,27 @@
       // carried up to the top of a list they only asked to be longer.
       transcript.scrollTop = wasTop + (transcript.scrollHeight - wasTall);
     }
+    drawReports();
     offerTheLatest(atTheEnd);
     return drawsTheAnswer;
+  }
+
+  // What this page has to report, at the end of the conversation: the rows it wrote itself, and
+  // what the last turn cost. Both are about the turn rather than said in it, which is why they come
+  // after every exchange instead of inside one.
+  function drawReports() {
+    notices.forEach(function (notice) {
+      var row = document.createElement("p");
+      row.className = notice.bad ? "deepnest-report deepnest-report-bad" : "deepnest-report";
+      row.textContent = notice.text;
+      transcript.appendChild(row);
+    });
+    if (spendLine) {
+      var cost = document.createElement("p");
+      cost.className = "deepnest-report deepnest-report-cost";
+      cost.textContent = spendLine;
+      transcript.appendChild(cost);
+    }
   }
 
   // Whether the reader is at the newest end of the transcript.
@@ -2738,8 +2689,24 @@
         // the conversation on the server is reachable from the box only if the list is in step
         // with the file, and it is this read that knows what the file holds.
         seedFromTheFile(turns);
-        var drawnTheAnswer = showTurns(turns, watching !== null);
-        if (watching !== null) {
+        read = turns;
+        isLive = watching !== null;
+        // A round is recorded the moment it ends, so a round count that has moved since the last
+        // look means the words being held here are in the file and are about to be drawn from it.
+        // Holding them as well is the duplication this whole change is about.
+        var lastTurn = turns.length ? turns[turns.length - 1] : null;
+        var rounds = lastTurn ? Number(lastTurn.rounds) || 0 : 0;
+        if (isLive) {
+          if (writingBase === null) {
+            writingBase = rounds;
+          } else if (rounds !== writingBase) {
+            writingBase = rounds;
+            writing = "";
+            writingNode = null;
+          }
+        }
+        var drawnTheAnswer = showTurns(turns, isLive);
+        if (isLive) {
           showProgress(describeProgress(turns));
         }
         // Handed back rather than read off the panel afterwards: only the caller that has just been
@@ -2775,6 +2742,9 @@
     // this function, and a flag left standing would silence the next turn's progress line.
     stopping = false;
     stop.textContent = STOP_LABEL;
+    // And the line goes with it: a reading of a turn that ended is a claim about a turn that is
+    // not running. What the turn did is in the transcript, which is the record and outlives it.
+    clearStatus();
   }
 
   // "Working — round 3, 9 tool calls, 12s". The count is what separates a turn that is thinking
@@ -2819,8 +2789,8 @@
     // does not say (some self-hosted endpoints answer no `usage` at all) would otherwise be shown
     // as a turn that was free. Silence is the honest rendering of "not reported".
     if (!usage || !(Number(usage.prompt_tokens) || Number(usage.completion_tokens))) {
-      spend.textContent = "";
-      spend.hidden = true;
+      spendLine = "";
+      drawNow();
       return;
     }
     var said = "This turn: " + counted(usage.prompt_tokens) + " tokens in";
@@ -2835,17 +2805,23 @@
     if (rounds) {
       said += " \u2014 " + rounds + (rounds === 1 ? " round" : " rounds");
     }
-    spend.textContent = said + ".";
-    spend.hidden = false;
+    spendLine = said + ".";
+    drawNow();
   }
 
   function watchTheTurn() {
     sentAt = Date.now();
     stopWatching();
-    // The last turn's cost leaves with the last turn: a number left under the box while a new turn
-    // runs is a number about something else, and this page has one line for the current turn only.
-    spend.textContent = "";
-    spend.hidden = true;
+    // Rows this page wrote about the last turn leave with it, and so does its cost: a number left
+    // in the conversation while a new turn runs is a number about something else.
+    notices = [];
+    spendLine = "";
+    // Nothing is held from the turn before: its words are in the file, and the count this page
+    // measures the next round against is taken from the file rather than carried over.
+    writing = "";
+    writingNode = null;
+    writingBase = null;
+    clearStatus();
     // There is a turn now, and it can take minutes: this is the one moment the page can offer a
     // way out of it.
     stop.hidden = false;
@@ -3344,51 +3320,33 @@
       .then(function (result) {
         send.disabled = false;
         stopPolling();
-        // The line under the box is no longer being written to: whether the answer is whole or the
-        // connection died, the next turn's progress line has to be able to use it again.
-        typing = false;
         if (result.status === 200 && result.body && typeof result.body.text === "string") {
-          // `words`, not `text`: `text` is the message this turn was asked, and every exit below
-          // has to be able to put it back. A second `text` here is scoped to this callback, so it
-          // would shadow that one for the failures as well as for the answer.
-          var words = result.body.text;
+          forgetAttachments();
+          // The answer does not come through here: it is in the file before the route answers, so
+          // the reading below draws it from the record, once, in the exchange it belongs to. What
+          // this page has to say about the turn is the two things the record cannot know.
           if (result.body.cancelled) {
             // The note the loop writes says the turn was cancelled; it cannot say by whom. This
             // page knows, and the difference is the whole reading: a turn that stopped itself is
             // something to look into, and one the person ended is the page working.
-            words =
+            say(
               "Stopped at your request, after " +
-              Math.round((Date.now() - sentAt) / 1000) +
-              "s.\n\n" +
-              words;
+                Math.round((Date.now() - sentAt) / 1000) +
+                "s.",
+              false
+            );
           }
           if (result.body.changed) {
             // The turn came back as soon as it had written; the build it started is still running.
             // Saying "reload to see it" was the whole defect — nothing had been built to see — so
-            // the line names what is happening and `watchTheRebuild` finishes the sentence.
-            words += "\n\nThis changed the app — rebuilding it now.";
+            // this names what is happening and `watchTheRebuild` finishes the sentence.
+            say("This changed the app — rebuilding it now.", false);
           }
-          forgetAttachments();
-          // The answer, drawn as the same blocks the transcript will draw it as: `say` is for this
-          // page's own lines, and the agent's words are Markdown.
-          sayAnswer(words);
-          // What it cost, under it. Read from the reply rather than from the transcript: the
-          // transcript is the conversation and knows nothing about money, and this line is the one
-          // thing on this page that is about the turn rather than about what was said in it.
+          // What it cost, read from the reply rather than from the transcript: the transcript is the
+          // conversation and knows nothing about money, and this is the one row about the turn
+          // rather than about what was said in it.
           showSpend(result.body);
-          // The turn is on disk the moment the route answers, so this reads what was actually
-          // recorded rather than echoing what came back in the reply.
-          //
-          // `handed` counts the line the box is holding: the box gives that answer up only if the
-          // transcript has the same one and nothing newer has been put there in the meantime. Two
-          // things can overtake it — the rebuild line this turn starts below, and the next turn's
-          // progress line — and either one is a line the person still needs to read.
-          var handed = shownAnswer;
-          readHistory().then(function (drawnTheAnswer) {
-            if (drawnTheAnswer && shownAnswer === handed) {
-              yieldToTranscript();
-            }
-          });
+          readHistory();
           if (result.body.changed) {
             watchTheRebuild();
           }
@@ -3408,12 +3366,12 @@
           // the page was closed on the other end. The turn is not necessarily over — the server
           // keeps running it — so this says what happened to the *reading*, not to the turn, and
           // points at the transcript, which is where the turn will land either way.
-          readHistory();
           say(
             "The answer stopped partway through — the connection to deepnest closed. Reload the " +
               "page to read what the turn recorded.",
             true
           );
+          readHistory();
           // Not given back, unlike the refusals above: this turn did run, so a box holding the
           // message again is an invitation to ask it a second time. `Up` still has it — the recall
           // list is written when the message leaves, and it is the one place a sent message stays.
@@ -3429,7 +3387,6 @@
       .catch(function () {
         send.disabled = false;
         stopPolling();
-        typing = false;
         say("The request did not reach deepnest. Is it still running?", true);
         giveBack(text);
       });
