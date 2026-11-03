@@ -84,7 +84,7 @@ fn read_text(path: &Path, tool: &str) -> Result<String, ToolResult> {
 pub struct ReadTool;
 
 impl Tool for ReadTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "read"
     }
 
@@ -190,7 +190,7 @@ impl Tool for ReadTool {
 pub struct WriteTool;
 
 impl Tool for WriteTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "write"
     }
 
@@ -273,7 +273,7 @@ impl Tool for WriteTool {
 pub struct EditTool;
 
 impl Tool for EditTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "edit"
     }
 

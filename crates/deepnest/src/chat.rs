@@ -681,7 +681,7 @@ struct Recorder {
 }
 
 impl Tool for Recorder {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         self.inner.name()
     }
 

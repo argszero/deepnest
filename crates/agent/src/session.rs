@@ -291,6 +291,65 @@ impl Session {
     pub fn message_count(&self) -> std::io::Result<usize> {
         Ok(self.messages()?.len())
     }
+
+    /// What a handed-back turn still owes, when the file holds one.
+    ///
+    /// A turn that reached work it cannot do itself stops with the model's calls recorded and no
+    /// answers after them. That shape **is** the pause, and reading it back is what makes the pause
+    /// survive the process that made it: no flag, no registry entry, no turn id — the conversation
+    /// says which calls are owed, and it says it to whoever opens the file next.
+    ///
+    /// Only the last assistant record is examined. An earlier one cannot be owed: a turn that got
+    /// as far as writing another assistant record had already collected every answer to the batch
+    /// before it, which is what `run_turn` requires before it asks the model again.
+    pub fn owed(&self) -> std::io::Result<Option<Owed>> {
+        let records = self.records()?;
+        let Some(at) = records.iter().rposition(|record| {
+            record.role == "assistant"
+                && record
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| !calls.is_empty())
+        }) else {
+            return Ok(None);
+        };
+        let answered: std::collections::BTreeSet<&str> = records[at + 1..]
+            .iter()
+            .filter_map(|record| record.tool_call_id.as_deref())
+            .collect();
+        let calls: Vec<deepnest_llm::ToolCall> = records[at]
+            .tool_calls
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|call| !answered.contains(call.id.as_str()))
+            .collect();
+        if calls.is_empty() {
+            return Ok(None);
+        }
+        // Rounds already spent, counted the only way that survives a restart: what the turn wrote.
+        // A user record opens a turn and every assistant record is one of its rounds, so the
+        // records after the last user one are this turn's rounds — which is what the round budget
+        // has to be measured against when the turn continues in another request.
+        let opened = records
+            .iter()
+            .rposition(|record| record.role == "user")
+            .map_or(0, |at| at + 1);
+        let rounds = records[opened..]
+            .iter()
+            .filter(|record| record.role == "assistant")
+            .count();
+        Ok(Some(Owed { calls, rounds }))
+    }
+}
+
+/// What a turn that was handed back still owes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Owed {
+    /// The calls nothing has answered, in the order the model asked for them.
+    pub calls: Vec<deepnest_llm::ToolCall>,
+    /// Rounds this turn has already run, so the budget continues rather than restarting.
+    pub rounds: usize,
 }
 
 /// How a compaction's summary opens.

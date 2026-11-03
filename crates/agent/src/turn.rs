@@ -18,6 +18,7 @@
 //! never read as an over-long request**: a provider's content filter arrives as a 400, and treating
 //! it as a length problem shrinks the history and resends the refused text — forever.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -246,6 +247,59 @@ pub enum TurnOutcome {
         rounds: usize,
         usage: Usage,
     },
+    /// The batch reached calls that do not run in this process, and the turn is handed back.
+    ///
+    /// This is the shape a handoff takes, and it exists because of *whose* tools are being called.
+    /// An app declares capabilities the agent cannot have — a todo list in its own database, an
+    /// account behind its own CLI — and offers them over MCP. The obvious implementation is to call
+    /// the endpoint from inside the turn. It deadlocks: the app made the request the turn is
+    /// answering, and a program that answers one request at a time — which the app template
+    /// generated until now is, and which an app the agent writes may well be again — cannot answer
+    /// a callback from inside a request it has not finished. Concurrency on this side does not fix
+    /// that; the wait is on the other side.
+    ///
+    /// So the turn does not call back. It runs every call of the round that **can** run here, states
+    /// the rest in [`PendingCall`]s, and ends. The caller runs them in whatever way it likes and
+    /// posts the answers back; [`Agent::resume`] continues the same turn from the same file. One
+    /// round is one handoff, which is the batch rule the prompt already teaches the model, seen from
+    /// the other side.
+    ///
+    /// Nothing about the pause lives in this process. What is owed is visible in `history.jsonl` —
+    /// calls recorded with no answers after them — so an app that crashes between the handoff and
+    /// the answers can read the same list back from [`crate::Session::owed`].
+    Paused {
+        text: String,
+        rounds: usize,
+        usage: Usage,
+        pending: Vec<PendingCall>,
+    },
+}
+
+/// One call the turn hands back: what the model asked for, addressed to whoever declared the tool.
+///
+/// `arguments` is the model's JSON, minus the `intent` field this workspace adds to every schema —
+/// an app's tool never declared that property, and passing it through would be handing a program a
+/// field it has no reason to accept.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingCall {
+    /// Which call this answers, as the transcript spells it.
+    pub call_id: String,
+    /// The tool's name, as the server that declared it spelled it.
+    pub name: String,
+    /// Its arguments, as a JSON object in a string.
+    pub arguments: String,
+}
+
+/// One answer to a [`PendingCall`], as the caller reports it back.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CallResult {
+    pub call_id: String,
+    /// What the model reads.
+    pub content: String,
+    /// Whether the call failed in its own terms — MCP's `isError`, or the caller's own judgement
+    /// that the work did not happen. Not a refusal: nothing here was denied by a policy.
+    #[serde(default)]
+    pub is_error: bool,
 }
 
 impl TurnOutcome {
@@ -255,6 +309,7 @@ impl TurnOutcome {
             TurnOutcome::Answered { text, .. } => text,
             TurnOutcome::Cancelled { note, .. } => note,
             TurnOutcome::RoundLimit { text, .. } => text,
+            TurnOutcome::Paused { text, .. } => text,
         }
     }
 
@@ -263,9 +318,42 @@ impl TurnOutcome {
         match self {
             TurnOutcome::Answered { usage, .. }
             | TurnOutcome::Cancelled { usage, .. }
-            | TurnOutcome::RoundLimit { usage, .. } => *usage,
+            | TurnOutcome::RoundLimit { usage, .. }
+            | TurnOutcome::Paused { usage, .. } => *usage,
         }
     }
+}
+
+/// One call, as a handoff spells it.
+///
+/// The arguments cross as the model wrote them, with one field removed: `intent` is added to every
+/// schema by `deepnest_tools::registry` so a transcript row can say why a call was made, and a tool
+/// an app declared never had that property — passing it on would be handing a program a field it
+/// has no reason to accept, and an argument validator that rejects unknown properties would refuse
+/// every call. A call whose arguments are not a JSON object cannot be run by anybody: no server
+/// could dispatch it, which is why it becomes a result here rather than a round trip.
+fn handoff(call: &deepnest_llm::ToolCall) -> Result<String, String> {
+    let text = call.function.arguments.trim();
+    let value: Value = if text.is_empty() {
+        Value::Object(serde_json::Map::new())
+    } else {
+        serde_json::from_str(text).map_err(|error| {
+            format!(
+                "the arguments for {} are not valid JSON ({error}), so no server could run this \
+                 call. They were: {}",
+                call.function.name,
+                text.chars().take(400).collect::<String>()
+            )
+        })?
+    };
+    let Value::Object(mut object) = value else {
+        return Err(format!(
+            "the arguments for {} must be a JSON object, and they were {value}",
+            call.function.name
+        ));
+    };
+    object.remove("intent");
+    Ok(Value::Object(object).to_string())
 }
 
 /// A turn that could not be completed at all.
@@ -278,6 +366,12 @@ pub enum AgentError {
     Model { reason: String },
     /// The conversation file could not be read or written.
     Session { reason: String },
+    /// There is no handed-back turn to continue, or the answers do not match the calls owed.
+    ///
+    /// A separate ending from [`AgentError::Session`] because it is not a fault of the file: the
+    /// file was read and said something, and what it said was that nothing is waiting. A caller
+    /// that retries will get the same answer, which is why it is worth saying plainly.
+    Paused { reason: String },
 }
 
 impl std::fmt::Display for AgentError {
@@ -292,6 +386,7 @@ impl std::fmt::Display for AgentError {
             AgentError::Session { reason } => {
                 write!(f, "the conversation could not be saved: {reason}")
             }
+            AgentError::Paused { reason } => write!(f, "{reason}"),
         }
     }
 }
@@ -428,7 +523,132 @@ impl Agent {
         } else {
             Message::with_images(Some(user_text.to_string()), images.to_vec())
         };
+        // A turn that was handed back and never answered is closed before a new one opens. A
+        // provider refuses a request in which an assistant's calls have no answers, so an
+        // abandoned handoff left in the file would make every later turn of this conversation fail
+        // with a complaint about a batch nobody remembers. The calls did not run, and the
+        // transcript says so rather than the conversation becoming unusable.
+        if let Some(owed) = self
+            .session
+            .owed()
+            .map_err(|err| AgentError::Session { reason: err.to_string() })?
+        {
+            for call in &owed.calls {
+                self.append_result(
+                    &Message::tool(
+                        call.id.clone(),
+                        format!(
+                            "nothing reported a result for this call. The turn that asked for it \
+                             was abandoned, so `{}` did not run.",
+                            call.function.name
+                        ),
+                    ),
+                    "failed",
+                )?;
+            }
+            self.note(
+                "a handed-back turn was abandoned without its results; its calls are recorded as \
+                 not run",
+            )?;
+        }
         self.append(&opening)?;
+        self.drive(cancel, on_text, 0)
+    }
+
+    /// Continue a turn that was handed back, once the caller has run the calls it took.
+    ///
+    /// `results` answers the calls [`TurnOutcome::Paused`] listed, and it must answer **all** of
+    /// them: a half-filled batch is a transcript no later request can be built from, so a partial
+    /// reply is refused here, before a single record is written, rather than being accepted and
+    /// becoming a provider error on the next round.
+    ///
+    /// What is owed is read back out of the conversation, not held in memory — see
+    /// [`crate::Session::owed`]. That is what lets the app answer in a second request, minutes
+    /// later, or after it has been restarted.
+    pub fn resume(
+        &self,
+        results: &[CallResult],
+        cancel: &Cancellation,
+    ) -> Result<TurnOutcome, AgentError> {
+        self.resume_watched(results, cancel, &mut |_| {})
+    }
+
+    /// The same, with the model's text handed to `on_text` as it is written.
+    pub fn resume_watched(
+        &self,
+        results: &[CallResult],
+        cancel: &Cancellation,
+        on_text: &mut dyn FnMut(&str),
+    ) -> Result<TurnOutcome, AgentError> {
+        let owed = self
+            .session
+            .owed()
+            .map_err(|err| AgentError::Session { reason: err.to_string() })?
+            .ok_or_else(|| AgentError::Paused {
+                reason: "no tool call is waiting for a result: the model's last request was \
+                         answered, or it asked for nothing. Send the message again rather than a \
+                         result."
+                    .to_string(),
+            })?;
+
+        let mut supplied: BTreeMap<&str, &CallResult> = BTreeMap::new();
+        for result in results {
+            if supplied.insert(result.call_id.as_str(), result).is_some() {
+                return Err(AgentError::Paused {
+                    reason: format!("`{}` was answered twice", result.call_id),
+                });
+            }
+        }
+        let owed_ids: Vec<&str> = owed.calls.iter().map(|call| call.id.as_str()).collect();
+        if let Some(missing) = owed_ids.iter().find(|id| !supplied.contains_key(*id)) {
+            return Err(AgentError::Paused {
+                reason: format!(
+                    "the call `{missing}` is still waiting for its result; the {} answer(s) that \
+                     arrived cover the rest. Nothing was written, because a batch answered in part \
+                     cannot be sent to the model.",
+                    results.len()
+                ),
+            });
+        }
+        if let Some(unexpected) = supplied.keys().find(|id| !owed_ids.contains(id)) {
+            return Err(AgentError::Paused {
+                reason: format!(
+                    "nothing is waiting for a result for `{unexpected}`; the calls owed are {}",
+                    owed_ids.join(", ")
+                ),
+            });
+        }
+
+        // Written in the order the model asked for them, not the order the answers arrived: the
+        // transcript is read by a person as well as by the model, and a batch whose rows disagree
+        // with the request above them is harder to follow for no gain.
+        for call in &owed.calls {
+            let result = supplied[call.id.as_str()];
+            let content = if result.content.trim().is_empty() {
+                // A provider refuses an empty tool message, and an app whose tool means "done,
+                // nothing to say" should not have its silence read as a broken request.
+                "(the call returned no text)".to_string()
+            } else {
+                result.content.clone()
+            };
+            let outcome = if result.is_error { "failed" } else { "ok" };
+            self.append_result(&Message::tool(call.id.clone(), content), outcome)?;
+        }
+
+        self.drive(cancel, on_text, owed.rounds)
+    }
+
+    /// The round loop, from the file as it stands.
+    ///
+    /// `rounds_before` is what a caller continuing a handed-back turn has already spent. The budget
+    /// belongs to the turn, and a turn that restarted its count every time it was handed back would
+    /// be a turn that runs for as long as the app keeps answering.
+    fn drive(
+        &self,
+        cancel: &Cancellation,
+        on_text: &mut dyn FnMut(&str),
+        rounds_before: usize,
+    ) -> Result<TurnOutcome, AgentError> {
         let definitions = self.definitions();
         let mut budget = self.limits.max_history_chars;
         let mut shrinks = 0usize;
@@ -442,7 +662,7 @@ impl Agent {
         // round's count is the smallest part of the bill and the most misleading one to hand back.
         let mut usage = Usage::default();
 
-        for round in 0..self.limits.max_rounds {
+        for round in rounds_before..self.limits.max_rounds {
             if cancel.is_cancelled() {
                 return Ok(self.cancel_note(round, usage));
             }
@@ -550,6 +770,11 @@ impl Agent {
                 });
             }
 
+            // The round's work, split by where it can run. Everything this process can do, it does
+            // now: the round is already paid for, and holding a local call back until after a
+            // handoff would make it wait on a process with no part in it. Everything it cannot do
+            // is collected and handed back together — one round, one handoff.
+            let mut pending: Vec<PendingCall> = Vec::new();
             for call in &turn.tool_calls {
                 // The context every call of this turn runs under. Built once per turn so that the
                 // borrowed path inside `dispatch_in` still borrows, and so that a call which
@@ -572,6 +797,33 @@ impl Agent {
                         usage,
                     });
                 }
+                // Whether this call is this process's work. A call naming no tool of this session
+                // is **not** handed back: `dispatch_in` answers it with the list of what exists,
+                // which is a sentence the app cannot write and the model needs.
+                let declared = self
+                    .tools
+                    .iter()
+                    .find(|tool| tool.name() == call.function.name);
+                if declared.is_some_and(|tool| !tool.runs_here()) {
+                    match handoff(call) {
+                        Ok(arguments) => pending.push(PendingCall {
+                            call_id: call.id.clone(),
+                            name: call.function.name.clone(),
+                            arguments,
+                        }),
+                        // Arguments no server could dispatch cannot be run by anybody, so handing
+                        // them back would be a round trip that ends in the same refusal.
+                        Err(reason) => {
+                            let result = ToolResult::error(call.function.name.clone(), reason);
+                            let outcome = result.outcome();
+                            self.append_result(
+                                &Message::tool(call.id.clone(), result.content),
+                                outcome,
+                            )?;
+                        }
+                    }
+                    continue;
+                }
                 let result = self.dispatch_in(call, &call_ctx);
                 // Read the ending before the content is moved into the message: both come from
                 // the same result, and only one of them is for the model.
@@ -592,6 +844,29 @@ impl Agent {
                         usage,
                     });
                 }
+            }
+
+            if !pending.is_empty() {
+                // The handoff. Every call above that this process could run has run and been
+                // answered; these are the ones it cannot, and they leave together. The note is
+                // written first, so a file read after the app has been handed the batch shows the
+                // pause before it shows anything the app did with it.
+                self.note(format!(
+                    "the turn is handed back: {} call(s) of this round run outside this process \
+                     ({})",
+                    pending.len(),
+                    pending
+                        .iter()
+                        .map(|call| call.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))?;
+                return Ok(TurnOutcome::Paused {
+                    text: last_text,
+                    rounds: round + 1,
+                    usage,
+                    pending,
+                });
             }
         }
 
@@ -1881,7 +2156,7 @@ mod tests {
             cancel: Cancellation,
         }
         impl Tool for CancellingTool {
-            fn name(&self) -> &'static str {
+            fn name(&self) -> &str {
                 "read"
             }
             fn definition(&self) -> ToolDefinition {
@@ -1936,7 +2211,7 @@ mod tests {
             saw_signal: std::sync::Arc<std::sync::atomic::AtomicBool>,
         }
         impl Tool for StopsMidCall {
-            fn name(&self) -> &'static str {
+            fn name(&self) -> &str {
                 "read"
             }
             fn definition(&self) -> ToolDefinition {
@@ -2279,7 +2554,7 @@ mod tests {
     }
 
     impl Tool for Reports {
-        fn name(&self) -> &'static str {
+        fn name(&self) -> &str {
             "read"
         }
         fn definition(&self) -> ToolDefinition {
@@ -2524,5 +2799,282 @@ mod tests {
             .and_then(|message| message.content)
             .unwrap();
         assert!(text.contains("nobody to ask"), "{text}");
+    }
+
+    /// A tool whose work belongs to another process, as an app's MCP tools do.
+    struct Remote {
+        name: &'static str,
+        ran: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Remote {
+        fn new(name: &'static str) -> (Self, Arc<std::sync::atomic::AtomicUsize>) {
+            let ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            (
+                Self {
+                    name,
+                    ran: Arc::clone(&ran),
+                },
+                ran,
+            )
+        }
+    }
+
+    impl Tool for Remote {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::function(
+                self.name.to_string(),
+                "remote work".to_string(),
+                serde_json::json!({"type": "object"}),
+            )
+        }
+        fn call(&self, _args: &Value, _ctx: &ToolContext) -> ToolResult {
+            self.ran.fetch_add(1, Ordering::SeqCst);
+            ToolResult::ok(self.name, "ran locally, which the turn must not do")
+        }
+        fn runs_here(&self) -> bool {
+            false
+        }
+    }
+
+    /// The whole point: a call that does not run here ends the request instead of nesting a
+    /// callback inside it, and comes back as a list the caller can run.
+    #[test]
+    fn a_batch_of_remote_calls_ends_the_turn_instead_of_calling_back() {
+        let scratch = Scratch::new("pause");
+        let (todos, ran) = Remote::new("todos_list");
+        let (done, _) = Remote::new("todos_done");
+        let model = ScriptedModel::new(vec![Ok(asks(vec![
+            call("todos_list", r#"{"intent":"see what is open","state":"open"}"#),
+            call("todos_done", r#"{"id":3}"#),
+        ]))]);
+        let agent = scratch.agent_with_tools(
+            model.clone(),
+            vec![Box::new(todos) as Box<dyn Tool>, Box::new(done)],
+        );
+
+        let outcome = agent.run_turn("what is left?", &Cancellation::new()).unwrap();
+        let TurnOutcome::Paused {
+            pending, rounds, ..
+        } = &outcome
+        else {
+            panic!("a remote batch did not pause: {outcome:?}");
+        };
+        // One round, one handoff: both calls leave together.
+        assert_eq!(*rounds, 1);
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].name, "todos_list");
+        assert_eq!(pending[1].name, "todos_done");
+        // The model's own arguments cross, minus the field this workspace adds to every schema
+        // and no app's tool ever declared.
+        let arguments: Value = serde_json::from_str(&pending[0].arguments).unwrap();
+        assert_eq!(arguments["state"], "open");
+        assert!(arguments.get("intent").is_none(), "{arguments}");
+        // Nothing called the app: that is the deadlock this shape exists to avoid.
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+        // And the model was not asked again — a paused turn has no round after the handoff.
+        assert_eq!(model.calls(), 1);
+    }
+
+    /// A round's local work is done before the handoff: holding it back would make it wait on a
+    /// process that has no part in it, and the round is already paid for.
+    #[test]
+    fn the_local_calls_of_a_round_run_before_the_batch_is_handed_back() {
+        let scratch = Scratch::new("mixed");
+        std::fs::write(scratch.base.join("a.txt"), "the local answer").unwrap();
+        let (remote, ran) = Remote::new("todos_list");
+        let model = ScriptedModel::new(vec![Ok(asks(vec![
+            call("read", r#"{"file_path":"a.txt"}"#),
+            call("todos_list", "{}"),
+        ]))]);
+        let mut tools = deepnest_tools::registry::all();
+        tools.push(Box::new(remote) as Box<dyn Tool>);
+        let agent = scratch.agent_with_tools(model, tools);
+
+        let outcome = agent.run_turn("read and list", &Cancellation::new()).unwrap();
+        assert!(matches!(outcome, TurnOutcome::Paused { .. }), "{outcome:?}");
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+
+        let messages = agent.session().messages().unwrap();
+        let local = messages
+            .iter()
+            .find(|message| message.tool_call_id.as_deref() == Some("call_read"))
+            .expect("the local call was answered before the handoff");
+        assert!(local.content.as_deref().unwrap().contains("the local answer"));
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.tool_call_id.as_deref() == Some("call_todos_list")),
+            "a handed-back call must not have an answer yet"
+        );
+    }
+
+    /// The answers come back in a second request, and the turn continues where it stopped.
+    #[test]
+    fn the_results_continue_the_same_turn_and_the_round_count_carries_on() {
+        let scratch = Scratch::new("resume");
+        let (todos, _) = Remote::new("todos_list");
+        let model = ScriptedModel::new(vec![
+            Ok(asks(vec![call("todos_list", "{}")])),
+            Ok(answer("three things are open")),
+        ]);
+        let agent = scratch.agent_with_tools(model.clone(), vec![Box::new(todos) as Box<dyn Tool>]);
+        agent
+            .run_turn("what is open?", &Cancellation::new())
+            .unwrap();
+
+        let outcome = agent
+            .resume(
+                &[CallResult {
+                    call_id: "call_todos_list".into(),
+                    content: "3 open".into(),
+                    is_error: false,
+                }],
+                &Cancellation::new(),
+            )
+            .unwrap();
+
+        // The second round of the same turn, not the first round of a new one.
+        assert!(
+            matches!(outcome, TurnOutcome::Answered { ref text, rounds: 2, .. } if text == "three things are open"),
+            "{outcome:?}"
+        );
+        // The model's second request had the answer in it, in the right place.
+        let seen = model.seen.lock().unwrap();
+        let second = seen.last().unwrap();
+        let answer_row = second
+            .iter()
+            .rposition(|message| message.tool_call_id.as_deref() == Some("call_todos_list"))
+            .expect("the result is in the second request");
+        assert!(second[answer_row].content.as_deref().unwrap().contains("3 open"));
+        assert_eq!(second[answer_row].role, "tool");
+    }
+
+    /// A batch answered in part is refused before a record is written. Accepting it would leave a
+    /// transcript no later request can be built from, and the provider's complaint would name a
+    /// call the app thought it had answered.
+    #[test]
+    fn a_partial_answer_continues_nothing_and_writes_nothing() {
+        let scratch = Scratch::new("partial");
+        let (todos, _) = Remote::new("todos_list");
+        let (done, _) = Remote::new("todos_done");
+        let model = ScriptedModel::new(vec![Ok(asks(vec![
+            call("todos_list", "{}"),
+            call("todos_done", "{}"),
+        ]))]);
+        let agent = scratch.agent_with_tools(
+            model,
+            vec![Box::new(todos) as Box<dyn Tool>, Box::new(done)],
+        );
+        agent.run_turn("do both", &Cancellation::new()).unwrap();
+        let before = agent.session().records().unwrap().len();
+
+        let error = agent
+            .resume(
+                &[CallResult {
+                    call_id: "call_todos_list".into(),
+                    content: "3 open".into(),
+                    is_error: false,
+                }],
+                &Cancellation::new(),
+            )
+            .unwrap_err();
+        assert!(matches!(error, AgentError::Paused { .. }), "{error:?}");
+        assert!(
+            error.to_string().contains("call_todos_done"),
+            "the refusal must name the call still owed: {error}"
+        );
+        assert_eq!(
+            agent.session().records().unwrap().len(),
+            before,
+            "a refused resume wrote to the conversation"
+        );
+    }
+
+    /// What is owed survives the process: it is in the file, not in this turn's memory.
+    #[test]
+    fn what_a_paused_turn_owes_is_read_back_out_of_the_conversation() {
+        let scratch = Scratch::new("owed");
+        let (todos, _) = Remote::new("todos_list");
+        let model = ScriptedModel::new(vec![Ok(asks(vec![call("todos_list", "{}")]))]);
+        let agent = scratch.agent_with_tools(model, vec![Box::new(todos) as Box<dyn Tool>]);
+        agent.run_turn("what is open?", &Cancellation::new()).unwrap();
+
+        // A different handle on the same file, as the next request would open it.
+        let reopened = Session::open(scratch.base.join("history.jsonl")).unwrap();
+        let owed = reopened.owed().unwrap().expect("the pause is in the file");
+        assert_eq!(owed.calls.len(), 1);
+        assert_eq!(owed.calls[0].function.name, "todos_list");
+        assert_eq!(owed.rounds, 1);
+
+        // And once answered, nothing is owed.
+        agent
+            .resume(
+                &[CallResult {
+                    call_id: "call_todos_list".into(),
+                    content: "nothing".into(),
+                    is_error: false,
+                }],
+                &Cancellation::new(),
+            )
+            .unwrap();
+        assert!(reopened.owed().unwrap().is_none());
+    }
+
+    /// An abandoned handoff must not poison the conversation. A provider refuses a request whose
+    /// assistant calls have no answers, so the next turn closes them and says so.
+    #[test]
+    fn a_new_turn_closes_a_handoff_nobody_answered() {
+        let scratch = Scratch::new("abandoned");
+        let (todos, _) = Remote::new("todos_list");
+        let model = ScriptedModel::new(vec![
+            Ok(asks(vec![call("todos_list", "{}")])),
+            Ok(answer("starting over")),
+        ]);
+        let agent = scratch.agent_with_tools(model.clone(), vec![Box::new(todos) as Box<dyn Tool>]);
+        agent.run_turn("what is open?", &Cancellation::new()).unwrap();
+
+        agent.run_turn("never mind", &Cancellation::new()).unwrap();
+
+        // Every call of the abandoned batch has an answer, and it says it did not run.
+        let seen = model.seen.lock().unwrap();
+        let last = seen.last().unwrap();
+        let closed = last
+            .iter()
+            .find(|message| message.tool_call_id.as_deref() == Some("call_todos_list"))
+            .expect("the abandoned call was closed before the next request");
+        assert!(closed.content.as_deref().unwrap().contains("did not run"));
+        assert!(agent.session().owed().unwrap().is_none());
+    }
+
+    /// A kind the turn does not know, or arguments no server could dispatch, is a result rather
+    /// than a round trip: the app cannot answer a question about a tool it never declared.
+    #[test]
+    fn arguments_no_server_could_run_are_a_result_and_not_a_handoff() {
+        let scratch = Scratch::new("badargs");
+        let (todos, _) = Remote::new("todos_list");
+        let model = ScriptedModel::new(vec![
+            Ok(asks(vec![call("todos_list", "{not json")])),
+            Ok(answer("sorry")),
+        ]);
+        let agent = scratch.agent_with_tools(model, vec![Box::new(todos) as Box<dyn Tool>]);
+        let outcome = agent.run_turn("list", &Cancellation::new()).unwrap();
+        assert!(
+            matches!(outcome, TurnOutcome::Answered { ref text, .. } if text == "sorry"),
+            "{outcome:?}"
+        );
+        let messages = agent.session().messages().unwrap();
+        let row = messages
+            .iter()
+            .find(|message| message.tool_call_id.as_deref() == Some("call_todos_list"))
+            .expect("the malformed call was answered here");
+        assert!(row
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("not valid JSON"));
     }
 }

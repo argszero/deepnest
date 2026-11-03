@@ -129,6 +129,23 @@ impl SubagentRunner for LoopRunner {
                     dir.join("history.jsonl").display()
                 ),
             ),
+            // A child is given the six leaves and neither seam, so it has no remote tool to be
+            // handed back for. Reaching this would mean a subagent was built with an app's
+            // capabilities, and saying so is better than a silent answer that omits the work.
+            TurnOutcome::Paused { pending, .. } => ToolResult::error(
+                "subagent",
+                format!(
+                    "the child asked for {} call(s) that run outside this process ({}) and a \
+                     subagent has no way to run them. Nothing further was done; do that part \
+                     yourself.",
+                    pending.len(),
+                    pending
+                        .iter()
+                        .map(|call| call.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ),
         }
     }
 }

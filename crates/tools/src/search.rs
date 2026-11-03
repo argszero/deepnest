@@ -231,7 +231,7 @@ fn search_base(args: &Value, ctx: &ToolContext, tool: &str) -> Result<PathBuf, T
 pub struct GlobTool;
 
 impl Tool for GlobTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "glob"
     }
 
@@ -323,7 +323,7 @@ impl Tool for GlobTool {
 pub struct GrepTool;
 
 impl Tool for GrepTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "grep"
     }
 
