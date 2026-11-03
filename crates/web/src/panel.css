@@ -386,6 +386,17 @@ code {
   cursor: default;
 }
 
+/* The one button on this page whose press cannot be undone. Coloured rather than emphasised: a
+ * filled red button would make the most destructive action the one the eye lands on first, and the
+ * page's job is to make the app list readable, not to invite this. */
+.btn.danger {
+  color: var(--dn-bad);
+}
+
+.btn.danger:hover {
+  background: var(--dn-bad-tint);
+}
+
 label {
   display: block;
   margin: var(--dn-space-2xl) 0 var(--dn-space-xs);

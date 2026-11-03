@@ -184,6 +184,16 @@ impl Rebuilder {
         ))
     }
 
+    /// Forget what the last rebuild of `slug` did, because the app is being deleted.
+    ///
+    /// The queue is keyed by slug and lives in this process, so a deleted app would otherwise
+    /// leave an entry that the next app created under the same name inherits — "the last build of
+    /// this app failed" about a directory a minute old. Nothing in flight is cancelled: a build
+    /// owns its own thread and finishes what it started, and this only drops what was recorded.
+    pub fn forget(&self, slug: &Slug) {
+        self.jobs().remove(slug.as_str());
+    }
+
     fn jobs(&self) -> std::sync::MutexGuard<'_, HashMap<String, Job>> {
         // A poisoned lock here means a worker panicked while holding it, which is not a reason to
         // lose the queue: the data is a generation and a status, and the next write replaces both.

@@ -580,6 +580,31 @@ sends a turn, runs every handed-back call in this process, posts the answers and
 
 An install with no apps has no `apps/` directory at all, and the listing reports that as "none yet" rather than as a fault. That is now the whole of `crates/apps`: the directory contract, the process lifecycle, the template and the build.
 
+**Deleting is the fifth thing this crate does, and the only one with no undo** (`decided in
+implementation`, 2026-11-03). `POST /api/apps/<slug>/delete?confirm=<slug>` stops the app, revokes
+its process ticket, forgets its rebuild status and removes the directory. Four decisions:
+
+- **The caller names what it is destroying.** The confirmation lives in the request — `?confirm=<slug>`
+  — rather than in the panel, because a double-submitted form, a reloaded tab and a script that
+  guessed a URL all send a bare `POST`, and a bare `POST` deletes nothing. The panel still asks
+  first, with a native `confirm`; the two are not alternatives, they are the two halves of one
+  question, and the half on the server is the one that cannot be clicked through.
+- **The process stops first, and a failure to stop is the answer.** A directory removed under a
+  running binary leaves a process writing to paths that no longer exist and holding a port that
+  answers for an app that is gone.
+- **Every credential and in-flight turn for that app dies with it.** The ticket would otherwise
+  outlive the routes it opens, and a running turn would append its transcript into a file whose
+  parent is being removed. Both are revoked here rather than left to fail later.
+- **`crates/apps::remove` refuses three things**: a symlink (removing one is either the link or its
+  target, depending on the platform, and this will not gamble on which), a plain file, and a name
+  that is not there at all — "deleted" for something that never existed is a claim a user acts on.
+  What it reports back is the entry count and the byte count, because that is what a confirmation
+  can be honest about.
+
+On the page, `delete` is the one control outside the four verbs: those are re-runnable, this is
+not, so it is last in the row and it is the only one that asks. It is coloured rather than filled —
+a solid red button would make the most destructive action the thing the eye lands on first.
+
 **What the page looks like is part of what an app is** (`decided in implementation`, 2026-11-01). Running deepnest and looking at a generated app made the gap plain: it worked and it looked like a wireframe, and every app after it would look the same, because the two things that decide an app's appearance — the starting page and the instructions the app's agent follows — carried no design content at all. Both now do, and three decisions came with it:
 
 - **The look is one token block, not a stylesheet.** `frontend/index.html` declares the palette, the spacing step, the radius and the elevation as custom properties on `:root`, with a dark set under `prefers-color-scheme` and `color-scheme: light dark` so the scrollbar and native controls follow it. A page whose colours are scattered through its rules is a page nobody can restyle, and this one exists to be restyled.

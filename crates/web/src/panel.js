@@ -272,6 +272,36 @@
         })
       );
     });
+    // Deleting is deliberately not one of the verbs. Those are all reversible or at least
+    // re-runnable — start, stop, build — and this one is neither, so it does not sit in the same
+    // row of equal-weight buttons. It is last, it is the only control that asks first, and the
+    // question names the app and what goes with it, because that is what the person is agreeing to.
+    actions.appendChild(
+      button("delete", "btn quiet small danger", function () {
+        var yes = window.confirm(
+          "Delete " + app.slug + "?\n\n" +
+            "This removes the app's whole directory: the database, the files, " +
+            "the agent's conversation. There is no undo."
+        );
+        if (!yes) {
+          return;
+        }
+        say("Deleting " + app.slug + "…");
+        var path =
+          "/api/apps/" + encodeURIComponent(app.slug) + "/delete?confirm=" +
+          encodeURIComponent(app.slug);
+        return api(path, { method: "POST" }).then(function (answer) {
+          // What went, in the page's own words: a delete that answered "ok" and removed nothing
+          // would be indistinguishable from one that worked.
+          say(
+            app.slug + ": removed " + answer.entries + " entries, " + answer.bytes + " bytes",
+            "good"
+          );
+          return refreshApps();
+        });
+      })
+    );
+
     row.appendChild(actions);
     return row;
   }
