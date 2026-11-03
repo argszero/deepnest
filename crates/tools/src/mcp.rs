@@ -40,13 +40,13 @@ use crate::{Tool, ToolContext, ToolResult};
 
 /// What came back from one HTTP exchange.
 ///
-/// The content type travels beside the body because the specification lets a server answer a
-/// request with either a JSON object or a server-sent event stream scoped to that request, and
-/// which one it sent is not guessable from the bytes: an SSE body and a JSON body can both start
-/// with a `{`.
+/// Only the body. The specification lets a server answer with either a JSON object or a
+/// server-sent event stream, and the two are told apart by what is in the bytes rather than by the
+/// `Content-Type` beside them: a JSON-RPC answer is one object, an event stream is `data:` lines,
+/// and nothing in either is ambiguous about which it is. Carrying the header would mean this crate
+/// had an opinion about an HTTP response, which is the transport's business and not its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reply {
-    pub content_type: String,
     pub body: String,
 }
 
@@ -241,10 +241,14 @@ pub const PROTOCOL_VERSION: &str = "2026-07-28";
 /// An event stream carries notifications first and the response last, so the response is the last
 /// `data:` line that parses and carries this request's `id`. A stream that ends without one is a
 /// failure with a sentence: a server that answered something is not the same as an answer.
+///
+/// Which of the two arrived is decided by trying the whole body as JSON first. A complete JSON-RPC
+/// answer parses as one object; an event stream does not, because its `event:` and `data:` prefixes
+/// are not JSON. That order also means a server that answers JSON while sending an event-stream
+/// content type — which some do, for the framing — is read correctly.
 fn payload(reply: &Reply, id: u64) -> Result<Value, String> {
-    if !reply.content_type.contains("text/event-stream") {
-        return serde_json::from_str(&reply.body)
-            .map_err(|error| format!("the answer was not JSON: {error}"));
+    if let Ok(value) = serde_json::from_str::<Value>(reply.body.trim()) {
+        return Ok(value);
     }
     let mut seen = None;
     for line in reply.body.lines() {
@@ -264,8 +268,10 @@ fn payload(reply: &Reply, id: u64) -> Result<Value, String> {
     }
     seen.ok_or_else(|| {
         format!(
-            "the event stream ended without an answer to request {id}; what arrived was {} bytes",
-            reply.body.len()
+            "the answer to request {id} was neither JSON nor an event stream carrying it; what \
+             arrived was {} bytes beginning {:?}",
+            reply.body.len(),
+            reply.body.chars().take(120).collect::<String>()
         )
     })
 }
@@ -438,10 +444,7 @@ mod tests {
     }
 
     fn json_reply(body: impl Into<String>) -> Reply {
-        Reply {
-            content_type: "application/json".to_string(),
-            body: body.into(),
-        }
+        Reply { body: body.into() }
     }
 
     fn ctx() -> ToolContext {
@@ -527,7 +530,6 @@ mod tests {
         let body = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\",\"params\":{}}\n\n\
                     event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{\"name\":\"one\"}]}}\n\n";
         let transport = Scripted::new(vec![Reply {
-            content_type: "text/event-stream".to_string(),
             body: body.to_string(),
         }]);
         let server = Arc::new(McpServer::new("http://127.0.0.1:9000/mcp", None, transport));
@@ -539,12 +541,11 @@ mod tests {
     #[test]
     fn a_stream_that_ends_without_an_answer_is_a_failure_with_a_sentence() {
         let transport = Scripted::new(vec![Reply {
-            content_type: "text/event-stream".to_string(),
             body: "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notes\"}\n\n".to_string(),
         }]);
         let server = McpServer::new("http://127.0.0.1:9000/mcp", None, transport);
         let reason = server.list().unwrap_err();
-        assert!(reason.contains("without an answer"), "{reason}");
+        assert!(reason.contains("neither JSON nor an event stream"), "{reason}");
     }
 
     #[test]

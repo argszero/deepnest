@@ -409,6 +409,17 @@ pub struct Agent {
     /// `None` is the default: a test has no app directory, and a turn that had to invent one to
     /// keep a log would be a turn that writes where it was not asked to.
     llm_log: Option<crate::llmlog::LlmLog>,
+    /// Whether a call that does not run in this process ends the turn or is made here.
+    ///
+    /// `false` is right for a turn nobody is waiting on: the dialog's page asked for it, the app
+    /// is idle, so calling its endpoint from inside the turn nests nothing and costs one round
+    /// trip fewer. `true` is for a turn the **app itself** asked for — the app is then inside a
+    /// request of its own, a program answering one request at a time cannot answer a callback from
+    /// inside it, and that is the deadlock [`TurnOutcome::Paused`] exists to break.
+    ///
+    /// The same agent cannot do both: which of the two it is, is a fact about who is waiting, and
+    /// that is decided by whoever assembled the turn.
+    handoff: bool,
 }
 
 impl Agent {
@@ -430,7 +441,22 @@ impl Agent {
             limits: Limits::default(),
             approver: None,
             llm_log: None,
+            handoff: false,
         }
+    }
+
+    /// Hand a round's remote calls back instead of making them here.
+    ///
+    /// Set this when the caller **is** the process the calls would reach. A turn started by the
+    /// app's own code runs inside a request that app has not finished answering; calling its tool
+    /// endpoint from inside that turn asks a serial server to be in two places at once, and the
+    /// turn waits for an answer that cannot come. See [`TurnOutcome::Paused`].
+    ///
+    /// A caller that leaves this alone keeps the old behaviour exactly: a remote tool is called,
+    /// here and now, and the turn continues with its result.
+    pub fn with_handoff(mut self, handoff: bool) -> Self {
+        self.handoff = handoff;
+        self
     }
 
     /// Record every request this turn sends and what came back, in this file.
@@ -804,7 +830,7 @@ impl Agent {
                     .tools
                     .iter()
                     .find(|tool| tool.name() == call.function.name);
-                if declared.is_some_and(|tool| !tool.runs_here()) {
+                if self.handoff && declared.is_some_and(|tool| !tool.runs_here()) {
                     match handoff(call) {
                         Ok(arguments) => pending.push(PendingCall {
                             call_id: call.id.clone(),
@@ -2851,10 +2877,12 @@ mod tests {
             call("todos_list", r#"{"intent":"see what is open","state":"open"}"#),
             call("todos_done", r#"{"id":3}"#),
         ]))]);
-        let agent = scratch.agent_with_tools(
-            model.clone(),
-            vec![Box::new(todos) as Box<dyn Tool>, Box::new(done)],
-        );
+        let agent = scratch
+            .agent_with_tools(
+                model.clone(),
+                vec![Box::new(todos) as Box<dyn Tool>, Box::new(done)],
+            )
+            .with_handoff(true);
 
         let outcome = agent.run_turn("what is left?", &Cancellation::new()).unwrap();
         let TurnOutcome::Paused {
@@ -2879,6 +2907,27 @@ mod tests {
         assert_eq!(model.calls(), 1);
     }
 
+    /// The other half of the same decision, and the default: a turn nobody is blocking for calls a
+    /// remote tool here and now, because there is no request on the other side to deadlock with.
+    #[test]
+    fn a_turn_that_does_not_hand_back_calls_the_remote_tool_where_it_stands() {
+        let scratch = Scratch::new("inline");
+        let (todos, ran) = Remote::new("todos_list");
+        let model = ScriptedModel::new(vec![
+            Ok(asks(vec![call("todos_list", "{}")])),
+            Ok(answer("done")),
+        ]);
+        let agent = scratch.agent_with_tools(model.clone(), vec![Box::new(todos) as Box<dyn Tool>]);
+
+        let outcome = agent.run_turn("list", &Cancellation::new()).unwrap();
+        assert!(
+            matches!(outcome, TurnOutcome::Answered { rounds: 2, .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(ran.load(Ordering::SeqCst), 1, "the tool was not called");
+        assert!(agent.session().owed().unwrap().is_none());
+    }
+
     /// A round's local work is done before the handoff: holding it back would make it wait on a
     /// process that has no part in it, and the round is already paid for.
     #[test]
@@ -2892,7 +2941,7 @@ mod tests {
         ]))]);
         let mut tools = deepnest_tools::registry::all();
         tools.push(Box::new(remote) as Box<dyn Tool>);
-        let agent = scratch.agent_with_tools(model, tools);
+        let agent = scratch.agent_with_tools(model, tools).with_handoff(true);
 
         let outcome = agent.run_turn("read and list", &Cancellation::new()).unwrap();
         assert!(matches!(outcome, TurnOutcome::Paused { .. }), "{outcome:?}");
@@ -2921,7 +2970,9 @@ mod tests {
             Ok(asks(vec![call("todos_list", "{}")])),
             Ok(answer("three things are open")),
         ]);
-        let agent = scratch.agent_with_tools(model.clone(), vec![Box::new(todos) as Box<dyn Tool>]);
+        let agent = scratch
+            .agent_with_tools(model.clone(), vec![Box::new(todos) as Box<dyn Tool>])
+            .with_handoff(true);
         agent
             .run_turn("what is open?", &Cancellation::new())
             .unwrap();
@@ -2965,10 +3016,9 @@ mod tests {
             call("todos_list", "{}"),
             call("todos_done", "{}"),
         ]))]);
-        let agent = scratch.agent_with_tools(
-            model,
-            vec![Box::new(todos) as Box<dyn Tool>, Box::new(done)],
-        );
+        let agent = scratch
+            .agent_with_tools(model, vec![Box::new(todos) as Box<dyn Tool>, Box::new(done)])
+            .with_handoff(true);
         agent.run_turn("do both", &Cancellation::new()).unwrap();
         let before = agent.session().records().unwrap().len();
 
@@ -3000,7 +3050,9 @@ mod tests {
         let scratch = Scratch::new("owed");
         let (todos, _) = Remote::new("todos_list");
         let model = ScriptedModel::new(vec![Ok(asks(vec![call("todos_list", "{}")]))]);
-        let agent = scratch.agent_with_tools(model, vec![Box::new(todos) as Box<dyn Tool>]);
+        let agent = scratch
+            .agent_with_tools(model, vec![Box::new(todos) as Box<dyn Tool>])
+            .with_handoff(true);
         agent.run_turn("what is open?", &Cancellation::new()).unwrap();
 
         // A different handle on the same file, as the next request would open it.
@@ -3034,7 +3086,9 @@ mod tests {
             Ok(asks(vec![call("todos_list", "{}")])),
             Ok(answer("starting over")),
         ]);
-        let agent = scratch.agent_with_tools(model.clone(), vec![Box::new(todos) as Box<dyn Tool>]);
+        let agent = scratch
+            .agent_with_tools(model.clone(), vec![Box::new(todos) as Box<dyn Tool>])
+            .with_handoff(true);
         agent.run_turn("what is open?", &Cancellation::new()).unwrap();
 
         agent.run_turn("never mind", &Cancellation::new()).unwrap();
@@ -3060,7 +3114,9 @@ mod tests {
             Ok(asks(vec![call("todos_list", "{not json")])),
             Ok(answer("sorry")),
         ]);
-        let agent = scratch.agent_with_tools(model, vec![Box::new(todos) as Box<dyn Tool>]);
+        let agent = scratch
+            .agent_with_tools(model, vec![Box::new(todos) as Box<dyn Tool>])
+            .with_handoff(true);
         let outcome = agent.run_turn("list", &Cancellation::new()).unwrap();
         assert!(
             matches!(outcome, TurnOutcome::Answered { ref text, .. } if text == "sorry"),
