@@ -19,10 +19,13 @@
 //! - **A ticket, retired on drop.** The turn registers with [`Running::begin`] and is removed by
 //!   the `Drop` of what that returns, not by the route. The route cannot know when a turn ends, and
 //!   a registry that outlives its turn reports a stop that stops nothing.
-//! - **Cancelling is a request, not a kill.** The flag is read at the loop's own checkpoints, so a
-//!   turn in the middle of a model call ends when that call returns — the reply from [`stop`]
-//!   therefore counts the turns it *asked* to stop, and the dialog says so rather than promising
-//!   that the work has already ended.
+//! - **Cancelling is a request, not a kill, and it reaches both halves of a turn.** A command is
+//!   killed where it runs. A model call is abandoned at the socket: the flag is read inside the
+//!   streamed read, and a call in flight is cut rather than waited out. Before that reach, a stop
+//!   pressed during a call did nothing a person could see until the call came back — measured on
+//!   the running page as the send box locked for the 27 seconds the abandoned call had left to
+//!   run. The reply from [`stop`] still counts the turns it *asked* to stop, because what the flag
+//!   guarantees is the asking, not the ending.
 //!
 //! [`Cancellation`]: deepnest_agent::Cancellation
 //! [`stop`]: Running::stop

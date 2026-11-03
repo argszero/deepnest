@@ -7,9 +7,16 @@
 
 use std::fmt;
 
-/// The three distinguishable ways a request can fail.
+/// The four distinguishable ways a request can fail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureKind {
+    /// The caller stopped waiting for it. Nothing went wrong: the person asked for the turn to
+    /// end, and an answer nobody is waiting for any more is not one to keep reading a socket for.
+    ///
+    /// A class of its own rather than [`Self::Other`], because it is the one failure that is not a
+    /// failure. Reported as one it would reach a reader as "the model call failed", which is a
+    /// sentence about a broken endpoint rather than about the button they pressed.
+    Stopped,
     /// The provider refused the text itself (its content filter). Resending the same text
     /// cannot help; the context has to change.
     ContentRisk,
@@ -105,6 +112,19 @@ impl LlmError {
         }
     }
 
+    /// A request the caller abandoned because the turn was stopped.
+    ///
+    /// No status, and never transient: resending it is the one thing a stop exists to prevent, so
+    /// [`Self::is_transient`] answering `false` is what keeps the retry budget out of it.
+    pub fn stopped() -> Self {
+        Self {
+            status: None,
+            body: "the turn was stopped before this request was answered; it was abandoned"
+                .to_string(),
+            kind: FailureKind::Stopped,
+        }
+    }
+
     /// A capability the transport does not implement whose streaming never reached the wire.
     pub fn unsupported(what: impl Into<String>) -> Self {
         Self {
@@ -124,6 +144,11 @@ impl LlmError {
 
     pub fn is_content_risk(&self) -> bool {
         self.kind == FailureKind::ContentRisk
+    }
+
+    /// Whether this is the caller's own stop rather than anything the endpoint did.
+    pub fn is_stopped(&self) -> bool {
+        self.kind == FailureKind::Stopped
     }
 
     /// Whether the request did not fit, so the caller should shrink rather than resend.

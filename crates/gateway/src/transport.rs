@@ -53,6 +53,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::Arc;
 use std::time::Duration;
 
 use deepnest_llm::{HttpRequest, HttpResponse, LlmError, SseDecoder, SseEvent, Transport};
@@ -65,6 +66,68 @@ use native_tls::{HandshakeError, TlsConnector, TlsStream};
 /// going to reach it.
 const CONNECT: Duration = Duration::from_secs(10);
 const IO: Duration = Duration::from_secs(180);
+
+/// How often the watcher looks at the stop flag.
+///
+/// Fifty milliseconds, and the number is the whole of what a press of `Stop` may cost before the
+/// socket goes down. Shorter is a thread waking for nothing; longer is a person pressing a button
+/// and watching the box stay locked. Measured against the alternative it replaces — waiting out the
+/// model call — it is not a tuning parameter but the difference between a control that works and
+/// one that does not.
+const WATCH: Duration = Duration::from_millis(50);
+
+/// Run `read` while a watcher shuts the socket down the moment `stop` says so.
+///
+/// **Why this and not a check in the read loop.** `stream_answer` blocks inside `read`, and a
+/// blocked `read` cannot be asked to return: the flags a loop can check are checked between bytes,
+/// and the thing a stop has to interrupt is precisely a long wait for the next byte. A model call
+/// is that wait — tens of seconds before the first token, more between them. So the thread that
+/// reads is not the thread that notices; a second thread holds a clone of the same socket and
+/// shuts it down, which makes the blocked `read` return at once with an error.
+///
+/// **`shutdown(Both)` rather than a longer read timeout.** A timeout would have to be short to be
+/// worth anything, and a short one would abandon slow-but-alive endpoints as if they had failed.
+/// This leaves `IO` where it is and interrupts only on the one signal that means "nobody wants this
+/// answer any more".
+///
+/// The flag is read every [`WATCH`] until the read finishes. A signal that never arrives costs one
+/// sleeping thread per streamed call, which is why the watcher leaves as soon as `read` returns —
+/// see the `done` handshake below.
+fn interruptible<T>(
+    peer: Option<TcpStream>,
+    stop: &Arc<dyn Fn() -> bool + Send + Sync>,
+    read: impl FnOnce(&dyn Fn() -> bool) -> Result<T, LlmError>,
+) -> Result<T, LlmError> {
+    // No clone, no interruption: reported rather than silently degrading into the old behaviour,
+    // because a stop that quietly does nothing is the defect this exists to remove.
+    let Some(peer) = peer else {
+        return read(&|| stop());
+    };
+
+    let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watcher = {
+        let stop = Arc::clone(stop);
+        let finished = Arc::clone(&finished);
+        std::thread::spawn(move || {
+            while !finished.load(std::sync::atomic::Ordering::SeqCst) {
+                if stop() {
+                    // `Both`, and the error is ignored: a socket already closed by the read's own
+                    // end is the same outcome this was trying to reach.
+                    let _ = peer.shutdown(std::net::Shutdown::Both);
+                    return;
+                }
+                std::thread::sleep(WATCH);
+            }
+        })
+    };
+
+    let outcome = read(&|| stop());
+    finished.store(true, std::sync::atomic::Ordering::SeqCst);
+    // Joined rather than detached: a watcher outliving this call would shut down a socket the next
+    // stream had already reused, and `WATCH` is the longest this can wait.
+    let _ = watcher.join();
+    outcome
+}
 
 /// The plaintext HTTP adapter: `http://` only, and a `TcpStream`.
 #[derive(Debug, Clone, Copy, Default)]
@@ -121,6 +184,36 @@ impl PlainHttp {
         let target = self.target(url, headers)?;
         let mut stream = connect(&target, url)?;
         stream_answer(&mut stream, "POST", &target, headers, Some(body), on_event)
+    }
+
+    /// The same stream, abandoned when `stop` says so.
+    ///
+    /// A blocking read on a socket cannot be told to give up, so the reading thread is not the one
+    /// that notices: [`interruptible`] clones the socket, hands the clone to a watcher, and the
+    /// watcher shuts the connection down the moment the flag flips. The read then returns at once
+    /// with an error, and that error is the caller's own stop rather than the endpoint's fault.
+    fn stream_until(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        body: &str,
+        on_event: &mut dyn FnMut(SseEvent) -> Result<(), LlmError>,
+        stop: &Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<(), LlmError> {
+        let target = self.target(url, headers)?;
+        let mut stream = connect(&target, url)?;
+        let peer = stream.try_clone().ok();
+        interruptible(peer, stop, |stopped| {
+            stream_answer(&mut stream, "POST", &target, headers, Some(body), on_event).map_err(
+                |error| {
+                    if stopped() {
+                        LlmError::stopped()
+                    } else {
+                        error
+                    }
+                },
+            )
+        })
     }
 
     /// A `GET`: the URL and whatever headers the endpoint wants, and no body.
@@ -214,6 +307,21 @@ impl Transport for PlainHttp {
     ) -> Result<(), LlmError> {
         self.stream(&request.url, &request.headers, &request.body, on_event)
     }
+
+    fn post_stream_until(
+        &self,
+        request: &HttpRequest,
+        on_event: &mut dyn FnMut(SseEvent) -> Result<(), LlmError>,
+        stop: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<(), LlmError> {
+        self.stream_until(
+            &request.url,
+            &request.headers,
+            &request.body,
+            on_event,
+            &stop,
+        )
+    }
 }
 
 /// The TLS adapter: the same request, over a connection this machine's trust store vouched for.
@@ -290,6 +398,34 @@ impl TlsHttp {
         stream_answer(&mut tls, "POST", &target, headers, Some(body), on_event)
     }
 
+    /// The same handshake and the same stream, abandoned when `stop` says so.
+    ///
+    /// The socket under the TLS stream is the one that is shut down: [`interruptible`] carries the
+    /// reason, and it is the same reason the plaintext path has.
+    fn stream_until(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        body: &str,
+        on_event: &mut dyn FnMut(SseEvent) -> Result<(), LlmError>,
+        stop: &Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<(), LlmError> {
+        let target = self.target(url, headers)?;
+        let mut tls = self.handshake(&target, url)?;
+        let peer = tls.get_ref().try_clone().ok();
+        interruptible(peer, stop, |stopped| {
+            stream_answer(&mut tls, "POST", &target, headers, Some(body), on_event).map_err(
+                |error| {
+                    if stopped() {
+                        LlmError::stopped()
+                    } else {
+                        error
+                    }
+                },
+            )
+        })
+    }
+
     /// The verified connection both paths send through.
     fn handshake(&self, target: &Target, url: &str) -> Result<TlsStream<TcpStream>, LlmError> {
         let connector = self.connector(url)?;
@@ -321,6 +457,21 @@ impl Transport for TlsHttp {
         on_event: &mut dyn FnMut(SseEvent) -> Result<(), LlmError>,
     ) -> Result<(), LlmError> {
         self.stream(&request.url, &request.headers, &request.body, on_event)
+    }
+
+    fn post_stream_until(
+        &self,
+        request: &HttpRequest,
+        on_event: &mut dyn FnMut(SseEvent) -> Result<(), LlmError>,
+        stop: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<(), LlmError> {
+        self.stream_until(
+            &request.url,
+            &request.headers,
+            &request.body,
+            on_event,
+            &stop,
+        )
     }
 }
 
@@ -386,6 +537,19 @@ impl Transport for HttpTransport {
             self.tls.post_stream(request, on_event)
         } else {
             self.plain.post_stream(request, on_event)
+        }
+    }
+
+    fn post_stream_until(
+        &self,
+        request: &HttpRequest,
+        on_event: &mut dyn FnMut(SseEvent) -> Result<(), LlmError>,
+        stop: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<(), LlmError> {
+        if names_https(&request.url) {
+            self.tls.post_stream_until(request, on_event, stop)
+        } else {
+            self.plain.post_stream_until(request, on_event, stop)
         }
     }
 }

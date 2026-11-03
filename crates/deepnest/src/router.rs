@@ -1405,11 +1405,12 @@ impl Router {
     /// beyond the flag itself, and the dialog's stop is a request the person makes rather than an
     /// object they remove.
     ///
-    /// The reply counts the turns it *asked* to stop, and that wording is deliberate: the loop reads
-    /// the flag before its next request and before every tool call of a batch, so a turn in the
-    /// middle of a model call ends when that call returns. Zero is an ordinary answer — a second
-    /// press, or a stop that arrives after the answer did — because a stop that finds nothing to
-    /// stop is a true statement about the app, not a failure of the request.
+    /// The reply counts the turns it *asked* to stop, and that wording is deliberate: a stop is a flag
+    /// the loop reads, and the work it ends is the work it can end — a command is killed where it
+    /// runs, and a model call is abandoned at the socket (see `deepnest_gateway::transport`), so a
+    /// stop during a call no longer waits for that call to come back. Zero is an ordinary answer — a
+    /// second press, or a stop that arrives after the answer did — because a stop that finds nothing
+    /// to stop is a true statement about the app, not a failure of the request.
     /// The picture of the screen, as a `data:` URL.
     ///
     /// Encoded here rather than handed over as bytes because the page's next move is to put it in
@@ -1443,12 +1444,12 @@ impl Router {
         let stopping = self.turns.stop(slug.as_str());
         let note = match stopping {
             0 => format!("no turn is running for `{slug}`"),
-            1 => "the turn was asked to stop; a command it is running is killed, and a model \
-                  call already sent ends when that call returns"
+            1 => "the turn was asked to stop; a command it is running is killed, and a model call \
+                  it is waiting on is abandoned rather than waited out"
                 .to_string(),
             n => format!(
                 "{n} turns were asked to stop; each has its running command killed, and a model \
-                 call already sent ends when that call returns"
+                 call it is waiting on abandoned rather than waited out"
             ),
         };
         Response::json(
