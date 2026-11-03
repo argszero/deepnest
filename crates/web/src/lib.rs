@@ -85,11 +85,21 @@ pub const STYLE: &str = include_str!("panel.css");
 /// holds the bytes, and `the_dialog_the_gateway_names_is_served_here` pins the two together.
 pub const DIALOG_SCRIPT_PATH: &str = "/dialog.js";
 
+/// Where the script the dialog puts into the app's frame is served.
+///
+/// A second script because it is a second document: the dialog cannot hear a key pressed inside the
+/// frame, and the frame cannot reach the panel. Named here beside the dialog's own so the two paths
+/// the router answers are stated in one place.
+pub const DIALOG_FRAME_PATH: &str = "/dialog-frame.js";
+
 /// Where the app page's dialog stylesheet is served.
 pub const DIALOG_STYLE_PATH: &str = "/dialog.css";
 
 /// The app page's dialog script.
 pub const DIALOG_SCRIPT: &str = include_str!("dialog.js");
+
+/// The script the dialog hands to the app's frame.
+pub const DIALOG_FRAME_SCRIPT: &str = include_str!("dialog-frame.js");
 
 /// The app page's dialog stylesheet.
 pub const DIALOG_STYLE: &str = include_str!("dialog.css");
@@ -3496,6 +3506,160 @@ mod tests {
             !DIALOG_STYLE.contains("max-height: 9rem"),
             "the line under the box is sized like a text box again"
         );
+    }
+
+    #[test]
+    fn a_finished_rebuild_reloads_the_app_rather_than_the_page_the_conversation_is_on() {
+        // Reported by the owner: "every time the agent finishes, the whole page refreshes, the dialog
+        // is gone, and I have to open it again". A turn that writes a file marks the app changed, so
+        // the rebuild watch fires on most turns — and a reload cannot spare a subtree of the document
+        // it replaces, which is why the conversation has to be outside the document that reloads.
+        //
+        // The dialog now stands on deepnest's own page and the app is a frame in it, so the reload
+        // is the frame's.
+        assert!(
+            DIALOG_SCRIPT.contains(r#"document.getElementById("deepnest-app-frame")"#),
+            "the dialog does not know whether the app is in a frame, so it cannot spare it"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("stage.contentWindow.location.reload()"),
+            "a finished rebuild does not reload the app, so it reloads the conversation with it"
+        );
+        // What the rebuild watch calls: not `location.reload()` itself, which reloads the page the
+        // conversation is drawn on.
+        let watch = &DIALOG_SCRIPT[DIALOG_SCRIPT
+            .find("function watch(route, patience, started) {")
+            .expect("the rebuild is watched somewhere")..];
+        let watch = &watch[..watch.find("\n  }").expect("the watch ends")];
+        assert!(
+            watch.contains("reloadTheApp();"),
+            "the finished build does not reload the app"
+        );
+        assert!(
+            !watch.contains("location.reload()"),
+            "the finished build reloads the tab, which is the defect"
+        );
+        // The fallback stays, for the client that sent no `Sec-Fetch-Dest` and so got the older
+        // shape — the app is the page there, and there is no frame to reload.
+        let reload = &DIALOG_SCRIPT[DIALOG_SCRIPT
+            .find("function reloadTheApp() {")
+            .expect("the reload is named somewhere")..];
+        let reload = &reload[..reload.find("\n  }").expect("it ends")];
+        assert!(
+            reload.contains("location.reload()"),
+            "a page with no frame has no way to come back on the new build"
+        );
+    }
+
+    #[test]
+    fn the_dialog_hears_the_app_it_frames() {
+        // A frame is a document boundary, and two things the dialog had while it stood in the app's
+        // page are on the wrong side of it: the chord that opens the panel, and the click in the app
+        // that closes it. Neither crosses on its own.
+        assert!(
+            DIALOG_SCRIPT.contains(r#"stage.addEventListener("load", adoptTheFrame)"#),
+            "nothing looks at the frame it framed"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#"window.addEventListener("message""#),
+            "the frame's messages arrive nowhere"
+        );
+        // Same origin, checked rather than assumed: any page can post to this window.
+        assert!(
+            DIALOG_SCRIPT.contains("event.origin !== window.location.origin"),
+            "a message from anywhere is taken for the app's"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("said.deepnest !== \"frame\""),
+            "any message at all is taken for the app's"
+        );
+        // The two things, and the script in the frame says the same two.
+        for needed in ["said.kind === \"chord\"", "said.kind === \"press\""] {
+            assert!(DIALOG_SCRIPT.contains(needed), "{needed} is not handled");
+        }
+        for needed in ["tell(\"chord\")", "tell(\"press\")"] {
+            assert!(
+                DIALOG_FRAME_SCRIPT.contains(needed),
+                "{needed} is not forwarded"
+            );
+        }
+        // And the frame's script is the path the router answers, named in the dialog that loads it.
+        assert!(
+            DIALOG_SCRIPT.contains(DIALOG_FRAME_PATH),
+            "the frame is handed a path nothing serves"
+        );
+        // Once per document: a reload brings a new one, and a second copy forwards every chord
+        // twice — which for a click is a panel that closes and opens again.
+        assert!(
+            DIALOG_SCRIPT.contains(r#"app.getElementById("deepnest-dialog-frame")"#),
+            "the forwarder is added again on every load"
+        );
+    }
+
+    #[test]
+    fn the_frame_script_forwards_and_does_nothing_else() {
+        // The app's page is the agent's to rewrite, so the less of deepnest that stands in it the
+        // better. This asserts the shape of that restraint: one listener for the chord, one for the
+        // click, one message posted to the parent, and nothing that reads or writes the page.
+        assert!(!DIALOG_FRAME_SCRIPT.contains("innerHTML"));
+        assert!(
+            DIALOG_FRAME_SCRIPT.contains("window.parent.postMessage"),
+            "the frame reports nothing to the dialog"
+        );
+        assert!(
+            DIALOG_FRAME_SCRIPT.contains(r#"deepnest: "frame""#),
+            "the message is not the one the dialog recognises"
+        );
+        // The chord's own guards, the same ones the dialog's handler has.
+        for needed in [
+            "event.defaultPrevented",
+            "event.isComposing",
+            "event.altKey",
+            "event.shiftKey",
+        ] {
+            assert!(DIALOG_FRAME_SCRIPT.contains(needed), "{needed} is missing");
+        }
+        // Named origin rather than `"*"`: a frame that is not on deepnest's own origin must not have
+        // its messages readable by whoever is on the other side.
+        assert!(
+            DIALOG_FRAME_SCRIPT.contains("window.location.origin"),
+            "the frame posts to anyone listening"
+        );
+        assert!(
+            !DIALOG_FRAME_SCRIPT.contains(r#", "*")"#),
+            "the frame posts to anyone listening"
+        );
+    }
+
+    #[test]
+    fn the_stage_is_laid_out_by_the_stylesheet_the_dialog_already_ships() {
+        // Both documents load this stylesheet. Every rule for the stage is scoped to the stage's own
+        // class or to the frame's id, because a rule that reset a `body` unconditionally would move
+        // every app's page the moment the older shape injected it into one.
+        assert!(
+            DIALOG_STYLE.contains(".deepnest-stage {"),
+            "the stage's own body is not laid out"
+        );
+        assert!(
+            DIALOG_STYLE.contains("#deepnest-app-frame {"),
+            "the frame has no box of its own"
+        );
+        // Fixed rather than a percentage height: a percentage needs the `html` element sized, and
+        // sizing every `html` would reach the app's page too.
+        let frame = &DIALOG_STYLE[DIALOG_STYLE
+            .find("#deepnest-app-frame {")
+            .expect("the frame has a rule")..];
+        let frame = &frame[..frame.find('}').expect("the rule closes")];
+        assert!(frame.contains("position: fixed"), "{frame}");
+        assert!(frame.contains("inset: 0"), "{frame}");
+        // And nothing in the stylesheet moves an app's own body: the stage's reset is named.
+        for rule in DIALOG_STYLE.lines() {
+            let rule = rule.trim_start();
+            assert!(
+                !(rule.starts_with("body") || rule.starts_with("html {")),
+                "an unscoped `{rule}` would move every app's page"
+            );
+        }
     }
 
     #[test]

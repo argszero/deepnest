@@ -398,7 +398,7 @@ pub fn forward(target: &Target, request: &Request) -> Result<Answer, ForwardErro
 
     let raw = read_all(&mut stream, pending).map_err(ForwardError::Io)?;
     let body = complete(&head, raw)?;
-    Ok(Answer::Full(adapt(target, &head, body)))
+    Ok(Answer::Full(adapt(target, request, &head, body)))
 }
 
 /// Whether this request asks to stop speaking request/response.
@@ -658,35 +658,91 @@ fn decode_chunked(raw: &[u8]) -> Result<Vec<u8>, ForwardError> {
     }
 }
 
+/// What the client said it was asking for.
+///
+/// One header, and it is the difference between two documents: a browser showing a page in the tab
+/// sends `document`, the same browser showing a page in a frame sends `iframe`, and a script
+/// fetching something sends neither. deepnest answers the first with its own stage and the second
+/// with the app, which is why a rebuild can reload the app without touching the conversation.
+///
+/// The header is not required by HTTP, so [`Dest::Unknown`] is a real case rather than an error: a
+/// client that sends nothing gets the older shape, a dialog injected into the app's own page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Dest {
+    /// A top-level navigation: the browser is about to put this in the tab.
+    Document,
+    /// A document inside a frame.
+    Frame,
+    /// Anything else — a `fetch`, an image, a stylesheet, a script.
+    Subresource,
+    /// The client said nothing at all.
+    Unknown,
+}
+
+fn dest(request: &Request) -> Dest {
+    match request.header("sec-fetch-dest") {
+        Some(value) => {
+            let value = value.trim().to_ascii_lowercase();
+            if value == "document" {
+                Dest::Document
+            } else if value == "iframe" || value == "frame" {
+                Dest::Frame
+            } else {
+                Dest::Subresource
+            }
+        }
+        None => Dest::Unknown,
+    }
+}
+
 /// The app's answer, as the browser must see it under the prefix.
-fn adapt(target: &Target, head: &Head, answer_body: Vec<u8>) -> Response {
+fn adapt(target: &Target, request: &Request, head: &Head, answer_body: Vec<u8>) -> Response {
     let prefix = target.prefix();
     let content_type = head
         .header("content-type")
         .unwrap_or("application/octet-stream")
         .to_string();
+    let dest = dest(request);
 
     // Only a page can carry a dialog, and only a dialog that went in is worth loosening a policy
     // for: `injected` is the whole reason the CSP rewrite below is conditional.
     let mut body = answer_body;
     let mut injected = false;
+    let mut staged = false;
     if content_type.to_ascii_lowercase().starts_with("text/html") {
         if let Ok(page) = std::str::from_utf8(&body) {
-            // Two rewrites of the same text, and the second sees the first one's output: the base
-            // has to be ahead of every URL, and the dialog after everything the app rendered.
-            let based = rewrite::inject_base(&prefix, page);
-            let candidate = based.as_deref().unwrap_or(page);
-            match dialog::inject(&target.slug, candidate) {
-                Some(rewritten) => {
-                    body = rewritten.into_bytes();
-                    injected = true;
-                }
-                // The page already carries a dialog: keep the base if there was one, and loosen
-                // nothing.
-                None => {
-                    if let Some(rewritten) = based {
-                        body = rewritten.into_bytes();
+            if dest == Dest::Document {
+                // The tab asked for a page, and it is deepnest's page it gets: the dialog, and the
+                // app framed beside it. The app's own page is asked for again by the frame — the
+                // one wasted page render in this shape, and what buys a conversation a rebuild
+                // cannot reach.
+                body = dialog::stage(&target.slug, &with_query(request)).into_bytes();
+                staged = true;
+            } else {
+                // Two rewrites of the same text, and the second sees the first one's output: the
+                // base has to be ahead of every URL, and the dialog after everything the app
+                // rendered.
+                let based = rewrite::inject_base(&prefix, page);
+                let candidate = based.as_deref().unwrap_or(page);
+                // A page in a frame is a page with the dialog beside it already, and a subresource
+                // is not a page anyone navigates to. So only a client that said nothing about
+                // itself — the one that cannot be shown a stage — gets a dialog in its page.
+                if dest == Dest::Unknown {
+                    match dialog::inject(&target.slug, candidate) {
+                        Some(rewritten) => {
+                            body = rewritten.into_bytes();
+                            injected = true;
+                        }
+                        // The page already carries a dialog: keep the base if there was one, and
+                        // loosen nothing.
+                        None => {
+                            if let Some(rewritten) = based {
+                                body = rewritten.into_bytes();
+                            }
+                        }
                     }
+                } else if let Some(rewritten) = based {
+                    body = rewritten.into_bytes();
                 }
             }
         }
@@ -705,16 +761,41 @@ fn adapt(target: &Target, head: &Head, answer_body: Vec<u8>) -> Response {
             // Only for the page the dialog reached, and only ever widened: an app that said
             // nothing about scripts keeps saying nothing, because an absent policy restricts
             // nothing and inventing one would.
-            if injected {
+            if staged {
+                // The stage is deepnest's page and carries deepnest's policy. The app's own has no
+                // business governing it: `frame-src 'none'` would take away the very frame the app
+                // is shown in.
+                response = response.header(name.clone(), dialog::STAGE_CSP);
+            } else if dest == Dest::Frame {
+                // Inside the stage's frame. An app that refused to be framed would load into an
+                // empty box with the refusal sitting in a header nobody reads, so the one directive
+                // that says so goes — and nothing else moves.
+                response = response.header(name.clone(), dialog::framable(value));
+            } else if injected {
                 response = response.header(name.clone(), dialog::policy(value));
             } else {
                 response = response.header(name.clone(), value.clone());
             }
+        } else if name.eq_ignore_ascii_case("x-frame-options") {
+            // Dropped for the same reason, in the older spelling. Every page this layer answers is
+            // a page deepnest is showing the person, and the stage shows it in a frame.
         } else {
             response = response.header(name.clone(), value.clone());
         }
     }
     response
+}
+
+/// The address the browser asked for, query and all.
+///
+/// This is what the stage's frame loads, so it is written from the request rather than rebuilt from
+/// the prefix: a deep link, a query string and an app's own route all survive because none of them
+/// are interpreted here.
+fn with_query(request: &Request) -> String {
+    if request.query.is_empty() {
+        return request.path.clone();
+    }
+    format!("{}?{}", request.path, request.query)
 }
 
 /// Only `HEAD` and `GET` reach an app through this layer.
@@ -744,6 +825,15 @@ mod tests {
             // A forwarded request carries no body: `can_forward` refuses every method that could.
             body: Vec::new(),
         }
+    }
+
+    /// A request that says what it is, which is the one header the stage turns on.
+    fn get_as(dest: &str, path: &str) -> Request {
+        let mut request = get(path);
+        request
+            .headers
+            .push(("sec-fetch-dest".to_string(), dest.to_string()));
+        request
     }
 
     fn handshake(path: &str) -> Request {
@@ -838,7 +928,7 @@ mod tests {
             }));
         }
         let body = complete(&parsed, rest)?;
-        Ok(Answer::Full(adapt(&target, &parsed, body)))
+        Ok(Answer::Full(adapt(&target, request, &parsed, body)))
     }
 
     #[test]
@@ -949,6 +1039,116 @@ mod tests {
         assert_eq!(
             header(&response, "content-security-policy").as_deref(),
             Some("default-src 'none'; script-src 'self'; style-src 'self'")
+        );
+    }
+
+    #[test]
+    fn a_top_level_navigation_gets_the_stage_rather_than_the_app() {
+        // The fix, stated as the browser sees it: what the tab holds is deepnest's page, and the app
+        // is what the frame inside it asks for. A reload of the app then cannot reach the dialog.
+        let answer = b"HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\n\r\n\
+                       <html><body><p>the app</p></body></html>";
+        let (addr, _handle) = serving(answer);
+        let response = forward_to(addr, &get_as("document", "/app/notes/"))
+            .unwrap()
+            .complete();
+        let body = String::from_utf8(response.body.clone()).unwrap();
+
+        assert!(
+            body.contains(r#"<iframe id="deepnest-app-frame""#),
+            "{body}"
+        );
+        assert!(body.contains(r#"src="/app/notes/""#), "{body}");
+        assert!(body.contains("/dialog.js"), "{body}");
+        // The app's own page is not in this document: the frame asks for it, and that request is
+        // the one that gets it.
+        assert!(!body.contains("the app"), "{body}");
+    }
+
+    #[test]
+    fn the_page_in_the_frame_is_the_app_and_carries_no_dialog() {
+        // The other side of the same decision. A page inside a frame has the dialog beside it
+        // already, and a second copy inside would be two balls on one screen.
+        let answer = b"HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\n\r\n\
+                       <html><body><p>the app</p></body></html>";
+        let (addr, _handle) = serving(answer);
+        let response = forward_to(addr, &get_as("iframe", "/app/notes/"))
+            .unwrap()
+            .complete();
+        let body = String::from_utf8(response.body.clone()).unwrap();
+
+        assert!(body.contains("<p>the app</p>"), "{body}");
+        assert!(!body.contains("/dialog.js"), "{body}");
+        // The base still goes in: the app's own relative URLs have to resolve under the prefix, in
+        // a frame exactly as in a tab.
+        assert!(body.contains(r#"<base href="/app/notes/">"#), "{body}");
+    }
+
+    #[test]
+    fn an_app_that_refused_to_be_framed_is_still_shown_in_the_frame() {
+        // `X-Frame-Options` and `frame-ancestors` are the two ways an app can refuse the stage, and
+        // both would leave a blank frame with the reason in a header nobody reads.
+        let answer = b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\n\
+                       x-frame-options: DENY\r\n\
+                       content-security-policy: default-src 'self'; frame-ancestors 'none'\r\n\r\n\
+                       <html><body></body></html>";
+        let (addr, _handle) = serving(answer);
+        let response = forward_to(addr, &get_as("iframe", "/app/notes/"))
+            .unwrap()
+            .complete();
+        assert_eq!(header(&response, "x-frame-options"), None);
+        assert_eq!(
+            header(&response, "content-security-policy").as_deref(),
+            Some("default-src 'self'")
+        );
+    }
+
+    #[test]
+    fn a_subresource_is_never_staged() {
+        // A `fetch` of a page is not a navigation. Answering it with the stage would hand a script
+        // a whole document where it asked for a fragment.
+        let answer = b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\n\r\n<p>fragment</p>";
+        let (addr, _handle) = serving(answer);
+        let response = forward_to(addr, &get_as("empty", "/app/notes/partial"))
+            .unwrap()
+            .complete();
+        let body = String::from_utf8(response.body.clone()).unwrap();
+        assert!(body.contains("<p>fragment</p>"), "{body}");
+        assert!(!body.contains("<iframe"), "{body}");
+        assert!(!body.contains("/dialog.js"), "{body}");
+    }
+
+    #[test]
+    fn a_client_that_says_nothing_about_itself_still_gets_the_dialog_in_the_page() {
+        // The fallback, and the cost it carries: a client that sends no `Sec-Fetch-Dest` cannot be
+        // told from a top-level navigation, so it gets the older shape — the dialog inside the app's
+        // page, and a rebuild that reloads the whole tab.
+        let answer = b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\n\r\n\
+                       <html><body><p>the app</p></body></html>";
+        let (addr, _handle) = serving(answer);
+        let response = forward_to(addr, &get("/app/notes/")).unwrap().complete();
+        let body = String::from_utf8(response.body.clone()).unwrap();
+        assert!(
+            body.contains(r#"<script src="/dialog.js" defer></script>"#),
+            "{body}"
+        );
+        assert!(!body.contains("<iframe"), "{body}");
+    }
+
+    #[test]
+    fn the_stage_is_served_with_deepnest_s_policy_rather_than_the_app_s() {
+        // An app's `frame-src 'none'` would take away the frame the app itself is shown in, so the
+        // stage gets deepnest's own policy and none of the app's.
+        let answer = b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\n\
+                       content-security-policy: frame-src 'none'; script-src 'none'\r\n\r\n\
+                       <html><body></body></html>";
+        let (addr, _handle) = serving(answer);
+        let response = forward_to(addr, &get_as("document", "/app/notes/"))
+            .unwrap()
+            .complete();
+        assert_eq!(
+            header(&response, "content-security-policy").as_deref(),
+            Some(dialog::STAGE_CSP)
         );
     }
 

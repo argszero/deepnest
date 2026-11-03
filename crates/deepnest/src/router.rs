@@ -440,6 +440,13 @@ impl Router {
                 "text/css; charset=utf-8",
                 deepnest_web::DIALOG_STYLE.as_bytes().to_vec(),
             )),
+            // The script the dialog puts into the app's frame, for the two things that cannot cross
+            // a document boundary: the chord that opens the panel and the click that closes it.
+            "/dialog-frame.js" => Answer::Full(Response::new(
+                200,
+                "text/javascript; charset=utf-8",
+                deepnest_web::DIALOG_FRAME_SCRIPT.as_bytes().to_vec(),
+            )),
             "/api/health" => Answer::Full(Response::json(200, self.health())),
             "/api/config" => {
                 if !self.authorized(request) {
@@ -2343,6 +2350,44 @@ mod tests {
         assert!(css.contains(".who .meta"), "{css}");
         // No token, like the script: nothing about a stylesheet needs one.
         assert!(!css.contains("deepnest-token"), "{css}");
+    }
+
+    #[test]
+    fn the_frame_the_dialog_stands_the_app_in_is_one_name_in_four_places() {
+        // The stage writes the frame's id, the dialog script finds it, the stylesheet lays it out,
+        // and the router serves the script that is loaded into it. Three files and two crates have
+        // to agree, and a rename in one of them is silent: an iframe nobody finds is a dialog that
+        // reloads the app by reloading the conversation with it.
+        let frame = deepnest_gateway::dialog::FRAME_ID;
+        assert!(
+            deepnest_gateway::dialog::stage("notes", "/app/notes/").contains(frame),
+            "the stage does not name the frame"
+        );
+        assert!(
+            deepnest_web::DIALOG_SCRIPT.contains(frame),
+            "the dialog does not look for the frame"
+        );
+        assert!(
+            deepnest_web::DIALOG_STYLE.contains(&format!("#{frame}")),
+            "the frame is unstyled, which under `all: initial` means invisible"
+        );
+
+        // And the script that goes into the frame is served, from the path the dialog names.
+        assert_eq!(
+            deepnest_web::DIALOG_FRAME_PATH,
+            deepnest_web::DIALOG_FRAME_PATH.trim()
+        );
+        assert!(
+            deepnest_web::DIALOG_SCRIPT.contains(deepnest_web::DIALOG_FRAME_PATH),
+            "the dialog loads a path nothing serves"
+        );
+        let router = router();
+        let served = router
+            .respond(&get(deepnest_web::DIALOG_FRAME_PATH, "127.0.0.1:4270"))
+            .complete();
+        assert_eq!(served.status, 200);
+        assert_eq!(served.content_type, "text/javascript; charset=utf-8");
+        assert_eq!(served.body, deepnest_web::DIALOG_FRAME_SCRIPT.as_bytes());
     }
 
     #[test]
