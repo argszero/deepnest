@@ -74,12 +74,14 @@ pub fn route(
     };
     let body: Value = match serde_json::from_str(text) {
         Ok(value) => value,
-        Err(error) => return failed(
-            400,
-            format!(
+        Err(error) => {
+            return failed(
+                400,
+                format!(
                 "the body is not JSON ({error}). Send {{\"agent\":\"<name>\",\"message\":\"…\"}}"
             ),
-        ),
+            )
+        }
     };
     let Some(name) = body.get("agent").and_then(Value::as_str).map(str::trim) else {
         return failed(
