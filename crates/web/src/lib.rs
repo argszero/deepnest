@@ -1143,37 +1143,43 @@ mod tests {
         assert!(!page.contains("dialog"), "{page}");
     }
 
-    /// What a turn cost is drawn under the answer it paid for.
+    /// What a turn cost is a row at the end of the conversation.
     ///
-    /// Three readings, because the number has three ways to go missing and only one of them is a
-    /// refusal: the script can stop reading `usage` out of the reply, the element can stop being
-    /// appended to the panel, or the element can be created further down the file than the block
-    /// that appends it — where `var` hoists the name but not the value, so the panel is assembled
-    /// with `undefined` and `appendChild` throws. Measured in Chrome on the first draft of this
-    /// line: that throw took the whole dialog off the page, not just the number.
+    /// It used to be an element under the input, and the reading that matters is the one that made
+    /// it a row instead: a number about the turn is something the conversation is owed, and every
+    /// surface under the input except the status line has been taken away. What this test holds is
+    /// the ways the number can go missing — the reply's usage stops being read, the reply stops
+    /// being handed over, or the row stops being drawn — because a meter that silently reports
+    /// nothing reads exactly like a turn that was free.
     #[test]
-    fn the_dialog_draws_what_the_turn_cost_under_the_answer() {
-        let created = DIALOG_SCRIPT
-            .find(r#"var spend = document.createElement("p")"#)
-            .expect("the cost line is never created");
-        let appended = DIALOG_SCRIPT
-            .find("panel.appendChild(spend)")
-            .expect("the cost line is created but never drawn");
-        assert!(
-            created < appended,
-            "the element is created after the block that appends it, which throws at page load"
-        );
+    fn the_dialog_draws_what_the_turn_cost_as_a_row_in_the_conversation() {
         assert!(
             DIALOG_SCRIPT.contains("showSpend(result.body)"),
-            "the reply's usage is never handed to the line"
+            "the reply's usage is never handed to the row"
         );
         assert!(
             DIALOG_SCRIPT.contains("body.usage") || DIALOG_SCRIPT.contains("body && body.usage"),
-            "the line does not read the reply's usage"
+            "the row does not read the reply's usage"
+        );
+        // Read out of the reply rather than summed here: a page multiplying a guessed price by the
+        // length of the text would be a second meter disagreeing with the provider's own.
+        assert!(
+            DIALOG_SCRIPT.contains("usage.prompt_tokens"),
+            "the row does not name what the turn spent"
         );
         assert!(
-            DIALOG_STYLE.contains("#deepnest-dialog-spend"),
-            "the line has no style of its own, so it draws as body text"
+            DIALOG_SCRIPT.contains("spendLine"),
+            "the cost is not held anywhere between the reply and the draw"
+        );
+        assert!(
+            DIALOG_STYLE.contains(".deepnest-report-cost"),
+            "the row has no style of its own, so it draws as body text"
+        );
+        // And it is drawn inside the transcript, which is the one surface this dialog draws words
+        // on — not appended under the input beside the status line.
+        assert!(
+            !DIALOG_SCRIPT.contains("panel.appendChild(spend)"),
+            "the cost is under the input again"
         );
     }
 
@@ -2369,58 +2375,46 @@ mod tests {
     }
 
     #[test]
-    fn the_answer_under_the_box_is_drawn_as_blocks_while_it_is_written() {
-        // The line under the box held the answer's own source. Measured in Chrome against a stream
-        // that wrote an answer with a heading, a bold run, a fenced block and a numbered list: the
-        // element held `##`, `**` and both fences as literal characters, and inside it there were
-        // zero headings, zero bold runs, zero code blocks and zero lists — while the transcript
-        // above drew the same text as blocks. So a person watched Markdown being typed and read it
-        // as Markdown only once the turn had landed in the transcript.
+    fn the_answer_is_drawn_as_blocks_while_it_is_written() {
+        // The words in flight used to be a plain line under the input, and it held the answer's own
+        // source. Measured in Chrome against a stream that wrote a heading, a bold run, a fenced
+        // block and a numbered list: the element held `##`, `**` and both fences as literal
+        // characters, with zero headings, zero bold runs, zero code blocks and zero lists inside it
+        // — while the transcript above drew the same text as blocks. So a person watched Markdown
+        // being typed and read it as Markdown only once the turn had landed.
         //
-        // Two moments, one renderer: the pieces as they arrive and the finished answer. The route
-        // that carries an answer and the route that carries a page's own lines are separate, because
-        // "Rebuilding…" is not Markdown and drawing it as such would be a worse sentence.
+        // One renderer, one surface: the pieces as they arrive go into the running turn, drawn by
+        // the function the transcript draws every other round with.
+        let fill = DIALOG_SCRIPT
+            .find("function fillWriting()")
+            .expect("there is no path that draws the answer while it is written");
+        let body = &DIALOG_SCRIPT[fill..];
+        let body = &body[..body.find("\n  }").expect("it ends")];
         assert!(
-            DIALOG_SCRIPT.contains("function sayAnswer("),
-            "there is no path that draws an answer rather than a line"
+            body.contains("renderWords(writing, null)"),
+            "the answer is not drawn by the renderer the transcript uses"
         );
+        // `null` is "shown, not copied from": a copy control over a sentence still growing would
+        // copy half of it, and the transcript offers one for the round once it is whole.
         assert!(
-            DIALOG_SCRIPT.contains("sayAnswer(words);"),
-            "the finished answer still goes through the plain line"
-        );
-        assert!(
-            !DIALOG_SCRIPT.contains("say(text, false)"),
-            "the answer is still being written as text"
-        );
-        // The answer line is drawn by the renderer the transcript uses, with no copy controls: the
-        // transcript above already offers one per block, and a second set here would double the tab
-        // stops this panel spends on copying. `null` is what says so.
-        assert!(
-            DIALOG_SCRIPT.contains("renderWords(written, null)"),
-            "the answer is not drawn by the renderer"
-        );
-        assert!(
-            DIALOG_SCRIPT.contains("said.className = \"deepnest-said\""),
+            body.contains("said.className = \"deepnest-said\""),
             "the answer's blocks sit outside the stylesheet's markdown scope"
         );
         // Redrawing per piece would rebuild every block hundreds of times for one answer; dropping
         // the last would leave a partial answer on screen for good. Coalescing with a trailing draw
         // is the only shape that does neither.
         assert!(
-            DIALOG_SCRIPT.contains("setTimeout(drawAnswer, 0)"),
+            DIALOG_SCRIPT.contains("writingTask = setTimeout("),
             "nothing coalesces the redraws"
         );
+        // A queued draw that runs after the turn ended must find nothing: the round it belonged to
+        // is in the file by then, and drawing it again is the duplication this all removed.
         assert!(
-            DIALOG_SCRIPT.contains("clearTimeout(redrawal)"),
-            "a held-back draw can paint a partial answer over the finished one"
+            DIALOG_SCRIPT.contains("if (!writing) {"),
+            "a draw held back from the last round can paint words that are already in the record"
         );
-        // A paragraph may not hold blocks, so the line itself stops being one.
-        assert!(
-            DIALOG_SCRIPT.contains(r#"var answer = document.createElement("div");"#),
-            "the answer line is still a paragraph, which cannot hold a heading or a list"
-        );
-        // The renderer's own body must not copy the model's answer into a control here: the block
-        // path that draws one is the path that names one.
+        // The renderer's body must not copy the model's answer into a control here: the block path
+        // that draws one is the path that names one.
         let block = DIALOG_SCRIPT
             .find("function fencedBlock(language, source, what, ordinal, total)")
             .expect("the fenced block exists");
@@ -2442,202 +2436,39 @@ mod tests {
     }
 
     #[test]
-    fn a_wrapped_line_of_code_reads_as_a_continuation_and_not_a_new_line() {
-        // A fenced block wraps on purpose — the column is 19rem wide and a real line of Rust does
-        // not fit — but every row used to begin at the block's own left edge. Measured in Chrome
-        // against a five-line block whose third line was 122 characters: the browser drew seven rows
-        // and all seven began at the same x, so one statement read as three, the last of them
-        // starting mid-expression at `…sum::<i64>();`.
-        //
-        // One element per line, and the stylesheet pulls the first row back by what it pushes the
-        // wrapped rows in, is what tells them apart.
-        assert!(
-            DIALOG_SCRIPT.contains("line.className = \"deepnest-code-line\""),
-            "a line of a block has no element of its own to be laid out by"
-        );
-        assert!(
-            DIALOG_SCRIPT.contains(r#".split("\n")"#),
-            "the block is still written as one text node"
-        );
-        // A blank line is a line: an empty block generates no line box, so it would vanish and the
-        // code under it would move up into its place.
-        assert!(
-            DIALOG_SCRIPT.contains(r#"one === "" ? "\u200b" : one"#),
-            "the blank lines of a block are dropped"
-        );
-        // The two halves of the hanging indent, and the three declarations `all: initial` costs.
-        for needed in [
-            "#deepnest-dialog .deepnest-said pre .deepnest-code-line",
-            "#deepnest-dialog .deepnest-code pre .deepnest-code-line",
-            "padding-left: 2ch",
-            "text-indent: -2ch",
-            "white-space: pre-wrap",
-            "display: block",
-        ] {
-            assert!(DIALOG_STYLE.contains(needed), "{needed} is missing");
-        }
-        // The block is drawn the same way in the transcript and under the box, so the rule has to
-        // reach both places — a continuation that only reads right in one of them is half a fix.
-        assert!(
-            DIALOG_STYLE.contains("#deepnest-dialog .deepnest-code pre"),
-            "the under-the-box block is not covered by the line rule"
-        );
-    }
-
-    #[test]
-    fn a_very_long_block_in_the_transcript_is_folded_until_it_is_asked_for() {
-        // A tool call is already capped (`max-height: 12rem` behind a disclosure), and the answer's
-        // own block was capped by nothing. Measured in Chrome against two answers that each wrote a
-        // sixty-line module: one exchange came to 1076 px inside a 280 px transcript window, the two
-        // of them to 2154 px — 7.7 windows — and with the transcript at its newest end, where every
-        // turn leaves it, the exchange before the last sat at -1874 px. An answer that wrote a file
-        // buried the conversation it was part of.
-        assert!(
-            DIALOG_SCRIPT.contains("var BLOCK_LINES_SHOWN = 14;"),
-            "there is no measure for how much of a long block is drawn"
-        );
-        assert!(
-            DIALOG_SCRIPT.contains("rows.length > BLOCK_LINES_SHOWN * 2"),
-            "a block is folded without being long enough to be worth folding"
-        );
-        assert!(
-            DIALOG_SCRIPT.contains("draw(rows.slice(0, BLOCK_LINES_SHOWN));"),
-            "the fold draws the whole block anyway"
-        );
-        // The transcript is rebuilt whenever the record grew, which while a turn runs is every
-        // round. A block that folded itself back up under the reader is a block nobody can read
-        // past, so what was opened is remembered by the answer's own name and the block's position
-        // in it — the DOM those turn into is replaced on every redraw.
-        assert!(
-            DIALOG_SCRIPT
-                .contains(r#"var key = what === null ? null : what + "\u0000" + ordinal;"#),
-            "the fold does not know which answer and which block it belongs to"
-        );
-        assert!(
-            DIALOG_SCRIPT.contains("openedBlocks[key] = true;"),
-            "a block folded back up at the next redraw"
-        );
-        // The answer being written is drawn by the same renderer with `what` null, and it must not
-        // fold: the one thing a reader watching a turn needs is its newest line.
-        assert!(
-            DIALOG_SCRIPT.contains("if (key !== null && !openedBlocks[key]"),
-            "a block being written can be folded away while it is being written"
-        );
-        // The press puts the rest of the block back without asking the server for anything: the
-        // lines are already in this page and the record has not changed.
-        assert!(
-            DIALOG_SCRIPT.contains("draw(rows.slice(BLOCK_LINES_SHOWN));"),
-            "the press redraws the block from the server instead of from what it already has"
-        );
-        assert!(
-            DIALOG_SCRIPT.contains("more.remove();"),
-            "the control stays after the whole block has been drawn"
-        );
-        assert!(
-            DIALOG_SCRIPT.contains(r#"more.className = "deepnest-code-more";"#),
-            "the fold control has no class for the stylesheet or a test to find it by"
-        );
-        // A control with no name is a control a screen reader reads as "button", beside however many
-        // other buttons this panel holds.
-        assert!(
-            DIALOG_SCRIPT.contains(r#""aria-label","#),
-            "the fold control carries no name"
-        );
-        assert!(
-            DIALOG_SCRIPT.contains(r#"of the " +"#),
-            "the fold control's name does not say which block it opens"
-        );
-        // `all: initial` resets `display` to `inline` and the font and colour to the page's own,
-        // which inside this panel is black on a dark box — so each of those is written back.
-        for needed in [
-            "#deepnest-dialog-transcript .deepnest-code-more {",
-            "all: initial",
-            "display: block",
-            "cursor: pointer",
-            ":focus-visible",
-        ] {
-            assert!(DIALOG_STYLE.contains(needed), "{needed} is missing");
-        }
-        // The colour and the ground are asked for as declarations rather than as values: the rules
-        // read them from the token block now, and a test that repeated the literal would be a second
-        // place the colour is named — which is the thing this change removed.
-        let rule = DIALOG_STYLE
-            .split("#deepnest-dialog-transcript .deepnest-code-more {")
-            .nth(1)
-            .expect("the fold control has a selector and no rule");
-        let rule = &rule[..rule
-            .find('}')
-            .expect("the fold control's rule never closes")];
-        for written in ["background:", "color:", "border:"] {
-            assert!(
-                rule.contains(written),
-                "the fold control does not write its own `{written}`, so `all: initial` keeps the page's"
-            );
-        }
-    }
-
-    #[test]
     fn the_answer_being_written_keeps_its_newest_line_in_view() {
-        // The answer line is its own scroll window (`max-height: 9rem`, `overflow: auto`), and it did
-        // not follow what it was writing. Measured in Chrome against a twenty-piece stream: the box
-        // sat on its first line for the whole answer, and the newest line ended 459 px below a 144 px
-        // window — 603 px of answer written while the reader could see the first quarter of it and
-        // nothing that came after.
-        //
-        // Three positions, and the third is the one that must not be lost: a box that pulls its own
-        // scroll to the end is a box a person cannot read while the agent works.
-        assert!(
-            DIALOG_SCRIPT.contains("function onTheNewest()"),
-            "the box cannot tell whether the reader is on its newest line"
-        );
-        assert!(
-            DIALOG_SCRIPT.contains("answer.scrollTop + answer.clientHeight >= answer.scrollHeight - 8"),
-            "the newest line is measured some other way, or demanding an exact pixel a scrolled box \
-             rarely lands on"
-        );
-        // While the answer is being written, the newest line — and the reading is taken per piece, so
-        // a reader who leaves mid-answer is left alone from that piece on.
-        let more = DIALOG_SCRIPT
-            .find("function typeMore(piece)")
-            .expect("the writer exists");
-        let body = &DIALOG_SCRIPT[more..];
+        // The transcript is the box the answer grows in now, and it must follow what it is writing
+        // without taking the page away from a reader who left. The old answer line had three scroll
+        // modes for this; the transcript already had the rule — the same 8 px — and the words in
+        // flight are drawn into it, so the one rule covers both.
+        let fill = DIALOG_SCRIPT
+            .find("function fillWriting()")
+            .expect("there is no path that draws the answer while it is written");
+        let body = &DIALOG_SCRIPT[fill..];
         let body = &body[..body.find("\n  }").expect("it ends")];
+        // Read before the words are replaced: replacing them throws the position away, and a
+        // position read afterwards is the clamped one.
         assert!(
-            body.contains("placement = onTheNewest() ? NEWEST : HOLD;"),
-            "the answer is written without following its own newest line, or without yielding"
+            body.find("var following = atTheLatest();").unwrap()
+                < body.find("writingNode.textContent = \"\";").unwrap(),
+            "the position to keep is read after the blocks that made it are gone"
         );
-        // A finished answer opens at its first line, which is where every version before this one
-        // left it: the box is read top-down once there is nothing more coming.
-        let whole = DIALOG_SCRIPT
-            .find("function sayAnswer(text)")
-            .expect("the finished path exists");
-        let body = &DIALOG_SCRIPT[whole..];
-        let body = &body[..body.find("\n  }").expect("it ends")];
+        // Only a reader who was already at the end is carried to the end: pulling the scroll of a
+        // page a person scrolled up to read is the one thing this must not do.
         assert!(
-            body.contains("placement = FIRST;"),
-            "a finished answer is left scrolled wherever the stream ended"
+            body.contains("if (following) {"),
+            "the newest line is followed unconditionally, so a reader cannot read mid-answer"
         );
-        // And the redraw puts the reader where the mode says, all three ways.
-        let draw = DIALOG_SCRIPT
-            .find("function drawAnswer()")
-            .expect("the draw exists");
-        let body = &DIALOG_SCRIPT[draw..];
-        let body = &body[..body.find("\n  }").expect("it ends")];
-        for move_line in [
-            "answer.scrollTop = answer.scrollHeight;",
-            "answer.scrollTop = 0;",
-            "answer.scrollTop = held;",
-        ] {
-            assert!(
-                body.contains(move_line),
-                "{move_line} is missing from the redraw"
-            );
-        }
-        // Replacing the children throws the old position away, so the held one is read first.
         assert!(
-            body.find("var held = answer.scrollTop;").unwrap()
-                < body.find("answer.textContent = \"\";").unwrap(),
-            "the position to hold is read after the blocks that made it are gone"
+            body.contains("transcript.scrollTop = transcript.scrollHeight;"),
+            "the newest line is never brought into view"
+        );
+        // And the measurement itself is the transcript's, with the tolerance a scrolled box needs:
+        // a box at its end rarely lands on the exact pixel, and demanding that would call a reader
+        // who followed by hand a reader who left.
+        assert!(
+            DIALOG_SCRIPT.contains("transcript.scrollHeight - 8"),
+            "the newest line is measured some other way, or demands an exact pixel"
         );
     }
 
@@ -2982,7 +2813,7 @@ mod tests {
         // The memo decides whether the transcript is redrawn at all, so a phrase that does not
         // change what is drawn still has to change the answer under it.
         assert!(
-            DIALOG_SCRIPT.contains(r#""|" + finding;"#),
+            DIALOG_SCRIPT.contains(r#""|" + finding + "|" + writing;"#),
             "typing more of a phrase that matches the same turns does not redraw the count"
         );
         // Measured: on a conversation of twenty — the window is the whole of it — the field was
@@ -3325,8 +3156,10 @@ mod tests {
             DIALOG_SCRIPT.contains(r#"setAttribute("aria-live", "polite")"#),
             "the answer never gets its announcement back"
         );
-        // `all: initial` leaves both of them invisible without a rule of their own.
-        for selector in ["#deepnest-dialog-answer.live", ".deepnest-running"] {
+        // `all: initial` leaves both of them invisible without a rule of their own. The status line
+        // is one of them: it is the only thing this dialog writes under the box, and it is a
+        // reading of the machine rather than the agent's words.
+        for selector in ["#deepnest-dialog-status", ".deepnest-running"] {
             assert!(DIALOG_STYLE.contains(selector), "{selector} is unstyled");
         }
     }
@@ -3418,75 +3251,250 @@ mod tests {
             DIALOG_SCRIPT.contains("response.json()"),
             "the refusal path was removed, so a 401 or a 412 has nothing to read it"
         );
-        // The progress line and the answer share one element, so the guard is what keeps a counter
-        // from overwriting the model's sentence once it has started writing it.
+        // The line under the box and the words in flight are two different surfaces, and that is
+        // the whole reading: the status says which round the turn is on, the transcript says what
+        // the turn said. A guard used to keep one from overwriting the other because they shared an
+        // element — with two surfaces there is nothing to guard, and nothing that could drift.
         let progress = &DIALOG_SCRIPT[DIALOG_SCRIPT
             .find("function showProgress(")
             .expect("the box says what a turn is doing somewhere")..];
         let progress = &progress[..progress.find("\n  }").expect("the function ends")];
         assert!(
-            progress.contains("if (typing)"),
-            "the progress line overwrites an answer mid-sentence: {progress}"
+            progress.contains("status.textContent = text;"),
+            "the progress line no longer writes the status line: {progress}"
         );
-        // Every way out of a turn has to put the line back, or the next turn's progress never
-        // appears: the settle handler, the failed request, and nothing else.
-        let submit = &DIALOG_SCRIPT[DIALOG_SCRIPT
-            .find(r#"form.addEventListener("submit""#)
-            .expect("the box submits somewhere")..];
-        let submit = &submit[..submit.find("\n  });").expect("the listener ends")];
         assert!(
-            submit.matches("typing = false;").count() >= 2,
-            "a turn that ended leaves the box believing an answer is still being written"
+            !progress.contains("answer"),
+            "the progress line writes the answer's surface again: {progress}"
         );
-        // A line that grows word by word is not announced word by word.
         assert!(
-            submit.contains(r#"readEvents(response, typeMore)"#),
+            !progress.contains("if (typing)"),
+            "a guard is left over from the shared element it was protecting: {progress}"
+        );
+        // The one exit every turn goes through takes the reading away with it: a status left behind
+        // is a claim about a turn that ended.
+        let stop = &DIALOG_SCRIPT[DIALOG_SCRIPT
+            .find("function stopWatching()")
+            .expect("the box stops its watcher somewhere")..];
+        let stop = &stop[..stop.find("\n  }").expect("the function ends")];
+        assert!(
+            stop.contains("clearStatus()"),
+            "the status line outlives the turn it describes: {stop}"
+        );
+        // The deltas are handed to the one writer that puts them where the words belong.
+        assert!(
+            DIALOG_SCRIPT.contains(r#"readEvents(response, typeMore)"#),
             "the deltas are read but never shown"
         );
         assert!(
-            DIALOG_STYLE.contains("#deepnest-dialog-answer.typing"),
+            DIALOG_SCRIPT.contains("function typeMore(piece)"),
+            "the writer the reader hands its deltas to does not exist"
+        );
+        // The bar at the end of a sentence still being written. It belongs to the words, wherever
+        // they are drawn, and they are drawn in the transcript now.
+        assert!(
+            DIALOG_STYLE.contains(".deepnest-writing::after"),
             "an answer still being written is unstyled, so nothing says more is coming"
         );
     }
 
     #[test]
-    fn an_answer_the_transcript_holds_is_not_drawn_twice() {
-        // The box is the answer's *live* drawing — the only surface with text the record does not
-        // have yet — and the transcript is the record. Once the turn is on disk and drawn, the same
-        // answer in both is one copy too many: measured in Chrome, a settled turn showed the same
-        // 88 characters twice, in a 40 px answer box over a 148 px transcript, inside a panel 470 px
-        // wide. The box gives its copy up, and this test holds the three parts that do it.
+    fn a_wrapped_line_of_code_reads_as_a_continuation_and_not_a_new_line() {
+        // A fenced block wraps on purpose — the column is 19rem wide and a real line of Rust does
+        // not fit — but every row used to begin at the block's own left edge. Measured in Chrome
+        // against a five-line block whose third line was 122 characters: the browser drew seven rows
+        // and all seven began at the same x, so one statement read as three, the last of them
+        // starting mid-expression at `…sum::<i64>();`.
+        //
+        // One element per line, and the stylesheet pulls the first row back by what it pushes the
+        // wrapped rows in, is what tells them apart.
         assert!(
-            DIALOG_SCRIPT.contains("function yieldToTranscript()"),
-            "nothing hands the answer over, so it stays in the box as well as in the transcript"
+            DIALOG_SCRIPT.contains("line.className = \"deepnest-code-line\""),
+            "a line of a block has no element of its own to be laid out by"
         );
         assert!(
-            DIALOG_STYLE.contains("#deepnest-dialog-answer.settled"),
-            "a handed-over box has no rule, so it is drawn exactly as it was before"
+            DIALOG_SCRIPT.contains(r#".split("\n")"#),
+            "the block is still written as one text node"
         );
-        // Not `hidden`: `role="status"` is how an answer reaches someone who cannot see it, and a
-        // hidden region announces nothing. Out of the layout, still in the accessibility tree.
+        // A blank line is a line: an empty block generates no line box, so it would vanish and the
+        // code under it would move up into its place.
         assert!(
-            DIALOG_STYLE.contains("clip-path: inset(50%)"),
-            "the box is still taking up room, so the duplication is only moved"
+            DIALOG_SCRIPT.contains(r#"one === "" ? "\u200b" : one"#),
+            "the blank lines of a block are dropped"
         );
-        // Only once the transcript demonstrably holds the newest answer: a search that filtered that
-        // turn out, or a record whose reply is not written yet, must leave the box as the one copy.
+        // The two halves of the hanging indent, and the three declarations `all: initial` costs.
+        for needed in [
+            "#deepnest-dialog .deepnest-said pre .deepnest-code-line",
+            "#deepnest-dialog .deepnest-code pre .deepnest-code-line",
+            "padding-left: 2ch",
+            "text-indent: -2ch",
+            "white-space: pre-wrap",
+            "display: block",
+        ] {
+            assert!(DIALOG_STYLE.contains(needed), "{needed} is missing");
+        }
+        // A block reaches the page in two shapes — a bare `pre` inside a sentence, and a fenced block
+        // with its head above it — and the rule has to cover both, since the renderer draws code
+        // through one path or the other: a continuation that reads right in one shape and not the
+        // other is half a fix.
         assert!(
-            DIALOG_SCRIPT.contains(
-                "var drawsTheAnswer = recent.indexOf(newest) !== -1 && !!newest.turn.reply;"
-            ),
-            "the hand-over does not wait for the transcript to hold the answer"
+            DIALOG_STYLE.contains("#deepnest-dialog .deepnest-code pre"),
+            "the fenced block is not covered by the line rule"
         );
-        // And only while nothing newer was put in the box: the rebuild line and the next turn's
-        // progress line both arrive after the answer, and either is a line a person still needs.
+    }
+
+    #[test]
+    fn a_very_long_block_in_the_transcript_is_folded_until_it_is_asked_for() {
+        // A tool call is already capped (`max-height: 12rem` behind a disclosure), and the answer's
+        // own block was capped by nothing. Measured in Chrome against two answers that each wrote a
+        // sixty-line module: one exchange came to 1076 px inside a 280 px transcript window, the two
+        // of them to 2154 px — 7.7 windows — and with the transcript at its newest end, where every
+        // turn leaves it, the exchange before the last sat at -1874 px. An answer that wrote a file
+        // buried the conversation it was part of.
         assert!(
-            DIALOG_SCRIPT.contains("if (drawnTheAnswer && shownAnswer === handed) {"),
-            "a line the person still needs to read can be taken by the hand-over"
+            DIALOG_SCRIPT.contains("var BLOCK_LINES_SHOWN = 14;"),
+            "there is no measure for how much of a long block is drawn"
         );
         assert!(
-            DIALOG_SCRIPT.contains(r#"answer.classList.remove("settled");"#),
-            "a box handed over once never comes back, so the next answer is drawn nowhere"
+            DIALOG_SCRIPT.contains("rows.length > BLOCK_LINES_SHOWN * 2"),
+            "a block is folded without being long enough to be worth folding"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("draw(rows.slice(0, BLOCK_LINES_SHOWN));"),
+            "the fold draws the whole block anyway"
+        );
+        // The transcript is rebuilt whenever the record grew, which while a turn runs is every
+        // round. A block that folded itself back up under the reader is a block nobody can read
+        // past, so what was opened is remembered by the answer's own name and the block's position
+        // in it — the DOM those turn into is replaced on every redraw.
+        assert!(
+            DIALOG_SCRIPT
+                .contains(r#"var key = what === null ? null : what + "\u0000" + ordinal;"#),
+            "the fold does not know which answer and which block it belongs to"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("openedBlocks[key] = true;"),
+            "a block folded back up at the next redraw"
+        );
+        // The sentence being written goes through the same renderer with `what` null, and it must
+        // not fold: the one thing a reader watching a turn needs is its newest line.
+        assert!(
+            DIALOG_SCRIPT.contains("if (key !== null && !openedBlocks[key]"),
+            "a block being written can be folded away while it is being written"
+        );
+        // The press puts the rest of the block back without asking the server for anything: the
+        // lines are already in this page and the record has not changed.
+        assert!(
+            DIALOG_SCRIPT.contains("draw(rows.slice(BLOCK_LINES_SHOWN));"),
+            "the press redraws the block from the server instead of from what it already has"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("more.remove();"),
+            "the control stays after the whole block has been drawn"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#"more.className = "deepnest-code-more";"#),
+            "the fold control has no class for the stylesheet or a test to find it by"
+        );
+        // A control with no name is a control a screen reader reads as "button", beside however many
+        // other buttons this panel holds.
+        assert!(
+            DIALOG_SCRIPT.contains(r#""aria-label","#),
+            "the fold control carries no name"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#"of the " +"#),
+            "the fold control's name does not say which block it opens"
+        );
+        // `all: initial` resets `display` to `inline` and the font and colour to the page's own,
+        // which inside this panel is black on a dark box — so each of those is written back.
+        for needed in [
+            "#deepnest-dialog-transcript .deepnest-code-more {",
+            "all: initial",
+            "display: block",
+            "cursor: pointer",
+            ":focus-visible",
+        ] {
+            assert!(DIALOG_STYLE.contains(needed), "{needed} is missing");
+        }
+        // The colour and the ground are asked for as declarations rather than as values: the rules
+        // read them from the token block now, and a test that repeated the literal would be a second
+        // place the colour is named — which is the thing this change removed.
+        let rule = DIALOG_STYLE
+            .split("#deepnest-dialog-transcript .deepnest-code-more {")
+            .nth(1)
+            .expect("the fold control has a selector and no rule");
+        let rule = &rule[..rule
+            .find('}')
+            .expect("the fold control's rule never closes")];
+        for written in ["background:", "color:", "border:"] {
+            assert!(
+                rule.contains(written),
+                "the fold control does not write its own `{written}`, so `all: initial` keeps the page's"
+            );
+        }
+    }
+
+    #[test]
+    fn the_answer_is_drawn_in_one_place_and_what_is_under_the_box_is_a_status_line() {
+        // Reported twice by the owner: while a turn ran, the region under the input accumulated
+        // text — the same words the transcript above was already drawing, in a different order and
+        // with no round boundaries, because every round's prose was appended to one string that was
+        // only emptied when the turn ended. It was visible exactly when the turn was unfinished,
+        // for the reason that ended it: handing the answer over once the record held it.
+        //
+        // This dialog has one surface for words and it is the transcript. What is left under the
+        // input is a status line: which round, how many calls, how long.
+        assert!(
+            !DIALOG_SCRIPT.contains("yieldToTranscript"),
+            "the hand-over is back, which means there is a second surface to hand an answer between"
+        );
+        assert!(
+            !DIALOG_STYLE.contains("clip-path: inset(50%)"),
+            "a box is being taken out of the layout again, so something is drawn twice"
+        );
+        // The words in flight are the round the turn is on, drawn at the end of that turn: the same
+        // block, in the same place, that the record will draw them in when the round ends.
+        let render = &DIALOG_SCRIPT[DIALOG_SCRIPT
+            .find("function renderTurn(")
+            .expect("the transcript draws a turn somewhere")..];
+        let render = &render[..render.find("\n  }").expect("the function ends")];
+        assert!(
+            render.contains("deepnest-writing"),
+            "the running turn does not draw the words being written into it"
+        );
+        // And nothing accumulates. A round is recorded the moment it ends, so a round count that
+        // has moved means the words held here are in the file: keeping them draws them twice, and
+        // that is the growth the owner saw.
+        assert!(
+            DIALOG_SCRIPT.contains("if (rounds !== writingBase) {"),
+            "nothing notices that a round has been recorded, so its words are drawn twice"
+        );
+        let more = &DIALOG_SCRIPT[DIALOG_SCRIPT
+            .find("function typeMore(")
+            .expect("the words in flight arrive somewhere")..];
+        let more = &more[..more.find("\n  }").expect("the function ends")];
+        assert!(
+            !more.contains("status."),
+            "the words in flight are written to the line under the box, which is the defect"
+        );
+        // And the memo that decides whether anything is redrawn at all counts them: without this a
+        // redraw asked for because the sentence had grown compared equal to the one before it and
+        // was skipped, so a stream could run to its end with nothing on screen but the question.
+        assert!(
+            DIALOG_SCRIPT.contains(r#""|" + finding + "|" + writing;"#),
+            "the memo leaves out the words in flight, so a growing sentence redraws nothing"
+        );
+        // One line, and it is a reading of the machine rather than the agent's words: clipped
+        // rather than wrapped, because a status that grew would push the box a person is typing in
+        // up the panel.
+        assert!(
+            DIALOG_STYLE.contains("#deepnest-dialog-status"),
+            "the line under the box has no rule of its own"
+        );
+        assert!(
+            !DIALOG_STYLE.contains("max-height: 9rem"),
+            "the line under the box is sized like a text box again"
         );
     }
 
@@ -3568,7 +3576,7 @@ mod tests {
         for selector in [
             "#deepnest-dialog-input",
             "#deepnest-dialog-send",
-            "#deepnest-dialog-answer",
+            "#deepnest-dialog-status",
         ] {
             assert!(DIALOG_STYLE.contains(selector), "{selector} is unstyled");
         }
