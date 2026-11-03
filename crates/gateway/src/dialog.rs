@@ -1,11 +1,24 @@
-//! The floating dialog, injected into every page an app answers — and the one policy that has to
-//! be loosened for it.
+//! The floating dialog, and the page it stands on: deepnest's own, with the app framed inside it.
 //!
 //! The dialog belongs to deepnest, not to the app. An agent writes the app's page and rewrites it
 //! wholesale whenever the user asks for something, so anything the agent could have put in the
 //! page is something the agent can delete by accident. The ball is the only way back to the control
-//! panel from a page the user is looking at, so it is injected here, at the last moment before the
+//! panel from a page the user is looking at, so it is added here, at the last moment before the
 //! bytes go out, where nothing the app does to its own files can reach it.
+//!
+//! **A page is two documents, and that is the fix for a defect the injection could not reach**
+//! (`host 15:33`). Injecting the dialog into the app's page put the conversation and the app in one
+//! document, so every finished rebuild — which is most turns, because a turn that writes a file
+//! marks the app changed — reloaded the whole tab and took the dialog with it: the panel closed, the
+//! conversation went off screen, and the person had to open it again to read the answer they had
+//! just been given. A reload cannot spare a subtree of the document it replaces. So the app now
+//! lives in a frame and the dialog lives beside it: [`stage`] is the page the tab holds, the app is
+//! what the frame holds, and a rebuild reloads the frame. What the person sees is the app coming
+//! back — which is what they asked for — and a conversation that never moved.
+//!
+//! [`inject`] is still here for a client that sends no `Sec-Fetch-Dest` and so cannot be told from
+//! a top-level navigation: that client gets the older shape, a dialog inside the app's page, and its
+//! rebuild still costs the conversation. It is a fallback with a known cost, not a second design.
 //!
 //! # Why the policy has to move with it
 //!
@@ -35,6 +48,79 @@ pub const SCRIPT_PATH: &str = "/dialog.js";
 
 /// Where the dialog's stylesheet is served.
 pub const STYLE_PATH: &str = "/dialog.css";
+
+/// The id of the frame the app is shown in.
+///
+/// Named in one place because three files have to agree on it: the stage writes it, the dialog
+/// script finds it, and the stylesheet lays it out.
+pub const FRAME_ID: &str = "deepnest-app-frame";
+
+/// The class the stage's own `<body>` carries, so the stylesheet can tell the stage's document from
+/// an app's: both load `dialog.css`, and a rule that resets a body's margin must reach exactly one
+/// of them.
+pub const STAGE_CLASS: &str = "deepnest-stage";
+
+/// The policy the stage is served with.
+///
+/// The stage is deepnest's own page, so its policy is deepnest's own: narrow, and about the two
+/// things it does — load the dialog and hold one frame of the same origin. An app's policy has no
+/// business here, and copying it in would let an app's `frame-src 'none'` take away the frame its
+/// own page is shown in.
+pub const STAGE_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; \
+                             frame-src 'self'; connect-src 'self'; img-src 'self' data:; \
+                             base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+/// The page the tab holds while an app is open: the dialog's own document, with the app framed.
+///
+/// `path` is the app's URL as the browser asked for it — the prefix and the query included — so the
+/// frame loads the same address the tab did. The frame's request carries `Sec-Fetch-Dest: iframe`
+/// and is answered with the app; this page's carried `document` and is answered with this. That
+/// one header is the whole distinction, which is what makes a deep link into an app still work: a
+/// person who opens `/app/notes/settings` gets a stage whose frame is `/app/notes/settings`.
+pub fn stage(slug: &str, path: &str) -> String {
+    let slug = escape(slug);
+    // A path reaches this from a request line, so it is escaped for the attribute it is written
+    // into. `&` first, or the escapes of the others would be escaped twice.
+    let src = escape(path);
+    format!(
+        "<!doctype html>\
+         <html lang=\"en\">\
+         <head>\
+         <meta charset=\"utf-8\">\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+         <meta name=\"{META_NAME}\" content=\"{slug}\">\
+         <title>{slug}</title>\
+         <link rel=\"stylesheet\" href=\"{STYLE_PATH}\">\
+         </head>\
+         <body class=\"{STAGE_CLASS}\">\
+         <iframe id=\"{FRAME_ID}\" src=\"{src}\" title=\"{slug}\"></iframe>\
+         <script src=\"{SCRIPT_PATH}\" defer></script>\
+         </body>\
+         </html>"
+    )
+}
+
+/// A policy that lets the page it is served with be framed.
+///
+/// An app is shown inside the stage's frame, and a `frame-ancestors` directive is the one way an
+/// app can refuse that: the app's own page would load into an empty frame, with the policy sitting
+/// in a header nobody reads. So the directive is dropped and every other directive is left exactly
+/// as the app wrote it — this removes a refusal, it does not grant anything.
+pub fn framable(value: &str) -> String {
+    let directives = parse(value);
+    if directives
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("frame-ancestors"))
+    {
+        return write(
+            directives
+                .into_iter()
+                .filter(|(name, _)| !name.eq_ignore_ascii_case("frame-ancestors"))
+                .collect(),
+        );
+    }
+    value.to_string()
+}
 
 /// The `<meta>` the injected markup carries.
 ///
@@ -100,17 +186,7 @@ pub fn policy(value: &str) -> String {
     if value.trim().is_empty() {
         return value.to_string();
     }
-    let mut directives: Vec<(String, Vec<String>)> = value
-        .split(';')
-        .filter_map(|part| {
-            let mut words = part.split_whitespace();
-            let name = words.next()?;
-            Some((
-                name.to_string(),
-                words.map(|source| source.to_string()).collect(),
-            ))
-        })
-        .collect();
+    let mut directives = parse(value);
 
     // What an invented directive has to allow as well as `'self'`: everything `default-src` already
     // allowed, because a directive that is absent is governed by it.
@@ -137,7 +213,27 @@ pub fn policy(value: &str) -> String {
         }
     }
 
-    let mut out = String::with_capacity(value.len() + 32);
+    write(directives)
+}
+
+/// A policy as its directives, in the order it stated them.
+fn parse(value: &str) -> Vec<(String, Vec<String>)> {
+    value
+        .split(';')
+        .filter_map(|part| {
+            let mut words = part.split_whitespace();
+            let name = words.next()?;
+            Some((
+                name.to_string(),
+                words.map(|source| source.to_string()).collect(),
+            ))
+        })
+        .collect()
+}
+
+/// The directives as a policy again.
+fn write(directives: Vec<(String, Vec<String>)>) -> String {
+    let mut out = String::with_capacity(160);
     for (index, (name, sources)) in directives.iter().enumerate() {
         if index > 0 {
             // One space after the separator, which is how a person writes a policy and how the
@@ -334,6 +430,84 @@ mod tests {
     fn an_empty_policy_stays_empty() {
         assert_eq!(policy(""), "");
         assert_eq!(policy("   "), "   ");
+    }
+
+    #[test]
+    fn the_stage_is_a_page_of_deepnest_s_own_with_the_app_in_a_frame() {
+        // The defect this shape exists for: a finished rebuild used to reload the tab, and a reload
+        // cannot spare a subtree of the document it replaces — so the conversation went with it.
+        let page = stage("notes", "/app/notes/");
+        assert!(
+            page.contains(r#"<iframe id="deepnest-app-frame""#),
+            "{page}"
+        );
+        assert!(
+            page.contains(r#"<script src="/dialog.js" defer></script>"#),
+            "{page}"
+        );
+        assert!(
+            page.contains(r#"<link rel="stylesheet" href="/dialog.css">"#),
+            "{page}"
+        );
+        // The slug reaches the script the way it always has, through the meta the dialog reads.
+        assert!(
+            page.contains(r#"<meta name="deepnest-app" content="notes">"#),
+            "{page}"
+        );
+        // And the app's own markup is not in this page at all: it is what the frame asks for.
+        assert!(page.contains(r#"class="deepnest-stage""#), "{page}");
+    }
+
+    #[test]
+    fn the_frame_loads_the_address_the_tab_asked_for() {
+        // A deep link, a query and an app's own route all survive because none of them are read
+        // here: the frame is told the address the browser used.
+        let page = stage("notes", "/app/notes/settings?tab=advanced");
+        assert!(
+            page.contains(r#"src="/app/notes/settings?tab=advanced""#),
+            "{page}"
+        );
+    }
+
+    #[test]
+    fn a_slug_or_a_path_reaches_the_stage_escaped() {
+        // Both are written into attributes, and the path comes from a request line.
+        let page = stage("\"><script>alert(1)</script>", "/app/x/\"onload=\"alert(1)");
+        assert!(!page.contains("<script>alert"), "{page}");
+        assert!(!page.contains(r#""onload=""#), "{page}");
+        assert!(page.contains("&quot;"), "{page}");
+    }
+
+    #[test]
+    fn the_stage_is_served_with_its_own_policy_and_it_holds_one_frame() {
+        // An app's policy has no business governing the page the app is shown on: `frame-src 'none'`
+        // there would take away the frame the app is in. So the stage carries deepnest's own, and
+        // what it has to allow is exactly two things.
+        assert!(STAGE_CSP.contains("script-src 'self'"), "{STAGE_CSP}");
+        assert!(STAGE_CSP.contains("style-src 'self'"), "{STAGE_CSP}");
+        assert!(STAGE_CSP.contains("frame-src 'self'"), "{STAGE_CSP}");
+        assert!(STAGE_CSP.contains("connect-src 'self'"), "{STAGE_CSP}");
+        assert!(STAGE_CSP.starts_with("default-src 'none'"), "{STAGE_CSP}");
+    }
+
+    #[test]
+    fn an_app_that_refused_to_be_framed_loses_that_one_directive() {
+        // `frame-ancestors` is the only way an app can refuse the stage, and refusing would load it
+        // into an empty frame with the refusal in a header nobody reads. Everything else it said
+        // stays exactly as it said it.
+        assert_eq!(
+            framable("default-src 'self'; frame-ancestors 'none'"),
+            "default-src 'self'"
+        );
+        assert_eq!(
+            framable("Frame-Ancestors 'none'; img-src 'self'"),
+            "img-src 'self'"
+        );
+        // A policy that said nothing about framing is not rewritten at all: the same string comes
+        // back, so a reader comparing the two sees no change to explain.
+        for value in ["default-src 'self'", "", "  "] {
+            assert_eq!(framable(value), value, "{value}");
+        }
     }
 
     #[test]

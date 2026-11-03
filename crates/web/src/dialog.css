@@ -297,6 +297,36 @@ html.deepnest-dialog-locked {
   overflow: hidden;
 }
 
+/* The stage: deepnest's own page, with the app in a frame and the dialog beside it.
+ *
+ * Both documents load this stylesheet, so every rule here is scoped to the stage's own class or to
+ * the frame's id — a rule that reset a `body`'s margin unconditionally would move every app's page
+ * the moment it was injected into one, which is what the older shape still does.
+ *
+ * The frame fills the viewport and the dialog floats over it: the dialog is `position: fixed` with
+ * the largest z-index a page can name, so the app cannot cover it and does not have to make room for
+ * it. What the app does with its own page is its own business — that is the whole point of the
+ * boundary — so nothing here sizes or positions anything inside it.
+ */
+.deepnest-stage {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+/* Fixed rather than `height: 100%` of a body: a percentage height needs the `html` element sized,
+ * and a rule that sized every `html` would reach the app's page too — the older shape still puts
+ * this stylesheet in one. A fixed box is the viewport and asks nothing of what it is inside.
+ */
+#deepnest-app-frame {
+  position: fixed;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
 /* The measure the sheet gave up. Every child of the panel sits in one centred column, so the
  * transcript, the composer and the head all break at the same width and the conversation reads as
  * one page. `min()` against the column's own box is what keeps a narrow window uncut — the sheet

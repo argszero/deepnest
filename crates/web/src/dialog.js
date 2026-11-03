@@ -1,8 +1,12 @@
-// The floating dialog, injected into every page an app answers.
+// The floating dialog: it stands on deepnest's own page, and the app runs in a frame beside it.
 //
-// The gateway injects it rather than the agent writing it into the app, so that an agent rewriting
-// the app's page wholesale cannot delete it: this ball is the only way back to the control panel
-// from a page the user is looking at.
+// The gateway serves that page rather than the agent writing the dialog into the app, so that an
+// agent rewriting the app's page wholesale cannot delete it: this ball is the only way back to the
+// control panel from a page the user is looking at. And the app is a frame rather than the document
+// this script lives in, so that a finished rebuild — which is most turns, because a turn that
+// writes a file marks the app changed — reloads the app instead of the tab: a reload cannot spare a
+// subtree of the document it replaces, so the conversation has to be outside the document that
+// reloads.
 //
 // What this file deliberately does not do:
 //
@@ -48,6 +52,12 @@
 
   var meta = document.querySelector('meta[name="deepnest-app"]');
   var slug = meta ? meta.getAttribute("content") || "" : "";
+
+  // The frame the app is in, when this page is the stage. `null` is the older shape — a client that
+  // sent no `Sec-Fetch-Dest`, so the gateway could not tell a top-level navigation from anything
+  // else and put this script in the app's own page. Everything below works in both, and the one
+  // thing that cannot is `reloadTheApp`.
+  var stage = document.getElementById("deepnest-app-frame");
 
   var root = document.createElement("div");
   root.id = "deepnest-dialog";
@@ -1046,6 +1056,20 @@
       document.documentElement.classList.add("deepnest-dialog-locked");
     } else {
       document.documentElement.classList.remove("deepnest-dialog-locked");
+    }
+    // And the app, when it is a frame: that document is the one with something to scroll, and the
+    // class above reaches only this one — the app's page does not load this stylesheet, so the
+    // hold is written where the scrolling happens instead of named where it does not.
+    if (stage !== null) {
+      try {
+        var app = stage.contentDocument;
+        if (app && app.documentElement) {
+          app.documentElement.style.overflow = holding ? "hidden" : "";
+        }
+      } catch (error) {
+        // A frame this document cannot reach. Nothing is being held, which is the state a panel
+        // that is not expanded wants anyway.
+      }
     }
   }
 
@@ -2890,6 +2914,25 @@
     watch(routeFor("build"), REBUILD_PATIENCE, Date.now());
   }
 
+  // What a finished build reloads.
+  //
+  // The frame, when there is one: the app has a new binary behind it and this page has nothing to
+  // learn — the conversation is here, and reloading this page is what used to take it away. The
+  // tab, when there is no frame: the older shape, where the app *is* the page.
+  function reloadTheApp() {
+    if (stage !== null) {
+      try {
+        stage.contentWindow.location.reload();
+        return;
+      } catch (error) {
+        // Same origin, so this should not happen. If it does, falling through reloads the tab —
+        // the app on the old build with the conversation gone is still better than a person left
+        // watching a page that will never change.
+      }
+    }
+    location.reload();
+  }
+
   function routeFor(action) {
     return "/api/apps/" + encodeURIComponent(slug) + "/" + action;
   }
@@ -2904,7 +2947,7 @@
         // asks again, and past the patience the line below says so rather than waiting forever.
         if (body) {
           if (body.state === "ok") {
-            location.reload();
+            reloadTheApp();
             return;
           }
           if (body.state === "failed") {
@@ -3469,6 +3512,68 @@
   ball.addEventListener("click", function () {
     show(panel.hidden);
   });
+
+  // The app's frame, as far as this page is concerned.
+  //
+  // A frame is a document boundary, and two things this dialog had while it stood in the app's own
+  // page are on the wrong side of it: the chord that opens the panel, and the click in the app that
+  // closes it. Neither crosses, so the frame is handed a script that forwards exactly those two —
+  // added from here on every load, because the app's page belongs to the agent that writes it and
+  // this is the one thing about it deepnest keeps.
+  //
+  // The title travels the other way. The tab is named after the app, and the app's own document is
+  // the only place that knows what it is called.
+  if (stage !== null) {
+    stage.addEventListener("load", adoptTheFrame);
+    window.addEventListener("message", function (event) {
+      // The frame is same-origin, and this is what says so. A message from anywhere else is not a
+      // frame of ours being helpful.
+      if (event.origin !== window.location.origin) {
+        return;
+      }
+      var said = event.data;
+      if (!said || said.deepnest !== "frame") {
+        return;
+      }
+      if (said.kind === "chord") {
+        show(true);
+      } else if (said.kind === "press" && !panel.hidden) {
+        // Everything in the app is outside a panel drawn over it — the rule this page's own click
+        // handler applies to the page's contents, applied to the document behind them.
+        show(false);
+      }
+    });
+    adoptTheFrame();
+  }
+
+  // What this page keeps of the frame's own document: its name, and the one script that lets two
+  // things cross the boundary.
+  function adoptTheFrame() {
+    var app = null;
+    try {
+      app = stage.contentDocument;
+    } catch (error) {
+      app = null;
+    }
+    if (!app || !app.documentElement) {
+      return;
+    }
+    // The app's document is the only place that knows what the app is called, and the frame has
+    // finished loading by the time this is called: its <title> is read here, once, and written onto
+    // the tab. The stage's own name is a placeholder slug until this line runs.
+    if (app.title) {
+      document.title = app.title;
+    }
+    // Once per document: a reload brings a new one, and a second copy would forward every chord
+    // twice — which for the chord is invisible, and for a click is a panel that closes and opens.
+    if (app.getElementById("deepnest-dialog-frame")) {
+      return;
+    }
+    var forwarder = app.createElement("script");
+    forwarder.id = "deepnest-dialog-frame";
+    forwarder.src = "/dialog-frame.js";
+    (app.head || app.documentElement).appendChild(forwarder);
+  }
 
   // The page a finished rebuild reloads onto has no memory of the turn that started it, so this
   // is where the conversation comes back from: the file, not the tab.
