@@ -254,6 +254,9 @@ pub struct Router {
     /// for the same reason `grants` and `requests` are: it needs no file and no lifecycle, and a
     /// router that could not hold a turn would have to answer every stop with "nothing to stop".
     turns: cancel::Running,
+    /// The credentials an app's own process holds. Always present, for the reason `grants` is: it
+    /// needs no file, and a router that could not hold one would answer every ticket with "no".
+    tickets: crate::ticket::Tickets,
 }
 
 impl Router {
@@ -269,6 +272,7 @@ impl Router {
             grants: grant::Grants::new(),
             requests: escalation::Requests::new(),
             turns: cancel::Running::new(),
+            tickets: crate::ticket::Tickets::new(),
         }
     }
 
@@ -573,6 +577,26 @@ impl Router {
             return false;
         };
         self.grants.admits(slug.as_str(), action, value)
+    }
+
+    /// Does the request carry an app's process ticket, for this app and this route?
+    ///
+    /// Two conditions, and both are needed. The route has to be one a ticket opens
+    /// ([`crate::ticket::opens`]) — a ticket is not a general credential and `start` is not its
+    /// business. And the value has to have been minted for *this* app: `todo`'s ticket opens
+    /// `todo/agent` and nothing of `notes`, which is what makes the credential per app rather than
+    /// per machine.
+    fn ticket_admits(&self, request: &Request, slug: &str, action: &str) -> bool {
+        if !crate::ticket::opens(action) {
+            return false;
+        }
+        let Some(value) = request.header("authorization") else {
+            return false;
+        };
+        let Some((scheme, credential)) = value.split_once(' ') else {
+            return false;
+        };
+        scheme.eq_ignore_ascii_case("bearer") && self.tickets.admits(slug, credential.trim())
     }
 
     /// Put a grant on an app's page, so its dialog can send a message.
@@ -1224,6 +1248,17 @@ impl Router {
                 ))
             }
         };
+        // The three routes an app's own process reaches. They are answered before the lifecycle
+        // check because none of them needs it — a turn is the agent loop's, and a ticket is a
+        // credential rather than a process — and because the check they do need is the ticket,
+        // which must refuse before anything else happens.
+        if matches!(action, Action::Agent | Action::AgentResult | Action::Tools) {
+            if !self.ticket_admits(request, slug.as_str(), action_text) {
+                return Answer::Full(unauthorized());
+            }
+            return self.agent_route(request, &slug, action);
+        }
+
         // Answered before the lifecycle is looked for: a widening request belongs to a turn, not
         // to the app's process, and a page whose app is stopped may still be the page that has to
         // say no to one.
@@ -1329,6 +1364,9 @@ impl Router {
             Action::Escalation => unreachable!("escalation is answered before this match"),
             Action::Cancel => unreachable!("cancel is answered before this match"),
             Action::Sessions => unreachable!("sessions is answered before this match"),
+            Action::Agent | Action::AgentResult | Action::Tools => {
+                unreachable!("the app's own routes are answered before this match")
+            }
             Action::Start => {
                 let log = deepnest_apps::log_path(&lifecycle.home, &slug);
                 Answer::Full(started(&slug, lifecycle.supervisor.start(&slug, &dir, log)))
@@ -1626,6 +1664,104 @@ impl Router {
         }
     }
 
+    /// The three routes an app's own process owns: `agent`, `agent-result` and `tools`.
+    ///
+    /// They share one handler because they share everything that matters: the app directory, the
+    /// model built per request from the config file, and the fact that the caller is the app rather
+    /// than a page. What differs is which of the loop's steps is being asked for, and that is the
+    /// `action` argument.
+    ///
+    /// The ticket was checked before this was called; what is left here is the work.
+    fn agent_route(&self, request: &Request, slug: &Slug, action: Action) -> Answer {
+        let Some(apps_dir) = &self.apps_dir else {
+            return Answer::Full(Response::json(
+                503,
+                error_body("this process cannot find apps: it was started without a directory"),
+            ));
+        };
+        let dir = apps_dir.join(slug.as_str());
+        if !dir.is_dir() {
+            return Answer::Full(Response::json(
+                404,
+                error_body(&format!("no app named `{slug}` in {}", apps_dir.display())),
+            ));
+        }
+        // The home is one level up from `apps/`, which is the layout `deepnest_apps::DIR_NAME`
+        // fixes. Derived rather than stored so there is one value that names the directory rather
+        // than two that have to agree.
+        let home = match apps_dir.parent() {
+            Some(home) => home.to_path_buf(),
+            None => {
+                return Answer::Full(Response::json(
+                    503,
+                    error_body("this process cannot find the deepnest home its apps live under"),
+                ))
+            }
+        };
+
+        if action == Action::Tools {
+            let reply = crate::appagent::tools_route(request, &dir, slug);
+            return Answer::Full(Response::json(reply.status, reply.body.to_string()));
+        }
+
+        // The model, built per request rather than held: `POST /api/config` can change the endpoint
+        // at any moment, and an agent assembled at startup would answer the old one until the next
+        // start. The same reasoning `chat` gives, and the same two refusals before a turn starts.
+        let model = match self.model_for_turn() {
+            Ok(model) => model,
+            Err(answer) => return Answer::Full(answer),
+        };
+        let reply = match action {
+            Action::Agent => {
+                crate::appagent::route(request, Some(model), &home, &dir, slug)
+            }
+            _ => crate::appagent::result_route(request, Some(model), &home, &dir, slug),
+        };
+        Answer::Full(Response::json(reply.status, reply.body.to_string()))
+    }
+
+    /// The model a turn runs on, or the answer that says why there is none.
+    ///
+    /// Shared by both of the app's turn routes so neither can drift from the other about what a
+    /// missing config is: a `503` for a process started without one, a `412` for a first run whose
+    /// fix is the form. The distinction is the user's next step, which is why it is worth keeping in
+    /// one place.
+    fn model_for_turn(&self) -> Result<Arc<dyn deepnest_agent::Model>, Response> {
+        let Some(config_path) = &self.config_path else {
+            return Err(Response::json(
+                503,
+                error_body(
+                    "this process has no config file to read: it was started without one, so \
+                     there is no model endpoint to ask",
+                ),
+            ));
+        };
+        let llm = match crate::config::load(config_path) {
+            Ok(Some(config)) => config.llm,
+            Ok(None) => {
+                return Err(Response::json(
+                    412,
+                    error_body(&format!(
+                        "no model is configured yet — POST {CONFIG_PATH} with base_url, api_key \
+                         and model, then send the message again"
+                    )),
+                ))
+            }
+            Err(error) => {
+                return Err(Response::json(
+                    500,
+                    error_body(&format!("the config could not be read: {error}")),
+                ))
+            }
+        };
+        Ok(Arc::new(Endpoint::new(
+            llm.base_url,
+            llm.api_key,
+            llm.model,
+            Arc::new(HttpTransport::new()),
+        )))
+    }
+
     /// `POST /api/apps/<slug>/chat` — one message, answered by that app's own agent.
     ///
     /// Three refusals come before any turn starts, and each names a different next step: a body
@@ -1849,6 +1985,22 @@ enum Action {
     /// state change in the smallest sense there is: one line in a file naming which conversation
     /// the next turn appends to.
     Sessions,
+    /// One turn of an agent **the app itself asked for**, with a ticket rather than a page.
+    ///
+    /// The difference from [`Self::Chat`] is who is waiting. `chat` is the dialog: a browser sent
+    /// it, so the app is idle and a tool of the app's can be called from inside the turn. This one
+    /// arrives from the app's own code, which is inside a request of its own — so the turn is
+    /// built with the handoff on, and it answers with the calls it could not make
+    /// ([`deepnest_agent::TurnOutcome::Paused`]) instead of calling back into the app that is
+    /// waiting.
+    Agent,
+    /// Continue a turn this app's agent handed back, with the results in the body.
+    AgentResult,
+    /// The tools an agent of this app may call, as MCP declares them.
+    ///
+    /// A `POST` because MCP's transport is: every message is one `POST` to one endpoint, which is
+    /// what makes this a route rather than a document.
+    Tools,
 }
 
 impl Action {
@@ -1865,13 +2017,16 @@ impl Action {
             cancel::ACTION => Some(Self::Cancel),
             history::ACTION => Some(Self::History),
             sessions::ACTION => Some(Self::Sessions),
+            "agent" => Some(Self::Agent),
+            "agent-result" => Some(Self::AgentResult),
+            "tools" => Some(Self::Tools),
             _ => None,
         }
     }
 
     /// The verbs, for a refusal that tells the caller what would have worked.
     const VERBS: &str = "create, build, start, stop, restart, chat, capture, cancel, \
-                         escalation, history or sessions";
+                         escalation, history, sessions, agent, agent-result or tools";
 }
 
 /// The value of one query parameter, percent-decoded.
@@ -3334,7 +3489,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_action_is_not_found_and_the_refusal_lists_the_eleven_that_exist() {
+    fn an_unknown_action_is_not_found_and_the_refusal_lists_the_fourteen_that_exist() {
         let scratch = Scratch::new("life-action");
         scratch.built_app("notes", "Notes");
         let router = supervised(&scratch);
@@ -3344,7 +3499,7 @@ mod tests {
         assert!(
             body(&unknown).contains(
                 "create, build, start, stop, restart, chat, capture, cancel, escalation, \
-                 history or sessions"
+                 history, sessions, agent, agent-result or tools"
             ),
             "{:?}",
             unknown
@@ -3357,7 +3512,7 @@ mod tests {
         assert!(
             body(&bare).contains(
                 "create, build, start, stop, restart, chat, capture, cancel, escalation, \
-                 history or sessions"
+                 history, sessions, agent, agent-result or tools"
             ),
             "{:?}",
             bare

@@ -600,6 +600,7 @@ pub fn watched(
 
     let rounds = match &outcome {
         TurnOutcome::Answered { rounds, .. } | TurnOutcome::RoundLimit { rounds, .. } => *rounds,
+        TurnOutcome::Paused { rounds, .. } => *rounds,
         TurnOutcome::Cancelled { .. } => 0,
     };
     let text = text_of(&outcome, outcome.text().to_string());
@@ -611,6 +612,10 @@ pub fn watched(
         TurnOutcome::Answered { .. } => "answered",
         TurnOutcome::Cancelled { .. } => "cancelled",
         TurnOutcome::RoundLimit { .. } => "round_limit",
+        // The dialog's own route never hands back: nobody is blocking for it, so a remote tool is
+        // called where it stands. A `Paused` here would mean the turn was built with the handoff
+        // on, which is `POST /api/apps/<slug>/agent`'s job and not this one's.
+        TurnOutcome::Paused { .. } => "paused",
     };
     // What the turn cost, in the provider's own counts summed over its rounds. Serialised from the
     // same `Usage` the log writes, so the number a page shows and the number `llm.jsonl` records
@@ -667,6 +672,9 @@ fn status_for(error: &AgentError) -> u16 {
         AgentError::Refused { .. } => 422,
         AgentError::Model { .. } => 502,
         AgentError::Session { .. } => 500,
+        // Nothing was waiting to be continued. The request was well formed and the answer is a
+        // conflict with the conversation's state, not a fault of this server.
+        AgentError::Paused { .. } => 409,
     }
 }
 

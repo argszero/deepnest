@@ -36,6 +36,7 @@
 
 pub mod app;
 pub mod args;
+pub mod declared;
 pub mod files;
 pub mod mcp;
 pub mod path;
@@ -52,7 +53,8 @@ use deepnest_llm::ToolDefinition;
 use serde_json::Value;
 
 pub use app::{AppAction, AppControl, AppRequest, AppTool, LogKind};
-pub use mcp::{Declaration, McpServer, McpTool, McpTransport, Reply};
+pub use declared::{DeclaredTool, Declaration};
+pub use mcp::{McpServer, McpTool, McpTransport, Reply};
 pub use args::{boolean_argument, count_argument, optional_string_argument, string_argument};
 pub use path::{resolve_target, special_file_kind, SpecialFile};
 pub use shell::{BashTool, ShellOutcome, ShellResult, Spawner, StdSpawner};

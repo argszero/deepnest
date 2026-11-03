@@ -369,14 +369,15 @@ impl Tool for McpTool {
         self.server.call(&self.declaration.name, args)
     }
 
-    /// Not here: this call is the app's work, and the turn hands it back rather than making it.
+    /// Here, and this is what separates this module from `crate::declared`.
     ///
-    /// The reason is not this module's but the turn's — see `crates/agent`'s `TurnOutcome::Paused`.
-    /// In one sentence: the app that declares these tools is also the app that made the request the
-    /// turn is answering, and a program answering one request at a time cannot answer a callback
-    /// from inside it. Handing the batch back ends the request instead of nesting inside it.
+    /// A third-party MCP server is a program with no part in the request being answered — nothing
+    /// is waiting on it — so a call to it is work this turn can do. That is the opposite of an
+    /// app's own tool ([`crate::declared::DeclaredTool`]), where the server **is** the app that
+    /// made the request and calling back into it is the deadlock. Which of the two a tool is, is a
+    /// fact about who is on the other end, and only the caller knows it.
     fn runs_here(&self) -> bool {
-        false
+        true
     }
 }
 

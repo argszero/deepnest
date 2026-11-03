@@ -32,6 +32,55 @@ pub const CURRENT_TEMPLATE: u32 = 1;
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub app: AppInfo,
+    /// The agents this app runs, as the app declares them.
+    ///
+    /// Declared here rather than created over the API because a declaration is a fact about the
+    /// app — what work it needs doing, with which tools — and a fact about the app belongs in the
+    /// directory that is the app. An app that creates its agents at run time would have two
+    /// sources of truth for them, and the one on disk would be the stale one.
+    #[serde(
+        default,
+        rename = "agent",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub agents: Vec<AgentSpec>,
+}
+
+/// One `[[agent]]` table: an agent this app wants, and what it needs to do the work.
+///
+/// Everything here is a **statement about the work**, not a permission. What an agent may touch is
+/// decided by the fence when the turn runs: its working directory becomes a writable root, and the
+/// app's own directory is one already. A `workdir` outside the app is allowed and is exactly as
+/// wide as the path says — the person who wrote the manifest is the person whose machine it is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSpec {
+    /// What this agent is called, and what the app names it by when it asks for a turn.
+    ///
+    /// Checked to be a slug: it appears in a URL and in a directory name, and a name with a `/` in
+    /// it would be two of each.
+    pub name: String,
+    /// Where it works, relative to the app's directory or absolute. Absent is the app's directory.
+    pub workdir: Option<String>,
+    /// What it is for, in the app's own words, appended to the agent prompt.
+    ///
+    /// Not a replacement for the prompt: everything deepnest tells every agent — the fence, the
+    /// tools, the memory, the skill rules — stays, and this is added after it. An app that replaced
+    /// the prompt would be an app that could turn the fence off by saying so.
+    pub prompt: Option<String>,
+    /// Extra skill directories, relative to the app's directory or absolute.
+    ///
+    /// The app's own `skills/` and the user's are loaded anyway; these are for a skill that lives
+    /// somewhere else on this machine.
+    #[serde(default)]
+    pub skills: Vec<String>,
+    /// Where this app serves its own tools, as a path on the app's own port.
+    ///
+    /// `"/mcp"` for the usual case. Absent means the app declares no tools, and the agent has the
+    /// six leaves and neither seam — which is a working agent, just one without hands into the app.
+    /// The port is not written here because it is allocated per start and is different every run;
+    /// this is a path, and deepnest joins it to the port it knows.
+    pub tools: Option<String>,
 }
 
 /// The `[app]` table.
@@ -61,7 +110,13 @@ impl Manifest {
                 template: CURRENT_TEMPLATE,
                 description: None,
             },
+            agents: Vec::new(),
         }
+    }
+
+    /// One agent by name.
+    pub fn agent(&self, name: &str) -> Option<&AgentSpec> {
+        self.agents.iter().find(|agent| agent.name == name)
     }
 
     /// The name to show, trimmed.
@@ -173,6 +228,33 @@ impl Manifest {
                 "app.name",
                 "is empty — name the app so the panel can show something other than its slug",
             ));
+        }
+        for agent in &self.agents {
+            if agent.name.trim().is_empty() {
+                return Err(unusable(
+                    "agent.name",
+                    "is empty — name the agent so the app can ask for it",
+                ));
+            }
+            if !agent
+                .name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            {
+                return Err(unusable(
+                    "agent.name",
+                    "must be lowercase letters, digits and hyphens — it is a URL segment and a                      directory name",
+                ));
+            }
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for agent in &self.agents {
+            if !seen.insert(agent.name.as_str()) {
+                return Err(unusable(
+                    "agent.name",
+                    "is used by two agents — an app asking for that name would get one of them,                      and which one is the order they happen to be in",
+                ));
+            }
         }
         if self.app.template == 0 {
             // Zero is not a version that was ever issued; a manifest claiming it was written by
@@ -299,6 +381,67 @@ nmae = "Notes"
         let message = error.to_string();
         assert!(matches!(error, ManifestError::Unparseable { .. }));
         assert!(message.contains(&path.display().to_string()), "{message}");
+    }
+
+    #[test]
+    fn agents_are_declared_in_the_manifest_and_read_back_by_name() {
+        let text = r#"
+[app]
+name = "Notes"
+
+[[agent]]
+name = "triage"
+prompt = "Decide whether a message needs handling."
+tools = "/mcp"
+
+[[agent]]
+name = "writer"
+workdir = "/tmp/drafts"
+skills = ["../shared-skills"]
+"#;
+        let manifest: Manifest = toml::from_str(text).unwrap();
+        assert_eq!(manifest.agents.len(), 2);
+        let triage = manifest.agent("triage").unwrap();
+        assert_eq!(triage.tools.as_deref(), Some("/mcp"));
+        assert_eq!(
+            triage.prompt.as_deref(),
+            Some("Decide whether a message needs handling.")
+        );
+        // Absent is a real answer: an agent with no tools declared has the leaves and no hands
+        // into the app, which is a working agent.
+        let writer = manifest.agent("writer").unwrap();
+        assert!(writer.tools.is_none());
+        assert_eq!(writer.workdir.as_deref(), Some("/tmp/drafts"));
+        assert_eq!(writer.skills, vec!["../shared-skills".to_string()]);
+        manifest.check(Path::new("/tmp/x")).unwrap();
+    }
+
+    #[test]
+    fn an_app_with_no_agents_says_so_rather_than_inventing_one() {
+        let manifest: Manifest = toml::from_str("[app]\nname = \"Notes\"\n").unwrap();
+        assert!(manifest.agents.is_empty());
+        assert!(manifest.agent("anything").is_none());
+    }
+
+    #[test]
+    fn an_agent_name_that_cannot_be_a_url_segment_is_refused() {
+        let path = Path::new("/tmp/x");
+        let mut manifest = Manifest::new("Notes");
+        let one = |name: &str| AgentSpec {
+            name: name.to_string(),
+            workdir: None,
+            prompt: None,
+            skills: Vec::new(),
+            tools: None,
+        };
+        manifest.agents = vec![one("Triage Bot")];
+        let error = manifest.check(path).unwrap_err();
+        assert!(error.to_string().contains("agent.name"), "{error}");
+
+        // Two agents with one name answer the same request with two different answers.
+        manifest.agents = vec![one("triage"), one("triage")];
+        let error = manifest.check(path).unwrap_err();
+        assert!(error.to_string().contains("two agents"), "{error}");
     }
 
     #[test]
