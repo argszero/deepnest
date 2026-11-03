@@ -320,7 +320,7 @@ impl BashTool {
 }
 
 impl Tool for BashTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "bash"
     }
 

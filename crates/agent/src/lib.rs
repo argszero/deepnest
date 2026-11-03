@@ -46,8 +46,10 @@ pub use llmlog::{LlmLog, Request, Response};
 pub use memory::{MemoryEntry, MemoryStore};
 pub use prompt::PromptContext;
 pub use runner::LoopRunner;
-pub use session::{Record, Session};
-pub use turn::{Agent, AgentError, Cancellation, Limits, Model, TurnOutcome};
+pub use session::{Owed, Record, Session};
+pub use turn::{
+    Agent, AgentError, CallResult, Cancellation, Limits, Model, PendingCall, TurnOutcome,
+};
 
 /// Where one app's agent keeps its state.
 ///

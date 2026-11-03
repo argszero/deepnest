@@ -171,6 +171,10 @@ pub struct ServerOptions {
     /// answering `503`: a process with no config path has nowhere to save one, and answering "saved"
     /// to a write that went nowhere is the one lie this server must not tell.
     pub config_path: Option<PathBuf>,
+    /// The app tickets this process honours. Supplied rather than built here because the same set
+    /// has to reach the supervisor that mints them: a ticket minted at a start must be the one the
+    /// next request is checked against, and two sets would be two answers to one question.
+    pub tickets: Option<crate::ticket::Tickets>,
     /// How often the keepalive re-asserts the token file.
     pub keepalive: Duration,
     pub bind: BindAttempts,
@@ -186,6 +190,7 @@ impl Default for ServerOptions {
             apps_dir: None,
             lifecycle: None,
             config_path: None,
+            tickets: None,
             keepalive: Duration::from_secs(30),
             bind: BindAttempts::default(),
         }
@@ -352,6 +357,9 @@ pub fn start(options: ServerOptions) -> Result<Server, StartError> {
     })?;
 
     let mut router = Router::new(addr.port(), options.model.clone(), options.token.clone());
+    if let Some(tickets) = options.tickets.clone() {
+        router = router.with_tickets(tickets);
+    }
     if let Some(path) = options.config_path.clone() {
         router = router.with_config_path(path);
     }

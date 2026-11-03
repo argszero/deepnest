@@ -143,17 +143,35 @@ enum Layout {
 /// skills directory, and refusing to start before any exist would make the first thing a new user
 /// sees a failure.
 pub fn load(home: &Path, app: Option<&Path>) -> Loaded {
+    load_many(home, app, &[])
+}
+
+/// The same, plus directories a caller names.
+///
+/// `extra` is for an agent whose skills do not live where the two conventional roots are — an app
+/// that declares `skills = ["../shared-skills"]` for the half it shares with another app. There is
+/// no local/remote distinction here: a skill is a file on this machine, and a caller either knows
+/// its directory or does not.
+///
+/// Precedence is the order of the roots, first wins: the user's skills, then the app's, then the
+/// caller's in the order given. That order is stated here because it is the whole of what decides
+/// which of two skills with one name an agent sees, and it should be readable in one place rather
+/// than inferred from a `BTreeMap`.
+pub fn load_many(home: &Path, app: Option<&Path>, extra: &[PathBuf]) -> Loaded {
     let mut loaded = Loaded::default();
     let mut by_name: BTreeMap<String, Skill> = BTreeMap::new();
 
-    for (root, source) in [
-        (user_root(home), Source::User),
-        match app {
-            Some(app) => (app_root(app), Source::App),
-            // A replaced placeholder rather than an `if`: the loop then has no second shape.
-            None => (PathBuf::new(), Source::App),
-        },
-    ] {
+    let mut roots: Vec<(PathBuf, Source)> = vec![(user_root(home), Source::User)];
+    // A replaced placeholder rather than an `if`: the loop then has no second shape.
+    roots.push(match app {
+        Some(app) => (app_root(app), Source::App),
+        None => (PathBuf::new(), Source::App),
+    });
+    for root in extra {
+        roots.push((root.clone(), Source::App));
+    }
+
+    for (root, source) in roots {
         if root.as_os_str().is_empty() {
             continue;
         }

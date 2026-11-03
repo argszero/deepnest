@@ -59,7 +59,7 @@ impl InstallSkillTool {
 }
 
 impl Tool for InstallSkillTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "install_skill"
     }
 

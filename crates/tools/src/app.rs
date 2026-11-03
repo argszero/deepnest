@@ -163,7 +163,7 @@ impl AppTool {
 }
 
 impl Tool for AppTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         NAME
     }
 

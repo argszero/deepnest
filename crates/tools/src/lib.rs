@@ -36,7 +36,9 @@
 
 pub mod app;
 pub mod args;
+pub mod declared;
 pub mod files;
+pub mod mcp;
 pub mod path;
 pub mod registry;
 pub mod search;
@@ -52,6 +54,8 @@ use serde_json::Value;
 
 pub use app::{AppAction, AppControl, AppRequest, AppTool, LogKind};
 pub use args::{boolean_argument, count_argument, optional_string_argument, string_argument};
+pub use declared::{Declaration, DeclaredTool};
+pub use mcp::{McpServer, McpTool, McpTransport, Reply};
 pub use path::{resolve_target, special_file_kind, SpecialFile};
 pub use shell::{BashTool, ShellOutcome, ShellResult, Spawner, StdSpawner};
 pub use skill::{InstallSkillTool, SkillInstallRequest, SkillInstaller};
@@ -215,13 +219,28 @@ impl ToolContext {
 /// its own, because a binary that ships one per tool ships the wrong number of them.
 pub trait Tool: Send + Sync {
     /// The name the model calls.
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &str;
 
     /// The definition the model is offered, parameters included.
     fn definition(&self) -> ToolDefinition;
 
     /// Run one call.
     fn call(&self, args: &Value, ctx: &ToolContext) -> ToolResult;
+
+    /// Whether this tool runs in this process.
+    ///
+    /// `true` for every hand this crate writes: `bash`, `read`, `write` and the rest are code in
+    /// this binary, so a call to one is work the turn does and nothing outside it needs to know.
+    ///
+    /// `false` is for a tool whose work belongs to somebody else — an app's own capability, which
+    /// is a program in another process with its own data behind it. Such a call is **not** run
+    /// here even though [`Tool::call`] could reach it: the turn collector hands the whole batch of
+    /// them back to whoever owns them, and the reason is in `crates/agent`'s pause. A tool that
+    /// says `false` and is still called through [`Tool::call`] answers normally; the flag decides
+    /// who runs it, not what it does.
+    fn runs_here(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

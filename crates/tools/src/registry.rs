@@ -281,7 +281,7 @@ mod tests {
         // definition with no `required` list at all must still gain one.
         struct Bare;
         impl Tool for Bare {
-            fn name(&self) -> &'static str {
+            fn name(&self) -> &str {
                 "bare"
             }
             fn definition(&self) -> ToolDefinition {

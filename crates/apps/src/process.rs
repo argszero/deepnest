@@ -109,6 +109,14 @@ pub struct Spec {
     pub cwd: PathBuf,
     /// The port this start allocated, handed over in [`PORT_ENV`].
     pub port: Port,
+    /// Everything else this start tells the app in its environment.
+    ///
+    /// `Vec` rather than a map so the order is the caller's and a test can compare two specs. What
+    /// goes here is decided by whoever starts the app — this crate knows only that a start may have
+    /// something to say beyond the port. The process ticket is the reason it exists: a credential
+    /// belongs to one start of one app, and an environment variable is the only channel this spawn
+    /// has that is not a command line reading `ps` can see.
+    pub env: Vec<(String, String)>,
     /// Where stdout and stderr go: the app's log, appended to.
     pub log: PathBuf,
 }
@@ -121,6 +129,7 @@ impl Spec {
             args: Vec::new(),
             cwd: dir.to_path_buf(),
             port,
+            env: Vec::new(),
             log,
         }
     }
@@ -208,6 +217,7 @@ impl Spawner for StdSpawner {
             .args(&spec.args)
             .current_dir(&spec.cwd)
             .env(PORT_ENV, spec.port.number().to_string())
+            .envs(spec.env.iter().map(|(name, value)| (name, value)))
             .stdin(Stdio::null())
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(errors));
@@ -383,8 +393,22 @@ pub struct Supervisor {
     spawner: Box<dyn Spawner>,
     prober: Box<dyn Prober>,
     readiness: Duration,
+    /// What every start tells the app besides its port, when the caller supplied anything to say.
+    ///
+    /// A closure rather than a value, and called once per start, because what it returns is a
+    /// credential for **one run**: a ticket minted for one process must not be handed to the next,
+    /// and a start that failed must not leave a usable one behind. `None` is the default and a real
+    /// answer — a supervisor with nothing to say starts an app exactly as it always did.
+    env: Option<EnvSource>,
     apps: Mutex<BTreeMap<String, Managed>>,
 }
+
+/// How a start learns what to put in the app's environment.
+///
+/// The supervisor does not decide this: a process ticket is minted by whoever owns the credential
+/// store, and this crate must not know that a credential store exists. It only knows that a start
+/// may have something to say.
+type EnvSource = Box<dyn Fn(&Slug) -> Vec<(String, String)> + Send + Sync>;
 
 impl Default for Supervisor {
     fn default() -> Self {
@@ -404,7 +428,24 @@ impl Supervisor {
             spawner,
             prober,
             readiness: DEFAULT_READINESS,
+            env: None,
             apps: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// The same supervisor, with something to tell each app it starts.
+    ///
+    /// Called once per start, so what it returns can be a value that must not outlive the run.
+    pub fn with_env(mut self, source: EnvSource) -> Self {
+        self.env = Some(source);
+        self
+    }
+
+    /// What this start puts in the app's environment, besides [`PORT_ENV`].
+    fn environment(&self, slug: &Slug) -> Vec<(String, String)> {
+        match &self.env {
+            Some(source) => source(slug),
+            None => Vec::new(),
         }
     }
 
@@ -452,6 +493,10 @@ impl Supervisor {
             args: Vec::new(),
             cwd: dir.to_path_buf(),
             port,
+            // A start may have something to tell the app besides its port. What that is belongs to
+            // whoever asked for the start, so it arrives in the spec rather than being invented
+            // here.
+            env: self.environment(slug),
             log: log.clone(),
         };
 
@@ -1018,6 +1063,7 @@ mod tests {
             args: vec!["/c".to_string(), "echo started 1>&2".to_string()],
             cwd: scratch.base.clone(),
             port,
+            env: Vec::new(),
             log: log.clone(),
         };
 

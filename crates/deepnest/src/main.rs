@@ -202,7 +202,21 @@ fn serve(opening: Opening) -> Result<(), Failure> {
     // The supervisor owns every app process this run starts. Built before the port is taken so
     // that a refused second instance has started nothing, and shared rather than moved because
     // the HTTP worker answers state questions from another thread.
-    let supervisor = Arc::new(deepnest_apps::Supervisor::new());
+    // The tickets this process mints, one set shared by the supervisor that issues them and the
+    // router that checks them. Created before the supervisor so a start has somewhere to mint into.
+    let tickets = deepnest::ticket::Tickets::new();
+    // Where an app is told deepnest lives. Filled in once the port is actually taken, because
+    // `$DEEPNEST_PORT=0` means the operating system picked it and only the listener knows which —
+    // and it is read per start, so an app started after this point always sees the real one.
+    let address = Arc::new(std::sync::Mutex::new(String::new()));
+    let supervisor = Arc::new(deepnest_apps::Supervisor::new().with_env({
+        let tickets = tickets.clone();
+        let address = Arc::clone(&address);
+        Box::new(move |slug: &deepnest_apps::Slug| {
+            let base = address.lock().map(|base| base.clone()).unwrap_or_default();
+            deepnest::ticket::environment(tickets.mint(slug.as_str()), &base, slug.as_str())
+        })
+    }));
 
     let options = ServerOptions {
         port,
@@ -212,6 +226,7 @@ fn serve(opening: Opening) -> Result<(), Failure> {
         apps_dir: Some(apps_dir.clone()),
         lifecycle: Some(Lifecycle::new(Arc::clone(&supervisor), home.clone())),
         config_path: Some(config_path.clone()),
+        tickets: Some(tickets),
         ..Default::default()
     };
 
@@ -229,6 +244,12 @@ fn serve(opening: Opening) -> Result<(), Failure> {
         }
         Err(error) => return Err(Failure::new(1, error.to_string())),
     };
+
+    // Before any app can be started: a request is what starts one, and requests arrive from the
+    // listener that just came up.
+    if let Ok(mut base) = address.lock() {
+        *base = format!("http://127.0.0.1:{}", running.port());
+    }
 
     println!(
         "deepnest {} listening on {}",

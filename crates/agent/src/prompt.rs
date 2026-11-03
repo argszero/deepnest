@@ -54,6 +54,14 @@ pub struct PromptContext {
     /// is rendered from this list, so the prompt cannot name a tool the dispatcher does not have,
     /// and a tool that is added or removed there is a line that appears or disappears here.
     pub tools: Vec<String>,
+    /// Whether this turn is the one that **writes** the app, and so may give it agents of its own.
+    ///
+    /// True for the dialog's agent and false for an agent the app declared: the section it renders
+    /// teaches how an app calls *its* agent, which is a fact about the code being written and
+    /// nonsense to the agent already being called. A flag rather than always-on for the same reason
+    /// the tool list is: a prompt that describes a capability the turn does not have is a model
+    /// that will try to use it.
+    pub app_agents: bool,
 }
 
 impl PromptContext {
@@ -73,6 +81,7 @@ impl PromptContext {
             skills: Vec::new(),
             app_url: String::new(),
             tools: Vec::new(),
+            app_agents: false,
         }
     }
 
@@ -107,6 +116,12 @@ impl PromptContext {
     /// Takers pass what the registry built, not a list of their own; see the field's own note.
     pub fn with_tools(mut self, tools: Vec<String>) -> Self {
         self.tools = tools;
+        self
+    }
+
+    /// This turn writes the app, so it may give the app agents of its own. See the field's note.
+    pub fn with_app_agents(mut self, app_agents: bool) -> Self {
+        self.app_agents = app_agents;
         self
     }
 }
@@ -301,6 +316,51 @@ first and follow it.\n\n",
         }
     }
 
+    if ctx.app_agents {
+        out.push_str(
+            "\n## Your app can have agents of its own\n\n\
+An app is not only written by an agent — it can use one. A Feishu bridge has to decide which \
+messages need handling; a todo app that has been handed a message has to work out what it is \
+actually asking for. Those are agent turns, and they belong to the app, not to whoever is typing \
+in the panel beside it.\n\n\
+**Declare them in the app's `deepnest.toml`.** One table per agent, in the app's own words:\n\n\
+```toml\n[[agent]]\nname = \"triage\"                      # what the app calls it by; a slug\n\
+prompt = \"Decide whether a message needs handling.\"   # added after deepnest's own rules\n\
+workdir = \".\"                        # optional; where it works, and what it may write\n\
+tools = \"/mcp\"                       # optional; where this app serves its own tools\n```\n\n\
+**The app's code calls it over HTTP, with the ticket deepnest started it with.** Two variables are \
+in the app's environment and nowhere else: `DEEPNEST_URL` is deepnest itself \
+(`http://127.0.0.1:4270` by default), and `DEEPNEST_APP_TICKET` is that app's own credential. The \
+ticket opens three routes of that app and nothing else — it cannot start, stop or list apps, and \
+another app's ticket opens none of these:\n\n\
+- `POST $DEEPNEST_URL/api/apps/<slug>/agent` — one turn.\n\
+- `POST $DEEPNEST_URL/api/apps/<slug>/agent-result` — the answers to a handed-back batch.\n\
+- `POST $DEEPNEST_URL/api/apps/<slug>/tools` — where an MCP client discovers this app's tools.\n\n\
+Every request carries `Authorization: Bearer $DEEPNEST_APP_TICKET`. The turn's body is \
+`{\"agent\":\"triage\",\"message\":\"…\",\"session\":\"optional-key\",\"tools\":[…]}` — `session` \
+keeps conversations apart (absent is the agent's one conversation), and `tools` is this app's own \
+tool declarations in MCP's `tools/list` shape, which is how the model learns what the app can do.\n\n\
+**Two answers, both `200`, and the second is the one to design for:**\n\n\
+```json\n{\"outcome\":\"answered\",\"text\":\"…\"}\n\
+{\"outcome\":\"paused\",\"turn\":\"…\",\"pending\":[{\"call_id\":\"…\",\"name\":\"…\",\"arguments\":\"{…}\"}]}\n\
+```\n\n\
+`paused` means the model asked for work only the app can do. The app runs each call **in its own \
+process**, then posts every answer to `agent-result` — \
+`{\"agent\":\"triage\",\"results\":[{\"call_id\":\"…\",\"content\":\"…\",\"is_error\":false}]}` — and \
+that request continues the same turn. Answer them all: a partial batch is refused, because a \
+transcript with some answers and not others is one the next request cannot be built from.\n\n\
+**This is why the app never has to be concurrent.** The turn does not call back into the app from \
+inside the request the app is still answering; the calls come back to the app as data, and the \
+app's own server answers one request at a time as it always did. Keep it that way: never call \
+`agent` from inside a tool handler, and never hold a turn open waiting for another request. One \
+round is one handoff, so put independent calls in the same round — each pause is a round trip of \
+its own, in wall time and in tokens.\n\n\
+The template's `src/deepnest.rs` is a working example of the whole loop, including the HTTP client \
+the app needs to talk to deepnest. Read it before writing your own.\n\
+",
+        );
+    }
+
     out.push_str(
         "\n\n## When to ask, and when to act\n\n\
 Act when the request is clear enough that a competent colleague would not need to ask. Ask when \
@@ -466,6 +526,30 @@ mod tests {
 
         let with_edit = system_prompt(&ctx().with_tools(tool_names(&["bash", "edit"])));
         assert!(with_edit.contains("old_string"), "{with_edit}");
+    }
+
+    #[test]
+    fn only_the_turn_that_writes_the_app_is_told_how_an_app_calls_an_agent() {
+        // The section teaches how an app calls *its* agent. It is a fact about the code being
+        // written and nonsense to the agent already being called — and a prompt that describes a
+        // capability the turn does not have is a model that will try to use it.
+        let writes = ctx().with_app_agents(true);
+        let prompt = system_prompt(&writes);
+        assert!(
+            prompt.contains("Your app can have agents of its own"),
+            "{prompt}"
+        );
+        // The three facts a working call needs, all of them the ones an app gets wrong.
+        for fact in [
+            "[[agent]]",
+            "DEEPNEST_URL",
+            "DEEPNEST_APP_TICKET",
+            "agent-result",
+            "paused",
+        ] {
+            assert!(prompt.contains(fact), "the section never says `{fact}`");
+        }
+        assert!(!system_prompt(&ctx()).contains("Your app can have agents of its own"));
     }
 
     #[test]
