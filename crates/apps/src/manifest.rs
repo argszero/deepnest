@@ -38,11 +38,7 @@ pub struct Manifest {
     /// app — what work it needs doing, with which tools — and a fact about the app belongs in the
     /// directory that is the app. An app that creates its agents at run time would have two
     /// sources of truth for them, and the one on disk would be the stale one.
-    #[serde(
-        default,
-        rename = "agent",
-        skip_serializing_if = "Vec::is_empty"
-    )]
+    #[serde(default, rename = "agent", skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<AgentSpec>,
 }
 

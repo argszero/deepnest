@@ -554,11 +554,9 @@ impl Agent {
         // abandoned handoff left in the file would make every later turn of this conversation fail
         // with a complaint about a batch nobody remembers. The calls did not run, and the
         // transcript says so rather than the conversation becoming unusable.
-        if let Some(owed) = self
-            .session
-            .owed()
-            .map_err(|err| AgentError::Session { reason: err.to_string() })?
-        {
+        if let Some(owed) = self.session.owed().map_err(|err| AgentError::Session {
+            reason: err.to_string(),
+        })? {
             for call in &owed.calls {
                 self.append_result(
                     &Message::tool(
@@ -609,7 +607,9 @@ impl Agent {
         let owed = self
             .session
             .owed()
-            .map_err(|err| AgentError::Session { reason: err.to_string() })?
+            .map_err(|err| AgentError::Session {
+                reason: err.to_string(),
+            })?
             .ok_or_else(|| AgentError::Paused {
                 reason: "no tool call is waiting for a result: the model's last request was \
                          answered, or it asked for nothing. Send the message again rather than a \
@@ -2874,7 +2874,10 @@ mod tests {
         let (todos, ran) = Remote::new("todos_list");
         let (done, _) = Remote::new("todos_done");
         let model = ScriptedModel::new(vec![Ok(asks(vec![
-            call("todos_list", r#"{"intent":"see what is open","state":"open"}"#),
+            call(
+                "todos_list",
+                r#"{"intent":"see what is open","state":"open"}"#,
+            ),
             call("todos_done", r#"{"id":3}"#),
         ]))]);
         let agent = scratch
@@ -2884,7 +2887,9 @@ mod tests {
             )
             .with_handoff(true);
 
-        let outcome = agent.run_turn("what is left?", &Cancellation::new()).unwrap();
+        let outcome = agent
+            .run_turn("what is left?", &Cancellation::new())
+            .unwrap();
         let TurnOutcome::Paused {
             pending, rounds, ..
         } = &outcome
@@ -2943,7 +2948,9 @@ mod tests {
         tools.push(Box::new(remote) as Box<dyn Tool>);
         let agent = scratch.agent_with_tools(model, tools).with_handoff(true);
 
-        let outcome = agent.run_turn("read and list", &Cancellation::new()).unwrap();
+        let outcome = agent
+            .run_turn("read and list", &Cancellation::new())
+            .unwrap();
         assert!(matches!(outcome, TurnOutcome::Paused { .. }), "{outcome:?}");
         assert_eq!(ran.load(Ordering::SeqCst), 0);
 
@@ -2952,7 +2959,11 @@ mod tests {
             .iter()
             .find(|message| message.tool_call_id.as_deref() == Some("call_read"))
             .expect("the local call was answered before the handoff");
-        assert!(local.content.as_deref().unwrap().contains("the local answer"));
+        assert!(local
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("the local answer"));
         assert!(
             !messages
                 .iter()
@@ -3000,7 +3011,11 @@ mod tests {
             .iter()
             .rposition(|message| message.tool_call_id.as_deref() == Some("call_todos_list"))
             .expect("the result is in the second request");
-        assert!(second[answer_row].content.as_deref().unwrap().contains("3 open"));
+        assert!(second[answer_row]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("3 open"));
         assert_eq!(second[answer_row].role, "tool");
     }
 
@@ -3017,7 +3032,10 @@ mod tests {
             call("todos_done", "{}"),
         ]))]);
         let agent = scratch
-            .agent_with_tools(model, vec![Box::new(todos) as Box<dyn Tool>, Box::new(done)])
+            .agent_with_tools(
+                model,
+                vec![Box::new(todos) as Box<dyn Tool>, Box::new(done)],
+            )
             .with_handoff(true);
         agent.run_turn("do both", &Cancellation::new()).unwrap();
         let before = agent.session().records().unwrap().len();
@@ -3053,7 +3071,9 @@ mod tests {
         let agent = scratch
             .agent_with_tools(model, vec![Box::new(todos) as Box<dyn Tool>])
             .with_handoff(true);
-        agent.run_turn("what is open?", &Cancellation::new()).unwrap();
+        agent
+            .run_turn("what is open?", &Cancellation::new())
+            .unwrap();
 
         // A different handle on the same file, as the next request would open it.
         let reopened = Session::open(scratch.base.join("history.jsonl")).unwrap();
@@ -3089,7 +3109,9 @@ mod tests {
         let agent = scratch
             .agent_with_tools(model.clone(), vec![Box::new(todos) as Box<dyn Tool>])
             .with_handoff(true);
-        agent.run_turn("what is open?", &Cancellation::new()).unwrap();
+        agent
+            .run_turn("what is open?", &Cancellation::new())
+            .unwrap();
 
         agent.run_turn("never mind", &Cancellation::new()).unwrap();
 
@@ -3127,10 +3149,6 @@ mod tests {
             .iter()
             .find(|message| message.tool_call_id.as_deref() == Some("call_todos_list"))
             .expect("the malformed call was answered here");
-        assert!(row
-            .content
-            .as_deref()
-            .unwrap()
-            .contains("not valid JSON"));
+        assert!(row.content.as_deref().unwrap().contains("not valid JSON"));
     }
 }

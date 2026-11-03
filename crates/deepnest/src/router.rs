@@ -317,6 +317,15 @@ impl Router {
         self
     }
 
+    /// Check app tickets against `tickets` rather than an empty set.
+    ///
+    /// The same set the supervisor mints into: a credit minted when an app started has to be the
+    /// one the next request is checked against, and two sets would be two answers to one question.
+    pub fn with_tickets(mut self, tickets: crate::ticket::Tickets) -> Self {
+        self.tickets = tickets;
+        self
+    }
+
     /// Build apps with `builder` instead of the real toolchain runner.
     ///
     /// Separate from [`Router::with_lifecycle`] because it is only ever the tests that want it: the
@@ -478,10 +487,14 @@ impl Router {
                 Answer::Full(self.skill_refresh(request))
             }
             other if other.starts_with("/api/apps/") => {
-                // Two ways in, and only one of them is a general credential: the control token
-                // opens every route, and an app page's grant opens exactly one. Anything that is
-                // not that one route stays behind the token.
-                if !self.authorized(request) && !self.grant_admits(request) {
+                // Three ways in, and only one of them is a general credential. The control token
+                // opens every route; an app page's grant opens exactly one; an app's own process
+                // ticket opens the three of the agent loop and nothing that manages the machine.
+                // Anything else stays behind the token.
+                if !self.authorized(request)
+                    && !self.grant_admits(request)
+                    && !self.ticket_on_path(request)
+                {
                     return Answer::Full(unauthorized());
                 }
                 self.app_action(request)
@@ -577,6 +590,24 @@ impl Router {
             return false;
         };
         self.grants.admits(slug.as_str(), action, value)
+    }
+
+    /// Whether the request carries a ticket for the app and route its path names.
+    ///
+    /// The path is read here and the decision is [`Self::ticket_admits`]'s: this function exists so
+    /// the outer dispatch can admit a ticket without knowing how one is spelled, and so the check
+    /// itself stays in one place. A path that is not `/api/apps/<slug>/<action>` admits nothing.
+    fn ticket_on_path(&self, request: &Request) -> bool {
+        let Some(rest) = request.path.strip_prefix("/api/apps/") else {
+            return false;
+        };
+        let Some((slug, action)) = rest.split_once('/') else {
+            return false;
+        };
+        if Slug::parse(slug).is_err() {
+            return false;
+        }
+        self.ticket_admits(request, slug, action)
     }
 
     /// Does the request carry an app's process ticket, for this app and this route?
@@ -1704,6 +1735,16 @@ impl Router {
             return Answer::Full(Response::json(reply.status, reply.body.to_string()));
         }
 
+        // A name the app never declared is refused before the model is looked for. The two
+        // failures are different requests — a typo is the app author's to fix and a missing
+        // endpoint is the machine's — and answering `503` first would send them to the config file
+        // when their own deepnest.toml is the problem.
+        if let Some(name) = crate::appagent::named(request) {
+            if let Err(reply) = crate::appagent::declared(&dir, slug, &name) {
+                return Answer::Full(Response::json(reply.status, reply.body.to_string()));
+            }
+        }
+
         // The model, built per request rather than held: `POST /api/config` can change the endpoint
         // at any moment, and an agent assembled at startup would answer the old one until the next
         // start. The same reasoning `chat` gives, and the same two refusals before a turn starts.
@@ -1712,9 +1753,7 @@ impl Router {
             Err(answer) => return Answer::Full(answer),
         };
         let reply = match action {
-            Action::Agent => {
-                crate::appagent::route(request, Some(model), &home, &dir, slug)
-            }
+            Action::Agent => crate::appagent::route(request, Some(model), &home, &dir, slug),
             _ => crate::appagent::result_route(request, Some(model), &home, &dir, slug),
         };
         Answer::Full(Response::json(reply.status, reply.body.to_string()))
@@ -2198,7 +2237,13 @@ fn takes_a_body(path: &str) -> bool {
             .strip_prefix("/api/apps/")
             .and_then(|rest| rest.split_once('/'))
             .is_some_and(|(_, action)| {
-                action == chat::ACTION || action == escalation::ACTION || action == sessions::ACTION
+                // The dialog's own routes, and the three an app's process owns. Those three carry
+                // JSON-RPC and turn bodies, so a route that refused a body would be one an app
+                // could never call — the refusal would arrive before the ticket was even looked at.
+                action == chat::ACTION
+                    || action == escalation::ACTION
+                    || action == sessions::ACTION
+                    || crate::ticket::opens(action)
             })
 }
 
@@ -3359,6 +3404,132 @@ mod tests {
             "a".repeat(64)
         ))
         .unwrap()
+    }
+
+    /// A request shaped like one an app's own process sends: a ticket, and a JSON body.
+    ///
+    /// The body is set after parsing rather than parsed from the text: `http::parse` reads a head
+    /// and nothing else — the body arrives separately on a real connection — so a test that put it
+    /// in the string would be testing a request this server never builds.
+    fn app_post(path: &str, ticket: &str, body: &str) -> Request {
+        let mut request = parse(&format!(
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:4270\r\nauthorization: bearer {ticket}\r\n\
+             content-type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        ))
+        .unwrap();
+        request.body = body.as_bytes().to_vec();
+        request
+    }
+
+    /// A router that honours `tickets`, with an app that declares one agent.
+    fn with_agent(scratch: &Scratch, tickets: crate::ticket::Tickets) -> Router {
+        scratch.app("notes", "Notes");
+        // Declared by hand rather than through `Manifest::save`, because the field under test is
+        // the `[[agent]]` table and a builder that filled it in would be the test agreeing with
+        // itself.
+        std::fs::write(
+            scratch
+                .apps()
+                .join("notes")
+                .join(deepnest_apps::MANIFEST_FILE),
+            "[app]\nname = \"Notes\"\n\n[[agent]]\nname = \"triage\"\n\
+             prompt = \"Decide what a message needs.\"\n",
+        )
+        .unwrap();
+        router().with_apps_dir(scratch.apps()).with_tickets(tickets)
+    }
+
+    #[test]
+    fn the_apps_own_routes_need_a_ticket_and_a_ticket_is_for_one_app() {
+        let scratch = Scratch::new("app-ticket");
+        let tickets = crate::ticket::Tickets::new();
+        let value = tickets.mint("notes").unwrap();
+        let router = with_agent(&scratch, tickets);
+
+        // No ticket at all: the control token is not a substitute here, and neither is nothing.
+        let bare = router
+            .respond(&app_post("/api/apps/notes/agent", "", "{}"))
+            .complete();
+        assert_eq!(bare.status, 401, "{:?}", bare);
+
+        // A ticket minted for another app opens nothing of this one.
+        let elsewhere = router
+            .respond(&app_post("/api/apps/notes/agent", &"b".repeat(64), "{}"))
+            .complete();
+        assert_eq!(elsewhere.status, 401, "{:?}", elsewhere);
+
+        // The right ticket gets past the door. What it finds behind it is this process's problem,
+        // and that is the point: authorization and what-the-machine-can-do are two answers. This
+        // router has no config file, so the refusal past the door is a `503` about the endpoint.
+        let through = router
+            .respond(&app_post("/api/apps/notes/agent", &value, "{}"))
+            .complete();
+        assert_eq!(through.status, 503, "{:?}", through);
+    }
+
+    #[test]
+    fn a_ticket_opens_the_three_routes_of_the_loop_and_nothing_that_manages_the_machine() {
+        let scratch = Scratch::new("app-ticket-routes");
+        scratch.built_app("notes", "Notes");
+        let tickets = crate::ticket::Tickets::new();
+        let value = tickets.mint("notes").unwrap();
+        let router = supervised(&scratch)
+            .with_apps_dir(scratch.apps())
+            .with_tickets(tickets);
+
+        // A start behind a ticket is refused, even for the app the ticket belongs to: starting is
+        // what a supervisor does, and an app that could start itself could start any of them.
+        // The refusal is the body door's `400` rather than a `401`, because `start` reads no body —
+        // and a request that is refused for its shape was refused, which is what this asserts.
+        let response = router
+            .respond(&app_post("/api/apps/notes/start", &value, "{}"))
+            .complete();
+        assert!(
+            response.status == 400 || response.status == 401,
+            "a ticket must not start an app: {:?}",
+            response
+        );
+    }
+
+    #[test]
+    fn an_agent_the_app_never_declared_is_refused_with_the_list_it_did() {
+        let scratch = Scratch::new("app-undeclared");
+        let tickets = crate::ticket::Tickets::new();
+        let value = tickets.mint("notes").unwrap();
+        let router = with_agent(&scratch, tickets);
+
+        let response = router
+            .respond(&app_post(
+                "/api/apps/notes/agent",
+                &value,
+                r#"{"agent":"nope","message":"hi"}"#,
+            ))
+            .complete();
+        assert_eq!(response.status, 404, "{:?}", response);
+        let body = body(&response);
+        assert!(
+            body.contains("triage"),
+            "the refusal must name what exists: {body}"
+        );
+    }
+
+    #[test]
+    fn a_turn_with_no_model_configured_says_so_before_building_an_agent() {
+        let scratch = Scratch::new("app-nomodel");
+        let tickets = crate::ticket::Tickets::new();
+        let value = tickets.mint("notes").unwrap();
+        let router = with_agent(&scratch, tickets);
+        let response = router
+            .respond(&app_post(
+                "/api/apps/notes/agent",
+                &value,
+                r#"{"agent":"triage","message":"hi"}"#,
+            ))
+            .complete();
+        // This router was built without a config path, so there is nowhere to read an endpoint
+        // from — and the answer says that rather than failing inside a turn.
+        assert_eq!(response.status, 503, "{:?}", response);
     }
 
     #[test]

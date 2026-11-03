@@ -93,6 +93,7 @@ fn start(scratch: &Scratch, model: Option<&str>) -> (server::Server, Token) {
         apps_dir: Some(scratch.apps()),
         lifecycle: None,
         config_path: Some(scratch.config_path()),
+        tickets: None,
         keepalive: Duration::from_millis(20),
         bind: brisk(),
     })
@@ -359,6 +360,7 @@ fn the_whole_home_is_assembled_the_way_the_binary_assembles_it() {
         apps_dir: Some(scratch.apps()),
         lifecycle: None,
         config_path: Some(scratch.config_path()),
+        tickets: None,
         keepalive: Duration::from_secs(30),
         bind: brisk(),
     })

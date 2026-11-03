@@ -37,6 +37,46 @@ use std::sync::{Arc, Mutex};
 /// asks is "which value do I send", and the answer should be readable in their own `main`.
 pub const ENV: &str = "DEEPNEST_APP_TICKET";
 
+/// The environment variable a started app reads deepnest's own address from.
+///
+/// A ticket says *who* the app is; this says *where* to send it. Without it an app would have to
+/// hard-code `127.0.0.1:4270`, which is wrong the moment someone runs deepnest with
+/// `$DEEPNEST_PORT` set — and it is not a secret, so it travels beside the ticket rather than
+/// inside it. The value has no trailing slash: an app joins a path onto it.
+pub const URL_ENV: &str = "DEEPNEST_URL";
+
+/// The environment variable a started app reads its own slug from.
+///
+/// Every route an app's ticket opens carries the slug in the path — `/api/apps/<slug>/agent` — so an
+/// app that does not know its own name cannot call any of them. The app directory is not a reliable
+/// substitute: the binary is started from `target/release/`, so the name is three parents up and
+/// one rename away from wrong.
+pub const SLUG_ENV: &str = "DEEPNEST_APP_SLUG";
+
+/// What a start tells an app, in its environment and nowhere else.
+///
+/// Two entries and two different kinds of fact, which is why this is one function rather than two
+/// closures: a start with no ticket still knows where deepnest is, and an app that can reach
+/// deepnest without a credential should still be told. An empty `base` omits the variable instead
+/// of writing an empty one — an app reading `""` and an app reading nothing should take the same
+/// branch, and neither should build a URL out of nothing.
+pub fn environment(ticket: Option<String>, base: &str, slug: &str) -> Vec<(String, String)> {
+    let mut env = Vec::with_capacity(3);
+    // No ticket rather than a weak one: an app started without a credential answers `401` and says
+    // why, which is a reportable state. A predictable value would be a credential that only looks
+    // like one.
+    if let Some(value) = ticket {
+        env.push((ENV.to_string(), value));
+    }
+    if !base.trim().is_empty() {
+        env.push((URL_ENV.to_string(), base.trim_end_matches('/').to_string()));
+    }
+    if !slug.trim().is_empty() {
+        env.push((SLUG_ENV.to_string(), slug.trim().to_string()));
+    }
+    env
+}
+
 /// How much entropy a ticket carries before hex encoding. The same as the control token: guessing
 /// one has to be hopeless, not merely unlikely.
 const BYTES: usize = 32;
@@ -136,6 +176,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_start_tells_the_app_where_deepnest_is_even_with_no_ticket() {
+        // The address is not a credential: an app whose start could not mint a ticket is still an
+        // app that has to reach this process to say so.
+        let with = environment(Some("abc".into()), "http://127.0.0.1:4270/", "notes");
+        assert_eq!(
+            with,
+            vec![
+                (ENV.to_string(), "abc".to_string()),
+                (URL_ENV.to_string(), "http://127.0.0.1:4270".to_string()),
+                (SLUG_ENV.to_string(), "notes".to_string()),
+            ]
+        );
+        let without = environment(None, "http://127.0.0.1:5000", "notes");
+        assert_eq!(
+            without,
+            vec![
+                (URL_ENV.to_string(), "http://127.0.0.1:5000".to_string()),
+                (SLUG_ENV.to_string(), "notes".to_string()),
+            ]
+        );
+        // Nothing to say about where we are says nothing, rather than an empty value an app would
+        // join a path onto.
+        assert!(environment(None, "  ", "").is_empty());
+    }
+
+    #[test]
     fn a_ticket_opens_its_own_app_and_no_other() {
         let tickets = Tickets::new();
         let value = tickets.mint("notes").unwrap();
@@ -183,7 +249,15 @@ mod tests {
         assert!(opens("agent"));
         assert!(opens("agent-result"));
         assert!(opens("tools"));
-        for closed in ["start", "stop", "restart", "chat", "escalation", "build", "logs"] {
+        for closed in [
+            "start",
+            "stop",
+            "restart",
+            "chat",
+            "escalation",
+            "build",
+            "logs",
+        ] {
             assert!(!opens(closed), "a ticket opened `{closed}`");
         }
     }

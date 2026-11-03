@@ -51,8 +51,7 @@ pub use installer::{
 };
 pub use loader::{
     app_root, load, load_many, summary, user_root, Loaded, Skill, Skipped, Source, APP_DIR,
-    SKILL_FILE,
-    USER_DIR,
+    SKILL_FILE, USER_DIR,
 };
 pub use release::{check, Releases, Verdict, Version, Why, GITHUB_RELEASE};
 pub use state::{Installed, State, STATE_FILE};

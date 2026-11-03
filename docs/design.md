@@ -315,6 +315,62 @@ Five decisions came with the wiring:
   could not be reached is `502`, a conversation file that could not be written is `500` — three
   different next steps, so three different statuses.
 
+### An app's own agent — declared, and driven by the app (`decided in implementation`, 2026-11-03)
+
+Everything above is about **one** agent per app: the dialog's, which writes the app. An app also
+**uses** one — a Feishu bridge has to decide which messages need handling, a todo app has to work out
+what a handed-over message is actually asking for — and those turns belong to the app, not to a
+person typing in a panel. The shape is four pieces:
+
+- **The app declares its agents in `deepnest.toml`**, one `[[agent]]` table each: `name` (a slug,
+  because it is a URL segment and a directory name), `prompt` (appended after deepnest's own rules,
+  never instead of them — a manifest that replaced the prompt could turn the fence off by
+  describing itself differently), `workdir` (where it works, and what it may write), `skills` (extra
+  skill directories) and `tools` (where the app serves its own MCP endpoint, usually `/mcp`).
+  `create` writes one of these into every new app, named to match the constant its own code calls,
+  because an app whose first turn is refused for a name nobody declared is an app that looks broken.
+- **The app calls `POST /api/apps/<slug>/agent` with the ticket deepnest started it with.** Three
+  environment variables are the whole of what it needs: `DEEPNEST_URL`, `DEEPNEST_APP_TICKET` and
+  `DEEPNEST_APP_SLUG`. The ticket ([`ticket`]) is minted per app per start and opens exactly three
+  routes — `agent`, `agent-result`, `tools` — and nothing that manages the machine. Body:
+  `{"agent","message","session","tools"}`; `session` is the app's own name for a conversation and
+  `tools` is the app's capabilities in MCP's `tools/list` shape.
+- **A turn can pause, and that is the design.** The app is inside a request of its own when it asks
+  for a turn. A tool of the app's own therefore must not be *called* — a server that answers one
+  request at a time cannot answer a callback from inside the request it has not finished, and the
+  wait is on the other side, so concurrency on this side does not fix it. So the round runs
+  everything it can here, states the rest as `PendingCall`s, and ends
+  (`TurnOutcome::Paused`). The app runs those calls itself and posts every answer to
+  `agent-result`, which continues the **same turn** from the same file. One round is one handoff,
+  which is the batch rule the prompt already teaches, seen from the other side.
+- **Nothing about the pause lives in this process.** What is owed is visible in `history.jsonl` —
+  calls recorded with no answers after them — so an app that crashes between the handoff and the
+  answers reads the same list back from `Session::owed`, and a turn that was handed back and
+  abandoned is closed before the next one opens rather than poisoning every request after it.
+
+Four decisions came with it:
+
+- **The handoff is a property of who is waiting, not of the tool.** `Deepnest_tools::DeclaredTool`
+  answers `runs_here() == false` and its `call` refuses; but whether a round *stops* there is
+  `Agent::handoff`, off by default and on for the turns this module builds. The dialog's turn is
+  unchanged — it runs its tools here, because nobody is holding a request open behind it — and an
+  app's turn pauses. A tool-shaped flag alone would have made the dialog hand back to a page with
+  nowhere to put the answer.
+- **An app's tools cross the boundary in the request, not through a call.** Asking the app for its
+  `tools/list` from inside the turn it is waiting on is the same nested call the pause exists to
+  prevent, one layer earlier. The app sends what it offers; the turn is built from that.
+- **An undeclared name is answered before a model is looked for.** A typo is the app author's to fix
+  and a missing endpoint is the machine's, so `404` with the list of agents the app *did* declare
+  comes before `503` about the config.
+- **Third-party MCP servers are still called directly.** `crates/tools::mcp` is the client for a
+  server that has no part in the request being answered — nothing waits on it, so a call to it is
+  work this turn does. The two roads are different because the two other ends are.
+
+What this does **not** do: show an app's conversations in the dialog's transcript. An app's agent
+keeps its own history under `<app>/.agent/agents/<name>/`, with its own `llm.jsonl`; the panel's
+transcript is the dialog's, and mixing the two would put a machine's turns in front of a person who
+never asked for them.
+
 ### `crates/skills` — Anthropic Agent Skills
 
 Loader reads two roots (`~/.deepnest/skills/`, `<app>/.agent/skills/`) and both layouts (`<name>.md`, `<name>/SKILL.md`); a same-named agent skill shadows the user skill. Progressive disclosure: only `name` + `description` + `path` enter the prompt. A file with no `description` is not loaded (`impl, ref: emrg/skills/loader.py`).
@@ -503,6 +559,22 @@ On the build side, three:
 - **The plan is data, not a shell script.** The steps come back as a list of (directory, program, arguments). A generated `#!/bin/sh` file would have been a line shorter and untestable, and would have been written for a shell that is not the one the platform runs.
 - **The front end builds before the server.** The order is not load-bearing for linking — the server reads `frontend/dist` per request — it is chosen so that a build failing on the front end has not already spent a minute compiling SQLite.
 - **Success means the binary is there.** Exit codes say the toolchain was happy; the supervisor's contract is a path, and a build reporting success without it turns into "nothing has been built yet" on the next start, one step away from the cause.
+
+**A new app also ships a worked example of the whole loop** (`decided in implementation`,
+2026-11-03). `src/deepnest.rs` is the app's own client for the agent it declares: one `ask` that
+sends a turn, runs every handed-back call in this process, posts the answers and returns the text;
+`src/main.rs` declares one tool (`list_items`) and its handler beside it, and answers
+`POST /api/ask`. Three decisions:
+
+- **The declaration and the handler are one file.** A tool the model is told about and nobody can
+  run is worse than no tool, and a template that separated them would be teaching that shape.
+- **`paused` is handled, not mentioned.** The one thing an app gets wrong here is treating a turn
+  as one request. The example loops on the handoff, because a client that compiles and then hangs
+  on the first question that needs the app's own data is the failure this file exists to prevent.
+- **It is compiled, not just read.** Generating an app, building it offline and looking at the
+  warnings is the check (measured: 11 s, zero warnings); the suite asserts the text and not the
+  compile, for the same reason it does not build: a test needing a C compiler on three platforms
+  fails for reasons unrelated to this code.
 
 **Running a generated app is what found its second bug.** `bun build` writes `frontend/dist/main.js` and leaves `frontend/index.html` where the template put it, so a server that served only `dist` answered every asset and `404`'d the page itself. The server now looks in `frontend/dist` first and `frontend/` second. The template had been right about the contract — relative paths, a matching path prefix — and wrong about where the bundler puts the page, which is the class of mistake a compiling build does not catch and a running one does. The check was **throwaway** — generate an app, build it, answer a few requests, delete it — and stays out of the suite on purpose: a test that needs bun and a C compiler on all three platforms fails for reasons unrelated to this code. Measured once by hand: 2.1 MB at `target/release/app`, about 31 s.
 

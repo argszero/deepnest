@@ -44,6 +44,12 @@ use crate::slug::Slug;
 /// does not look at.
 pub const BINARY_NAME: &str = "app";
 
+/// The name of the agent every created app declares, and the name its own code asks for.
+///
+/// One constant because it is one name in two places: `deepnest.toml` declares it and `src/main.rs`
+/// calls it, and two spellings of one name is an app whose first turn is refused.
+pub const AGENT: &str = "assistant";
+
 /// The files an app is created with, relative to its directory, in the order they are written.
 ///
 /// The manifest is deliberately absent: [`create`] writes it last and this list is what a caller can
@@ -52,6 +58,7 @@ pub const FILES: &[&str] = &[
     "Cargo.toml",
     ".gitignore",
     "src/main.rs",
+    "src/deepnest.rs",
     "frontend/package.json",
     "frontend/index.html",
     "frontend/src/main.jsx",
@@ -136,12 +143,27 @@ pub fn create(slug: &Slug, dir: &Path, display_name: &str) -> Result<Created, Te
     // Last, and on purpose: see the module docs. `save` creates the directory if it is still
     // absent, and renames into place, so a crash here leaves no half-written manifest.
     let manifest_path = dir.join(MANIFEST_FILE);
-    Manifest::new(name)
-        .save(dir)
-        .map_err(|source| TemplateError::Io {
-            path: manifest_path.clone(),
-            source,
-        })?;
+    let mut manifest = Manifest::new(name);
+    // Every app is created with one agent declared, named to match `AGENT` in `src/main.rs`.
+    //
+    // Declared rather than left for the agent to add: an app whose first request for a turn is
+    // refused for a name nobody declared is an app that looks broken, and the example is what
+    // teaches the shape — `prompt` is added after deepnest's own rules, never instead of them.
+    manifest.agents.push(crate::manifest::AgentSpec {
+        name: AGENT.to_string(),
+        workdir: None,
+        prompt: Some(
+            "You answer questions about this app's list. Read it with your `list_items` tool before \
+             answering anything about what it holds, and say plainly when it is empty."
+                .to_string(),
+        ),
+        skills: Vec::new(),
+        tools: Some("/mcp".to_string()),
+    });
+    manifest.save(dir).map_err(|source| TemplateError::Io {
+        path: manifest_path.clone(),
+        source,
+    })?;
     files.push(manifest_path);
 
     Ok(Created {
@@ -199,6 +221,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("Cargo.toml", CARGO_TOML),
     (".gitignore", GITIGNORE),
     ("src/main.rs", MAIN_RS),
+    ("src/deepnest.rs", DEEPNEST_RS),
     ("frontend/package.json", PACKAGE_JSON),
     ("frontend/index.html", INDEX_HTML),
     ("frontend/src/main.jsx", MAIN_JSX),
@@ -222,6 +245,9 @@ path = "src/main.rs"
 # `bundled` compiles SQLite from source, so the app does not depend on a system library being
 # present — the deepnest payload pins its own version of everything it links.
 rusqlite = { version = "0.31", features = ["bundled"] }
+# Talking to deepnest and to this app's own front end is JSON in both directions. The alternative
+# is hand-written escaping and a hand-written parser, in every app the agent writes.
+serde_json = "1"
 
 [profile.release]
 # A generated app is a local tool that gets rebuilt while its agent works, not a service fleet.
@@ -263,9 +289,44 @@ const MAIN_RS: &str = r##"//! @@APP_SLUG@@ — the server half of this app.
 //!   means to the supervisor: it probes the port, and a process that bound the wrong one looks
 //!   like a process that never came up.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+
+// This app's client for the agent it declares in `deepnest.toml`. Read its `ask` before writing
+// your own loop: a turn can pause, and the module explains why that is the design.
+mod deepnest;
+
+/// The agent this app declares under `[[agent]]` in its `deepnest.toml`. One constant because the
+/// name appears in two places — the manifest and the call — and two spellings of one name is an
+/// app that asks for an agent nobody declared.
+const AGENT: &str = "assistant";
+
+/// What this app can do, in MCP's `tools/list` shape, sent with every request for a turn.
+///
+/// These are the app's own capabilities, so deepnest never calls them itself: it hands the call
+/// back, this process runs it, and the answer continues the turn. That is why the declaration and
+/// the handler have to be in the same file — a declaration with no handler is a tool the model is
+/// told about and nobody can run.
+const TOOLS: &str = r#"{\"tools\":[{\"name\":\"list_items\",\
+\"description\":\"Every item in this app's list, one per line. Read it before answering \
+anything about what the list holds.\",\
+\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}]}"#;
+
+/// Run one call of an app tool, and say whether it failed.
+///
+/// The pair returned is what the model reads: the content is text, and `is_error` marks a call that
+/// did not do the work. A refusal is not an error — nothing here denies anything — so this only
+/// ever says "the database would not open", never "you may not".
+fn run_tool(name: &str, _arguments: &str) -> (String, bool) {
+    match name {
+        "list_items" => match open_database().and_then(|db| items(&db)) {
+            Ok(body) => (body, false),
+            Err(error) => (format!("the list could not be read: {error}"), true),
+        },
+        other => (format!("this app has no tool called `{other}`"), true),
+    }
+}
 
 fn main() {
     let port: u16 = match std::env::var("PORT").ok().and_then(|text| text.parse().ok()) {
@@ -340,12 +401,23 @@ fn serve(mut stream: TcpStream, db: &rusqlite::Connection) -> std::io::Result<()
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
-    // Headers are read to their blank line and then dropped: this app answers by path only.
+    // The headers are read to their blank line, and the one this app needs is `Content-Length`:
+    // every other header is dropped, because this app answers by path and method.
+    let mut length = 0usize;
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 || line.trim().is_empty() {
             break;
         }
+        if let Some((name, value)) = line.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("content-length") {
+                length = value.trim().parse().unwrap_or(0);
+            }
+        }
+    }
+    let mut body = vec![0u8; length];
+    if length > 0 {
+        reader.read_exact(&mut body)?;
     }
 
     let mut parts = request_line.split_whitespace();
@@ -353,8 +425,13 @@ fn serve(mut stream: TcpStream, db: &rusqlite::Connection) -> std::io::Result<()
     let target = parts.next().unwrap_or("/");
     let path = target.split('?').next().unwrap_or("/");
 
-    let response = if !(method == "GET" || method == "HEAD") {
-        (405, "text/plain; charset=utf-8", "this app answers GET and HEAD\n".to_string())
+    let response = if method == "POST" && path.ends_with("/api/ask") {
+        match ask(db, &body) {
+            Ok(text) => (200, "application/json", text),
+            Err(error) => (502, "application/json", format!("{{\"error\":{}}}", json_string(&error))),
+        }
+    } else if !(method == "GET" || method == "HEAD") {
+        (405, "text/plain; charset=utf-8", "this app answers GET, HEAD and POST /api/ask\n".to_string())
     } else if path.ends_with("/api/items") {
         match items(db) {
             Ok(body) => (200, "application/json", body),
@@ -372,6 +449,7 @@ fn serve(mut stream: TcpStream, db: &rusqlite::Connection) -> std::io::Result<()
         200 => "OK",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        502 => "Bad Gateway",
         _ => "Internal Server Error",
     };
     write!(
@@ -423,6 +501,37 @@ fn asset(path: &str) -> Option<(&'static str, String)> {
     None
 }
 
+/// One question for this app's agent, and its answer.
+///
+/// The whole loop is in `deepnest::ask`. What this function adds is the part only the app knows:
+/// which agent, which conversation, and which of its own tools the agent may call.
+fn ask(db: &rusqlite::Connection, body: &[u8]) -> Result<String, String> {
+    let request: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|error| format!("the body is not JSON: {error}"))?;
+    let message = request
+        .get("message")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .ok_or_else(|| "the body carries no `message`".to_string())?;
+    // One conversation for this app, named by the app. Absent is the agent's single conversation,
+    // which is what a single-user local app wants; a chat app would pass the chat's own id here.
+    let session = request.get("session").and_then(|value| value.as_str());
+    let _ = db;
+
+    let client = deepnest::Deepnest::from_env();
+    let tools: serde_json::Value = serde_json::from_str(TOOLS)
+        .map_err(|error| format!("this app's own tool list does not parse: {error}"))?;
+    let answer = client.ask(AGENT, message, session, &tools, run_tool)?;
+    Ok(format!("{{\"answer\":{}}}", json_string(&answer)))
+}
+
+/// A JSON string literal, escaped. The two characters that would end one, plus the control
+/// characters JSON forbids raw — enough for text a model wrote into a local app.
+fn json_string(text: &str) -> String {
+    format!("\"{}\"", escape_json(text))
+}
+
 fn items(db: &rusqlite::Connection) -> rusqlite::Result<String> {
     let mut statement = db.prepare("SELECT id, text FROM items ORDER BY id")?;
     let rows = statement.query_map([], |row| {
@@ -460,6 +569,211 @@ fn escape_json(text: &str) -> String {
         }
     }
     out
+}
+"##;
+
+/// The app's own client for the agent it declared, and the loop that drives it.
+///
+/// This file is the answer to "how does my app use an agent", and it is code rather than a comment
+/// because the loop has one shape that is easy to get wrong: **a turn can pause.** When the model
+/// asks for work only this app can do — read its own database, call its own CLI — deepnest does not
+/// call back into the app. It ends the request with `outcome: "paused"` and hands the calls over.
+/// The app runs them and posts the answers, and that request continues the same turn.
+///
+/// So the app never has to be concurrent. One request at a time, as this server has always been:
+/// nothing waits on us while we think, because nothing is inside our request.
+const DEEPNEST_RS: &str = r##"//! This app's agent, and the loop that drives it.
+//!
+//! deepnest starts this process with three variables, and this module is the only place that reads
+//! them: `DEEPNEST_URL` (where deepnest is), `DEEPNEST_APP_TICKET` (this app's credential, which
+//! opens three routes of this app and nothing else) and `DEEPNEST_APP_SLUG` (this app's name, which
+//! every one of those routes carries in its path).
+//!
+//! The agent an app talks to is **declared, not created**: it lives in `deepnest.toml` under
+//! `[[agent]]`, and the name here is the name there. An app that asks for an agent it never
+//! declared is answered with the list of the ones it did.
+//!
+//! Read `ask` before writing your own loop. The one thing it exists to make obvious is that a turn
+//! can **pause**: the model asks for work only this app can do, deepnest hands the calls back
+//! instead of calling them, and the app runs them and posts the answers. Doing the calls by hand is
+//! not a fallback, it is the design — the alternative is deepnest calling into a server that is
+//! still answering the request that started the turn.
+
+use std::io::{Read, Write};
+use std::net::TcpStream;
+
+use serde_json::{json, Value};
+
+/// The three variables, read once. Empty values are kept as empty and reported where they matter:
+/// an app that cannot reach deepnest should say which variable is missing, not panic in a helper.
+pub struct Deepnest {
+    base: String,
+    ticket: String,
+    slug: String,
+}
+
+impl Deepnest {
+    pub fn from_env() -> Self {
+        Self {
+            base: std::env::var("DEEPNEST_URL").unwrap_or_default(),
+            ticket: std::env::var("DEEPNEST_APP_TICKET").unwrap_or_default(),
+            slug: std::env::var("DEEPNEST_APP_SLUG").unwrap_or_default(),
+        }
+    }
+
+    /// One turn with the app's agent, with its own tools run in this process as they come back.
+    ///
+    /// `session` is this app's name for a conversation. One value per conversation you want to keep
+    /// apart — a chat id, a thread id — and `None` for the agent's single conversation.
+    ///
+    /// `tools` is what this app can do, in MCP's `tools/list` shape. It goes **with the request**
+    /// rather than being asked for over the network, for the same reason the handoff exists: a call
+    /// back into this server from inside this server is a deadlock, and asking is a call.
+    pub fn ask(
+        &self,
+        agent: &str,
+        message: &str,
+        session: Option<&str>,
+        tools: &Value,
+        run: impl Fn(&str, &str) -> (String, bool),
+    ) -> Result<String, String> {
+        if self.base.is_empty() || self.ticket.is_empty() || self.slug.is_empty() {
+            return Err(
+                "DEEPNEST_URL, DEEPNEST_APP_TICKET and DEEPNEST_APP_SLUG must all be set — they \
+                 are what deepnest puts in an app's environment when it starts one"
+                    .to_string(),
+            );
+        }
+
+        let mut body = json!({ "agent": agent, "message": message, "tools": tools });
+        if let Some(key) = session {
+            body["session"] = json!(key);
+        }
+
+        // A turn, then as many handoffs as it takes. Bounded so a model that keeps asking for the
+        // same work cannot hold the caller forever: each pass is a full request and costs money.
+        for _ in 0..8 {
+            let answer = self.post("agent", &body)?;
+            let outcome = answer.get("outcome").and_then(Value::as_str).unwrap_or("");
+
+            match outcome {
+                "answered" | "round_limit" => {
+                    return Ok(answer
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string())
+                }
+                "cancelled" => {
+                    return Err(answer
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or("the turn was cancelled")
+                        .to_string())
+                }
+                "paused" => {
+                    // Run every call, in this process, and answer them all. A partial batch is
+                    // refused by deepnest: a transcript with some answers and not others is one
+                    // no later request can be built from.
+                    let pending = answer
+                        .get("pending")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    if pending.is_empty() {
+                        return Err("the turn paused with nothing to run".to_string());
+                    }
+                    let mut results = Vec::with_capacity(pending.len());
+                    for call in &pending {
+                        let name = call.get("name").and_then(Value::as_str).unwrap_or_default();
+                        let arguments = call
+                            .get("arguments")
+                            .and_then(Value::as_str)
+                            .unwrap_or("{}");
+                        let (content, is_error) = run(name, arguments);
+                        results.push(json!({
+                            "call_id": call.get("call_id").cloned().unwrap_or(Value::Null),
+                            "content": content,
+                            "is_error": is_error,
+                        }));
+                    }
+                    body = json!({
+                        "agent": agent,
+                        "session": session,
+                        "tools": tools,
+                        "results": results,
+                    });
+                    // The next pass posts to `agent-result`, which continues the same turn.
+                    let answer = self.post("agent-result", &body)?;
+                    let outcome = answer.get("outcome").and_then(Value::as_str).unwrap_or("");
+                    if outcome == "paused" {
+                        return Err(
+                            "the resumed turn paused again; answer the remaining calls in a \
+                             further request"
+                                .to_string(),
+                        );
+                    }
+                    return Ok(answer
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string());
+                }
+                other => return Err(format!("deepnest answered `{other}`, which is not an outcome")),
+            }
+        }
+        Err("the turn did not finish in eight handoffs".to_string())
+    }
+
+    /// One POST, and the JSON that came back — or a sentence saying what went wrong instead.
+    ///
+    /// Hand-rolled because this app's only dependencies are the ones the template pinned, and a
+    /// blocking HTTP client is what a blocking server needs. The body is `Connection: close` and
+    /// `Content-Length`, which is all deepnest reads.
+    fn post(&self, route: &str, body: &Value) -> Result<Value, String> {
+        let address = self
+            .base
+            .trim_start_matches("http://")
+            .trim_end_matches('/')
+            .to_string();
+        let (host, port) = match address.split_once(':') {
+            Some((host, port)) => (host, port.parse::<u16>().unwrap_or(80)),
+            None => (address.as_str(), 80),
+        };
+
+        let payload = body.to_string();
+        let mut stream =
+            TcpStream::connect((host, port)).map_err(|error| format!("deepnest: {error}"))?;
+        let request = format!(
+            "POST /api/apps/{slug}/{route} HTTP/1.1\r\nHost: {host}:{port}\r\n\
+             Authorization: Bearer {ticket}\r\nContent-Type: application/json\r\n\
+             Content-Length: {length}\r\nConnection: close\r\n\r\n{payload}",
+            slug = self.slug,
+            ticket = self.ticket,
+            length = payload.len(),
+        );
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|error| format!("deepnest: {error}"))?;
+
+        let mut raw = Vec::new();
+        stream
+            .read_to_end(&mut raw)
+            .map_err(|error| format!("deepnest: {error}"))?;
+        let text = String::from_utf8_lossy(&raw);
+        // The body begins after the first blank line; status and headers are not needed once it is
+        // known the answer parsed, which is what the parse below reports.
+        let body = match text.split_once("\r\n\r\n") {
+            Some((_, body)) => body,
+            None => return Err(format!("deepnest answered no body: {}", text.trim())),
+        };
+        let value: Value = serde_json::from_str(body.trim())
+            .map_err(|error| format!("deepnest did not answer JSON ({error}): {body}"))?;
+        if let Some(message) = value.get("error").and_then(Value::as_str) {
+            return Err(format!("deepnest refused the request: {message}"));
+        }
+        Ok(value)
+    }
 }
 "##;
 
@@ -868,6 +1182,57 @@ mod tests {
             "the supervisor looks for {}",
             crate::process::EXPECTED_BINARY
         );
+    }
+
+    #[test]
+    fn a_new_app_declares_the_agent_its_own_code_calls() {
+        // Two spellings of one name is an app whose first turn is refused for an agent nobody
+        // declared — so the constant is written into both files and read back out of both here.
+        let scratch = Scratch::new("declares-agent");
+        let created = create(&slug(), &scratch.dir(), "Notes").unwrap();
+
+        let manifest = crate::manifest::load(&created.dir).unwrap();
+        let agent = manifest
+            .agent(AGENT)
+            .unwrap_or_else(|| panic!("no agent called `{AGENT}`: {:?}", manifest.agents));
+        assert_eq!(agent.tools.as_deref(), Some("/mcp"));
+        assert!(
+            agent.prompt.is_some(),
+            "an agent with no purpose is a generic one"
+        );
+
+        let main = fs::read_to_string(created.dir.join("src/main.rs")).unwrap();
+        assert!(
+            main.contains(&format!("const AGENT: &str = \"{AGENT}\"")),
+            "the app's own code must name the agent the manifest declares"
+        );
+    }
+
+    #[test]
+    fn the_generated_apps_own_agent_client_covers_the_whole_loop() {
+        // The template is the only worked example of the handoff most apps will ever have, and a
+        // client that forgets `paused` compiles and then hangs on the first question that needs
+        // the app's own data. Read as text because compiling it needs a toolchain this test cannot
+        // require on three platforms; the real compile is done by hand (see docs/design.md).
+        let scratch = Scratch::new("agent-loop");
+        let created = create(&slug(), &scratch.dir(), "Notes").unwrap();
+        let client = fs::read_to_string(created.dir.join("src/deepnest.rs")).unwrap();
+        for step in [
+            "DEEPNEST_URL",
+            "DEEPNEST_APP_TICKET",
+            "DEEPNEST_APP_SLUG",
+            "\"paused\"",
+            "agent-result",
+            "call_id",
+            "is_error",
+        ] {
+            assert!(client.contains(step), "the client never mentions {step}");
+        }
+        let main = fs::read_to_string(created.dir.join("src/main.rs")).unwrap();
+        // The declaration and the handler are one file on purpose: a declared tool nobody runs is
+        // a tool the model is told about and cannot use.
+        assert!(main.contains("fn run_tool"), "{main}");
+        assert!(main.contains("list_items"), "{main}");
     }
 
     #[test]

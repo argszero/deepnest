@@ -74,14 +74,12 @@ pub fn route(
     };
     let body: Value = match serde_json::from_str(text) {
         Ok(value) => value,
-        Err(error) => {
-            return failed(
-                400,
-                format!(
-                    "the body is not JSON ({error}). Send {{\"agent\":\"<name>\",\"message\":\"…\"}}"
-                ),
-            )
-        }
+        Err(error) => return failed(
+            400,
+            format!(
+                "the body is not JSON ({error}). Send {{\"agent\":\"<name>\",\"message\":\"…\"}}"
+            ),
+        ),
     };
     let Some(name) = body.get("agent").and_then(Value::as_str).map(str::trim) else {
         return failed(
@@ -98,6 +96,10 @@ pub fn route(
         return failed(400, "the message is empty".to_string());
     }
     let session_key = body.get("session").and_then(Value::as_str);
+
+    if let Err(reply) = declared(app_dir, slug, name) {
+        return reply;
+    }
 
     let Some(model) = model else {
         return failed(
@@ -178,16 +180,20 @@ pub fn result_route(
             }
             out
         }
-        _ => {
-            return failed(
-                400,
-                "the body carries no `results` array".to_string(),
-            )
-        }
+        _ => return failed(400, "the body carries no `results` array".to_string()),
     };
 
+    if let Err(reply) = declared(app_dir, slug, name) {
+        return reply;
+    }
+
     let Some(model) = model else {
-        return failed(503, "this process has no model endpoint configured".to_string());
+        return failed(
+            503,
+            "this process has no model endpoint configured, so no turn can run — POST /api/config \
+             with base_url, api_key and model first"
+                .to_string(),
+        );
     };
 
     // The same declarations as the turn that paused: a resumed round may need a tool the first
@@ -204,44 +210,144 @@ pub fn result_route(
     }
 }
 
-/// `POST /api/apps/<slug>/tools` — MCP, as an app implements it server-side.
+/// `POST /api/apps/<slug>/tools` — the app's tools, **called** by deepnest.
 ///
-/// The app is an MCP **server** in the direction that matters: deepnest is the client, asks
-/// `tools/list`, and calls `tools/call`. So this route is the one an app's own tools answer on, and
-/// what it needs from the app is the two methods and the JSON-RPC envelope — which is the point of
-/// choosing a published protocol rather than inventing a shape.
+/// This is MCP with deepnest as the client, and it is the road a call takes when the callers are
+/// not the app: the dialog's own turn, or a third-party MCP server reached the same way. An app's
+/// own agent does not come here — it takes its declarations with its request and runs the calls
+/// itself, because calling back into the app from inside the app's own turn is the deadlock.
 ///
-/// This route does not proxy to a remote MCP server: it is for the app deepnest started, so there
-/// is no URL to reach and no second credential to find. A third-party MCP server is reached by the
-/// same [`McpServer`] code over a URL of its own, and is not this route's business.
+/// The body is one JSON-RPC message. `tools/list` answers with the declarations the app registered
+/// for itself in `deepnest.toml`… which is not where a tool's *implementation* lives, so what this
+/// route actually does is tell the caller where the app's own handler is: everything under its
+/// `tools` path on its own port. It exists so the shape is discoverable and the refusal is precise,
+/// rather than a `404` that leaves an app's author guessing which protocol was meant.
 pub fn tools_route(request: &Request, app_dir: &Path, slug: &Slug) -> Reply {
     if request.method != Method::Post {
-        return failed(405, "MCP is POST".to_string());
+        return failed(
+            405,
+            "MCP sends every message as a POST: POST this route with one JSON-RPC \
+                            message",
+        );
     }
-    // What an app declares here, deepnest may then call. Reading the manifest is what keeps the
-    // endpoint from being a way to be handed tools nobody declared.
+    let Some(body) = request.body_text() else {
+        return failed(400, "the body is not UTF-8");
+    };
+    let message: Value = match serde_json::from_str(body.trim()) {
+        Ok(value) => value,
+        Err(error) => {
+            return failed(
+                400,
+                format!("the body is not one JSON-RPC message: {error}"),
+            );
+        }
+    };
+    let id = message.get("id").cloned().unwrap_or(Value::Null);
+    let method = message
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
     let manifest = match manifest::load(app_dir) {
         Ok(manifest) => manifest,
         Err(error) => return failed(404, format!("`{slug}` is not an app: {error}")),
     };
-    let declared = manifest.agents.iter().filter(|agent| agent.tools.is_some()).count();
-    let _ = declared;
-    Reply {
-        status: 200,
-        body: json!({
+    let path = manifest
+        .agents
+        .iter()
+        .find_map(|agent| agent.tools.as_deref());
+
+    // A JSON-RPC answer, always `200` once the message parsed: the protocol puts the failure in
+    // the envelope, and an HTTP status beside it would be a second, contradictory verdict.
+    let answer = match (method, path) {
+        ("tools/list", Some(path)) => json!({
             "jsonrpc": "2.0",
-            "id": Value::Null,
+            "id": id,
             "error": {
                 "code": -32601,
                 "message": format!(
-                    "`/api/apps/{slug}/tools` is where an app *serves* its own tools to deepnest, \
-                     and this route answers that request. Nothing in deepnest calls it: the app is \
-                     the server. Declare `tools = \"/mcp\"` on an [[agent]] and deepnest will call \
-                     that path on the app's own port."
+                    "this route is deepnest's client side, not the app's server side. `{slug}` \
+                     serves its tools at `{path}` on its own port, which deepnest reaches directly. \
+                     Its own agent declares the same tools in the `tools` field of its \
+                     POST /api/apps/{slug}/agent request."
                 )
             }
         }),
+        ("tools/list", None) => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": -32601,
+                "message": format!(
+                    "`{slug}` declares no tools — add `tools = \"/mcp\"` to an [[agent]] in its \
+                     deepnest.toml and serve that path on the app's own port"
+                )
+            }
+        }),
+        (other, _) => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": -32601,
+                "message": format!(
+                    "`{other}` is not a method this route answers. deepnest asks an app's MCP \
+                     server for `tools/list` and `tools/call`, directly, at the app's own port."
+                )
+            }
+        }),
+    };
+    Reply {
+        status: 200,
+        body: answer,
     }
+}
+
+/// The `agent` field of a request body, when it names one.
+///
+/// Read twice on purpose — once here to refuse an undeclared name before a model is looked for, and
+/// once inside the route that then uses it. The alternative is a router that parses the body and
+/// hands the route a half-built request, which is the shape that lets the two decisions disagree.
+pub fn named(request: &Request) -> Option<String> {
+    let body: Value = serde_json::from_str(request.body_text()?.trim()).ok()?;
+    body.get("agent")
+        .and_then(Value::as_str)
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+}
+
+/// Whether `slug` declares an agent called `name`, or the refusal that says what it does declare.
+///
+/// Checked before the model is looked for, because the two failures are different requests: a name
+/// that does not exist is a `404` whatever this process can reach, while "no endpoint configured"
+/// is about the machine and would be the same answer for a name that does exist. Answering `503`
+/// first would send an app's author looking at their config when their typo is the problem.
+pub fn declared(app_dir: &Path, slug: &Slug, name: &str) -> Result<(), Reply> {
+    let manifest = match manifest::load(app_dir) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            return Err(failed(
+                404,
+                format!("`{slug}` is not an app in this deepnest home: {error}"),
+            ))
+        }
+    };
+    if manifest.agent(name).is_some() {
+        return Ok(());
+    }
+    let names: Vec<&str> = manifest
+        .agents
+        .iter()
+        .map(|agent| agent.name.as_str())
+        .collect();
+    let list = if names.is_empty() {
+        "this app declares no agents — add an [[agent]] table to its deepnest.toml".to_string()
+    } else {
+        format!("this app declares: {}", names.join(", "))
+    };
+    Err(failed(
+        404,
+        format!("`{name}` is not an agent of `{slug}`. {list}"),
+    ))
 }
 
 /// Build one declared agent's turn.
@@ -283,7 +389,10 @@ fn build(
     // One conversation directory per declared agent, so two agents of one app never append to the
     // same file — the failure that would produce is a turn reading another agent's memory as its
     // own.
-    let root = AgentPaths::for_app(app_dir).root().join("agents").join(name);
+    let root = AgentPaths::for_app(app_dir)
+        .root()
+        .join("agents")
+        .join(name);
     let paths = match session_key {
         // A key from the app, sanitized rather than trusted: it becomes a directory name, and an
         // app that sent `../../config` would otherwise choose where this writes. Same rule as a
@@ -403,7 +512,7 @@ fn build(
     // from that.
     let mut tools: Vec<Box<dyn deepnest_tools::Tool>> = registry::with_seams(None, None, None);
     if let Some(listed) = declarations {
-        for declaration in deepnest_tools::declared::declarations(&listed) {
+        for declaration in deepnest_tools::declared::declarations(listed) {
             tools.push(Box::new(deepnest_tools::DeclaredTool::new(
                 declaration,
                 slug.as_str(),
@@ -422,7 +531,8 @@ fn build(
         }
     };
 
-    let mut system = deepnest_agent::prompt::system_prompt(&context.with_tools(registry::names(&tools)));
+    let mut system =
+        deepnest_agent::prompt::system_prompt(&context.with_tools(registry::names(&tools)));
     // What the app is for, in its own words, after the prompt and never instead of it: everything
     // deepnest says to every agent — the fence, the tools, the memory rules — stays in front of it,
     // so a manifest cannot turn the fence off by describing itself differently.
@@ -542,3 +652,316 @@ fn failed(status: u16, message: impl Into<String>) -> Reply {
 
 /// The ticket value an app reads out of its environment, spelled for the docs.
 pub const TICKET_ENV: &str = ticket::ENV;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use deepnest_llm::{
+        AssistantTurn, FinishReason, FunctionCall, LlmError, Message, ToolCall, ToolDefinition,
+    };
+    use std::sync::Mutex;
+
+    /// A model that answers from a script, recording what it was asked.
+    ///
+    /// The one thing it has to get right is that a turn is more than one call: the first answer
+    /// asks for a tool, the second answers in words. That is the shape every handoff test needs,
+    /// and writing it here rather than in each test is what keeps them about the handoff.
+    struct Scripted {
+        replies: Mutex<Vec<AssistantTurn>>,
+        seen: Mutex<Vec<Vec<Message>>>,
+        offered: Mutex<Vec<Vec<ToolDefinition>>>,
+    }
+
+    impl Scripted {
+        fn new(replies: Vec<AssistantTurn>) -> Arc<Self> {
+            Arc::new(Self {
+                replies: Mutex::new(replies),
+                seen: Mutex::new(Vec::new()),
+                offered: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn calls(&self) -> usize {
+            self.seen.lock().unwrap().len()
+        }
+
+        fn last_offer(&self) -> Vec<String> {
+            self.offered
+                .lock()
+                .unwrap()
+                .last()
+                .map(|tools| {
+                    tools
+                        .iter()
+                        .map(|tool| tool.function.name.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+    }
+
+    impl Model for Scripted {
+        fn turn(
+            &self,
+            messages: &[Message],
+            tools: &[ToolDefinition],
+        ) -> Result<AssistantTurn, LlmError> {
+            self.seen.lock().unwrap().push(messages.to_vec());
+            self.offered.lock().unwrap().push(tools.to_vec());
+            let mut replies = self.replies.lock().unwrap();
+            if replies.is_empty() {
+                panic!("the model was asked more times than the script has answers");
+            }
+            Ok(replies.remove(0))
+        }
+    }
+
+    fn says(text: &str) -> AssistantTurn {
+        AssistantTurn {
+            content: Some(text.to_string()),
+            tool_calls: Vec::new(),
+            finish_reason: FinishReason::Stop,
+            usage: deepnest_llm::Usage::default(),
+        }
+    }
+
+    fn asks(id: &str, name: &str, arguments: &str) -> AssistantTurn {
+        AssistantTurn {
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: id.to_string(),
+                kind: "function".to_string(),
+                function: FunctionCall {
+                    name: name.to_string(),
+                    arguments: arguments.to_string(),
+                },
+            }],
+            finish_reason: FinishReason::ToolCalls,
+            usage: deepnest_llm::Usage::default(),
+        }
+    }
+
+    /// A scratch `~/.deepnest` with one app that declares one agent.
+    struct Scratch {
+        base: PathBuf,
+    }
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let base = std::env::temp_dir()
+                .join(format!("deepnest-appagent-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&base);
+            std::fs::create_dir_all(base.join("apps").join("notes")).unwrap();
+            std::fs::write(
+                base.join("apps")
+                    .join("notes")
+                    .join(deepnest_apps::MANIFEST_FILE),
+                "[app]\nname = \"Notes\"\n\n[[agent]]\nname = \"triage\"\n\
+                 tools = \"/mcp\"\nprompt = \"Decide what a message needs.\"\n",
+            )
+            .unwrap();
+            Self { base }
+        }
+
+        fn home(&self) -> PathBuf {
+            self.base.clone()
+        }
+
+        fn dir(&self) -> PathBuf {
+            self.base.join("apps").join("notes")
+        }
+
+        fn slug(&self) -> Slug {
+            Slug::parse("notes").unwrap()
+        }
+
+        /// A request shaped like the one an app's own process sends.
+        fn post(&self, action: &str, body: &Value) -> Request {
+            let text = body.to_string();
+            let mut request = crate::http::parse(&format!(
+                "POST /api/apps/notes/{action} HTTP/1.1\r\nHost: 127.0.0.1:4270\r\n\
+                 authorization: bearer {}\r\ncontent-type: application/json\r\n\
+                 Content-Length: {}\r\n\r\n",
+                "a".repeat(64),
+                text.len()
+            ))
+            .unwrap();
+            request.body = text.into_bytes();
+            request
+        }
+
+        /// The declarations an app sends with its request: one tool, run in the app.
+        fn tools() -> Value {
+            json!({
+                "tools": [{
+                    "name": "list_items",
+                    "description": "Every item in this app's list.",
+                    "inputSchema": {"type": "object", "properties": {}}
+                }]
+            })
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.base);
+        }
+    }
+
+    #[test]
+    fn a_round_that_reaches_an_app_tool_comes_back_as_a_pause_instead_of_a_call() {
+        // The deadlock this exists to prevent: the app is inside the request that asked for this
+        // turn, so a call back into it would wait for an answer the app cannot give until it
+        // returns. The turn ends with the calls instead.
+        let scratch = Scratch::new("pause");
+        let model = Scripted::new(vec![asks("call_1", "list_items", "{}")]);
+        let request = scratch.post(
+            "agent",
+            &json!({
+                "agent": "triage",
+                "message": "what is on the list?",
+                "tools": Scratch::tools(),
+            }),
+        );
+
+        let reply = route(
+            &request,
+            Some(model.clone()),
+            &scratch.home(),
+            &scratch.dir(),
+            &scratch.slug(),
+        );
+
+        assert_eq!(reply.status, 200, "{:?}", reply.body);
+        assert_eq!(reply.body["outcome"], "paused", "{}", reply.body);
+        let pending = reply.body["pending"].as_array().unwrap();
+        assert_eq!(pending.len(), 1, "{}", reply.body);
+        assert_eq!(pending[0]["call_id"], "call_1");
+        assert_eq!(pending[0]["name"], "list_items");
+        // The model was told about the app's tool: it could not have asked for it otherwise.
+        assert!(
+            model.last_offer().contains(&"list_items".to_string()),
+            "{:?}",
+            model.last_offer()
+        );
+    }
+
+    #[test]
+    fn the_answers_to_a_pause_continue_the_same_turn_and_finish_it() {
+        let scratch = Scratch::new("resume");
+        let model = Scripted::new(vec![
+            asks("call_1", "list_items", "{}"),
+            says("three things: bread, milk, coffee"),
+        ]);
+        let declarations = Scratch::tools();
+
+        let paused = route(
+            &scratch.post(
+                "agent",
+                &json!({"agent": "triage", "message": "what is on the list?", "tools": declarations}),
+            ),
+            Some(model.clone()),
+            &scratch.home(),
+            &scratch.dir(),
+            &scratch.slug(),
+        );
+        assert_eq!(paused.body["outcome"], "paused", "{}", paused.body);
+
+        let resumed = result_route(
+            &scratch.post(
+                "agent-result",
+                &json!({
+                    "agent": "triage",
+                    "tools": declarations,
+                    "results": [{
+                        "call_id": "call_1",
+                        "content": "bread\nmilk\ncoffee",
+                        "is_error": false
+                    }],
+                }),
+            ),
+            Some(model.clone()),
+            &scratch.home(),
+            &scratch.dir(),
+            &scratch.slug(),
+        );
+
+        assert_eq!(resumed.status, 200, "{:?}", resumed.body);
+        assert_eq!(resumed.body["outcome"], "answered", "{}", resumed.body);
+        assert_eq!(resumed.body["text"], "three things: bread, milk, coffee");
+        // Two model calls for one turn, and the second saw the tool's answer in the conversation —
+        // which is what makes it the same turn rather than a new one.
+        assert_eq!(model.calls(), 2);
+        let seen = model.seen.lock().unwrap();
+        let last = seen.last().unwrap();
+        assert!(
+            last.iter()
+                .any(|message| message.content.as_deref() == Some("bread\nmilk\ncoffee")),
+            "{last:?}"
+        );
+    }
+
+    #[test]
+    fn a_partial_batch_is_refused_before_anything_is_written() {
+        // A transcript whose assistant record has one answer and not the other is one no later
+        // request can be built from: the provider rejects it, and every turn after it fails with a
+        // complaint about a batch nobody remembers.
+        let scratch = Scratch::new("partial");
+        let model = Scripted::new(vec![asks("call_1", "list_items", "{}")]);
+        let declarations = Scratch::tools();
+        route(
+            &scratch.post(
+                "agent",
+                &json!({"agent": "triage", "message": "what is on the list?", "tools": declarations}),
+            ),
+            Some(model.clone()),
+            &scratch.home(),
+            &scratch.dir(),
+            &scratch.slug(),
+        );
+
+        let resumed = result_route(
+            &scratch.post(
+                "agent-result",
+                &json!({"agent": "triage", "results": [], "tools": declarations}),
+            ),
+            Some(model),
+            &scratch.home(),
+            &scratch.dir(),
+            &scratch.slug(),
+        );
+        assert!(resumed.status >= 400, "{:?}", resumed.body);
+    }
+
+    #[test]
+    fn an_agent_built_for_an_app_hands_its_round_back_without_being_asked() {
+        // The flag is a property of *who is waiting*, and this is where it is set. Asserted by
+        // behaviour rather than by reading the field back: what matters is that a turn built by
+        // this module pauses on an app's tool, and a test that asked an accessor would pass for an
+        // agent that had the flag and never consulted it.
+        let scratch = Scratch::new("handoff");
+        let declarations = Scratch::tools();
+        let model = Scripted::new(vec![asks("call_1", "list_items", "{}")]);
+        let agent = build(
+            model,
+            &scratch.home(),
+            &scratch.dir(),
+            &scratch.slug(),
+            "triage",
+            None,
+            Some(&declarations),
+        )
+        .unwrap();
+
+        let outcome = agent
+            .run_turn("what is on the list?", &Cancellation::new())
+            .unwrap();
+        match outcome {
+            TurnOutcome::Paused { pending, .. } => {
+                assert_eq!(pending.len(), 1, "{pending:?}");
+                assert_eq!(pending[0].name, "list_items");
+            }
+            other => panic!("the app's own tool must come back, not run here: {other:?}"),
+        }
+    }
+}

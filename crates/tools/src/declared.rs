@@ -166,7 +166,10 @@ mod tests {
             definition.function.parameters["properties"]["state"]["type"],
             "string"
         );
-        assert!(definition.function.description.contains("List the open todos"));
+        assert!(definition
+            .function
+            .description
+            .contains("List the open todos"));
         // And the sentence that stops a remote tool being read as a local one.
         assert!(definition
             .function

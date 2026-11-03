@@ -523,7 +523,10 @@ pub fn watched(
     .with_memory_index(memory)
     .with_memory_dir(paths.memory_dir().display().to_string())
     .with_skills(skills)
-    .with_app_url(format!("/app/{slug}/"));
+    .with_app_url(format!("/app/{slug}/"))
+    // This is the turn that writes the app, so it is the one that can give the app agents of its
+    // own. An agent the app declared gets `false` and is never told how to call itself.
+    .with_app_agents(true);
 
     // One flag shared with every tool: the loop owns the turn, so what a tool touched is recorded
     // where the tools run and read where the answer is assembled.

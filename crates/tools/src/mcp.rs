@@ -57,12 +57,7 @@ pub struct Reply {
 /// second concurrency model inside a tool is a second place for a turn to hang.
 pub trait McpTransport: Send + Sync {
     /// One JSON-RPC message, as one `POST` to `url`.
-    fn post(
-        &self,
-        url: &str,
-        headers: &[(String, String)],
-        body: &str,
-    ) -> Result<Reply, String>;
+    fn post(&self, url: &str, headers: &[(String, String)], body: &str) -> Result<Reply, String>;
 }
 
 /// One tool an MCP server declared, before it becomes a [`Tool`].
@@ -89,7 +84,11 @@ pub struct McpServer {
 }
 
 impl McpServer {
-    pub fn new(url: impl Into<String>, token: Option<String>, transport: Arc<dyn McpTransport>) -> Self {
+    pub fn new(
+        url: impl Into<String>,
+        token: Option<String>,
+        transport: Arc<dyn McpTransport>,
+    ) -> Self {
         Self {
             url: url.into(),
             token,
@@ -121,7 +120,12 @@ impl McpServer {
                 None => json!({}),
             };
             let result = self.request("tools/list", params)?;
-            for tool in result.get("tools").and_then(Value::as_array).into_iter().flatten() {
+            for tool in result
+                .get("tools")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
                 let Some(name) = tool.get("name").and_then(Value::as_str) else {
                     // A declaration with no name cannot be called, so it is not a tool. Skipped
                     // rather than refused: one malformed entry must not hide the rest.
@@ -168,7 +172,11 @@ impl McpServer {
             Some(both) => both,
             None => text,
         };
-        if result.get("isError").and_then(Value::as_bool).unwrap_or(false) {
+        if result
+            .get("isError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
             // The server said the call failed, in its own words. `error` rather than `refused`:
             // nothing here was denied by a policy, and telling the model otherwise would send it
             // looking for a permission it already has.
@@ -293,7 +301,10 @@ fn content_text(result: &Value) -> String {
                     parts.push(text.to_string());
                 }
             }
-            Some(other) => parts.push(format!("[{other} content, {} bytes]", block.to_string().len())),
+            Some(other) => parts.push(format!(
+                "[{other} content, {} bytes]",
+                block.to_string().len()
+            )),
             None => {}
         }
     }
@@ -328,7 +339,10 @@ pub struct McpTool {
 
 impl McpTool {
     pub fn new(server: Arc<McpServer>, declaration: Declaration) -> Self {
-        Self { server, declaration }
+        Self {
+            server,
+            declaration,
+        }
     }
 
     /// The declaration this tool was built from, for a caller assembling a report.
@@ -359,7 +373,11 @@ impl Tool for McpTool {
                 self.declaration.description
             )
         };
-        ToolDefinition::function(self.name().to_string(), description, self.declaration.schema.clone())
+        ToolDefinition::function(
+            self.name().to_string(),
+            description,
+            self.declaration.schema.clone(),
+        )
     }
 
     fn call(&self, args: &Value, _ctx: &ToolContext) -> ToolResult {
@@ -409,8 +427,15 @@ mod tests {
     /// A transport that answers from a script and records what it was sent.
     struct Scripted {
         replies: Mutex<Vec<Result<Reply, String>>>,
-        sent: Mutex<Vec<(String, Vec<(String, String)>, String)>>,
+        sent: Mutex<Vec<Sent>>,
     }
+
+    /// One recorded request: where it went, its headers, and its body.
+    ///
+    /// A named triple rather than an inline tuple because clippy is right that four levels of
+    /// nesting is a type nobody reads, and because the two accessors below index it by position —
+    /// which is exactly the kind of thing a name should be carrying instead of `.2`.
+    type Sent = (String, Vec<(String, String)>, String);
 
     impl Scripted {
         fn new(replies: Vec<Reply>) -> Arc<Self> {
@@ -420,7 +445,7 @@ mod tests {
             })
         }
 
-        fn sent(&self) -> Vec<(String, Vec<(String, String)>, String)> {
+        fn sent(&self) -> Vec<Sent> {
             self.sent.lock().unwrap().clone()
         }
     }
@@ -479,10 +504,19 @@ mod tests {
         let definition = tools[0].definition();
         // The schema crosses unchanged: translating it would be this crate deciding what an app's
         // parameters mean.
-        assert_eq!(definition.function.parameters["properties"]["state"]["type"], "string");
-        assert!(definition.function.description.contains("List the open todos"));
+        assert_eq!(
+            definition.function.parameters["properties"]["state"]["type"],
+            "string"
+        );
+        assert!(definition
+            .function
+            .description
+            .contains("List the open todos"));
         // And the one sentence this crate adds, so a remote tool is not read as a local one.
-        assert!(definition.function.description.contains("inside it rather than in this process"));
+        assert!(definition
+            .function
+            .description
+            .contains("inside it rather than in this process"));
     }
 
     #[test]
@@ -542,11 +576,15 @@ mod tests {
     #[test]
     fn a_stream_that_ends_without_an_answer_is_a_failure_with_a_sentence() {
         let transport = Scripted::new(vec![Reply {
-            body: "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notes\"}\n\n".to_string(),
+            body: "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notes\"}\n\n"
+                .to_string(),
         }]);
         let server = McpServer::new("http://127.0.0.1:9000/mcp", None, transport);
         let reason = server.list().unwrap_err();
-        assert!(reason.contains("neither JSON nor an event stream"), "{reason}");
+        assert!(
+            reason.contains("neither JSON nor an event stream"),
+            "{reason}"
+        );
     }
 
     #[test]
@@ -592,11 +630,13 @@ mod tests {
             json_reply(
                 r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"one"}],"nextCursor":"page2"}}"#,
             ),
-            json_reply(
-                r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"two"}]}}"#,
-            ),
+            json_reply(r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"two"}]}}"#),
         ]);
-        let server = Arc::new(McpServer::new("http://127.0.0.1:9000/mcp", None, transport.clone()));
+        let server = Arc::new(McpServer::new(
+            "http://127.0.0.1:9000/mcp",
+            None,
+            transport.clone(),
+        ));
         let declared = server.list().unwrap();
         assert_eq!(declared.len(), 2, "{declared:?}");
         // The second request carried the cursor the first answer named.
