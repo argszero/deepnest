@@ -25,6 +25,9 @@
 //! and stop/restart. It runs a binary that already exists and names the path it expected when one
 //! does not.
 //!
+//! [`remove`] is the one that ends an app: it deletes the directory, and it is the only
+//! operation here that destroys something with no undo.
+//!
 //! [`template`] and [`build`] are the two that produce that binary. Creating an app writes text and
 //! touches no toolchain, so a creation that fails halfway leaves a directory that is not an app;
 //! building it runs the steps in [`build::plan`] and reports which one said no. They are separate
@@ -36,6 +39,7 @@ pub mod listing;
 pub mod logs;
 pub mod manifest;
 pub mod process;
+pub mod remove;
 pub mod slug;
 pub mod template;
 
@@ -51,6 +55,7 @@ pub use process::{
     allocate, run_command, Exit, Handle, Port, Prober, Spawner, Spec, StartError, State,
     StdSpawner, Supervisor, TcpProber, DEFAULT_READINESS, EXPECTED_BINARY, PORT_ENV,
 };
+pub use remove::{RemoveError, Removed};
 pub use slug::{Slug, SlugError, MAX_CHARS as MAX_SLUG_CHARS};
 pub use template::{create, Created, TemplateError, BINARY_NAME, FILES as TEMPLATE_FILES};
 

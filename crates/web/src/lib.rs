@@ -3906,6 +3906,36 @@ mod tests {
     }
 
     #[test]
+    fn the_panel_asks_before_a_delete_and_names_what_goes_with_it() {
+        // The one control on this page whose press cannot be undone, and the reason it is checked
+        // as text rather than as a shape: a delete button that posted without asking is one
+        // mis-click away from deleting a database, and nothing else on the page would notice.
+        assert!(
+            SCRIPT.contains("window.confirm"),
+            "the delete control posts without asking"
+        );
+        // The question has to name the loss, not just the app: "delete notes?" is a question
+        // nobody can answer well.
+        for loss in ["database", "agent's conversation", "no undo"] {
+            assert!(SCRIPT.contains(loss), "the question never mentions {loss}");
+        }
+        // And the request carries the app's own name, which is what the server checks.
+        assert!(
+            SCRIPT.contains("/delete?confirm="),
+            "the delete request would be refused for naming nothing"
+        );
+        // Deleting is not one of the four verbs: those are re-runnable, and this is not, so it
+        // must not be in the set the state decides.
+        for verbs in [
+            r#"running: ["stop", "restart"]"#,
+            r#"stopped: ["start", "build"]"#,
+            r#"failed: ["start", "build"]"#,
+        ] {
+            assert!(SCRIPT.contains(verbs), "{verbs}");
+        }
+    }
+
+    #[test]
     fn the_panel_offers_only_the_verbs_the_state_can_use() {
         // The server's rule, and the reason this is worded as a rule rather than as a shape:
         // `POST /api/apps/<slug>/start` on an app that is already running answers `409`, and

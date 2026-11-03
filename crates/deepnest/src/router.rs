@@ -1398,6 +1398,56 @@ impl Router {
             Action::Agent | Action::AgentResult | Action::Tools => {
                 unreachable!("the app's own routes are answered before this match")
             }
+            Action::Delete => {
+                // Deleting is the one press here that cannot be taken back, so it is the one that
+                // asks the caller to name what it is destroying. A double-submitted form or a
+                // script that guessed a URL therefore deletes nothing, and the refusal says what
+                // to send — the confirmation is a fact in the request rather than a question this
+                // server cannot ask.
+                if query_parameter(&request.query, "confirm").as_deref() != Some(slug.as_str()) {
+                    return Answer::Full(Response::json(
+                        400,
+                        error_body(&format!(
+                            "deleting `{slug}` removes its database, its files and its agent's \
+                             conversation, and there is no undo. Send \
+                             POST /api/apps/{slug}/delete?confirm={slug} to mean it"
+                        )),
+                    ));
+                }
+                // The process goes first, and its failure is the answer rather than a warning: a
+                // directory removed under a running binary leaves that process writing to paths
+                // that no longer exist, and holding a port that answers for an app that is gone.
+                if let Err(error) = lifecycle.supervisor.stop(&slug) {
+                    return Answer::Full(Response::json(
+                        500,
+                        error_body(&format!(
+                            "`{slug}` could not be stopped, so nothing was deleted: {error}"
+                        )),
+                    ));
+                }
+                // Every credential and every in-flight turn for this app dies with it. A ticket
+                // that outlived its app would open routes for a directory that is gone; a turn
+                // still running would append a transcript into a file whose parent is being
+                // removed. Both are stopped here rather than left to fail later.
+                self.tickets.revoke(slug.as_str());
+                self.turns.stop(slug.as_str());
+                lifecycle.rebuild.forget(&slug);
+
+                match deepnest_apps::remove::remove(apps_dir, &slug) {
+                    Ok(removed) => Answer::Full(Response::json(
+                        200,
+                        json!({
+                            "slug": removed.slug,
+                            "dir": removed.dir.display().to_string(),
+                            // What a confirmation can be honest about: how much went with it.
+                            "entries": removed.entries,
+                            "bytes": removed.bytes,
+                        })
+                        .to_string(),
+                    )),
+                    Err(error) => Answer::Full(Response::json(500, error_body(&error.to_string()))),
+                }
+            }
             Action::Start => {
                 let log = deepnest_apps::log_path(&lifecycle.home, &slug);
                 Answer::Full(started(&slug, lifecycle.supervisor.start(&slug, &dir, log)))
@@ -1985,6 +2035,13 @@ enum Action {
     Start,
     Stop,
     Restart,
+    /// Delete the app's directory, and everything in it.
+    ///
+    /// The only action here that destroys something with no undo: the database, the front end's
+    /// build output and the agent's whole conversation live in that one directory. Two things
+    /// follow and both are in the handler rather than in a UI: the process is stopped first, and
+    /// the caller has to name the app it is destroying (`?confirm=<slug>`).
+    Delete,
     /// Send one message to the app's agent, in the body.
     Chat,
     /// Take a picture of the screen, and answer it in a form the box can attach.
@@ -2050,6 +2107,7 @@ impl Action {
             "start" => Some(Self::Start),
             "stop" => Some(Self::Stop),
             "restart" => Some(Self::Restart),
+            "delete" => Some(Self::Delete),
             chat::ACTION => Some(Self::Chat),
             capture::ACTION => Some(Self::Capture),
             escalation::ACTION => Some(Self::Escalation),
@@ -2064,7 +2122,7 @@ impl Action {
     }
 
     /// The verbs, for a refusal that tells the caller what would have worked.
-    const VERBS: &str = "create, build, start, stop, restart, chat, capture, cancel, \
+    const VERBS: &str = "create, build, start, stop, restart, delete, chat, capture, cancel, \
                          escalation, history, sessions, agent, agent-result or tools";
 }
 
@@ -3533,6 +3591,79 @@ mod tests {
     }
 
     #[test]
+    fn deleting_an_app_needs_its_name_in_the_request_and_then_removes_it() {
+        // The one press on the panel that cannot be taken back, so the confirmation is a fact in
+        // the request rather than a question this server cannot ask: a double-submitted form or a
+        // script that guessed a URL deletes nothing.
+        let scratch = Scratch::new("delete");
+        scratch.app("notes", "Notes");
+        let router = supervised(&scratch).with_apps_dir(scratch.apps());
+
+        let refused = router.respond(&post("/api/apps/notes/delete")).complete();
+        assert_eq!(refused.status, 400, "{:?}", refused);
+        assert!(
+            error_text(&refused).contains("confirm=notes"),
+            "the refusal names what to send: {}",
+            body(&refused)
+        );
+        assert!(scratch.apps().join("notes").is_dir(), "nothing was deleted");
+
+        let gone = router
+            .respond(&post("/api/apps/notes/delete?confirm=notes"))
+            .complete();
+        assert_eq!(gone.status, 200, "{:?}", gone);
+        assert!(
+            !scratch.apps().join("notes").exists(),
+            "the directory is gone"
+        );
+        // What a confirmation can be honest about: how much went with it.
+        let said = body(&gone);
+        assert!(said.contains("\"slug\":\"notes\""), "{said}");
+        assert!(said.contains("\"entries\":"), "{said}");
+    }
+
+    #[test]
+    fn deleting_an_app_that_is_not_there_is_not_found() {
+        let scratch = Scratch::new("delete-missing");
+        let router = supervised(&scratch).with_apps_dir(scratch.apps());
+        let response = router
+            .respond(&post("/api/apps/notes/delete?confirm=notes"))
+            .complete();
+        assert_eq!(response.status, 404, "{:?}", response);
+    }
+
+    #[test]
+    fn deleting_an_app_takes_its_process_ticket_with_it() {
+        // A ticket that outlived its app would open routes for a directory that is gone.
+        let scratch = Scratch::new("delete-ticket");
+        scratch.app("notes", "Notes");
+        let tickets = crate::ticket::Tickets::new();
+        let value = tickets.mint("notes").unwrap();
+        let router = supervised(&scratch)
+            .with_apps_dir(scratch.apps())
+            .with_tickets(tickets.clone());
+
+        let gone = router
+            .respond(&post("/api/apps/notes/delete?confirm=notes"))
+            .complete();
+        assert_eq!(gone.status, 200, "{:?}", gone);
+        assert_eq!(tickets.len(), 0, "the ticket was revoked with the app");
+
+        // And the credential itself is refused now, which is the fact the revocation is for. The
+        // ticket check comes before the directory check, so the answer is the door's `401` rather
+        // than a `404` about an app that is gone — the caller is told it is not admitted, which is
+        // true whether or not the app still existed.
+        let after = router
+            .respond(&app_post(
+                "/api/apps/notes/agent",
+                &value,
+                r#"{"agent":"triage","message":"hi"}"#,
+            ))
+            .complete();
+        assert_eq!(after.status, 401, "{:?}", after);
+    }
+
+    #[test]
     fn a_start_runs_the_app_and_reports_the_port_it_took() {
         let scratch = Scratch::new("life-start");
         scratch.built_app("notes", "Notes");
@@ -3660,17 +3791,17 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_action_is_not_found_and_the_refusal_lists_the_fourteen_that_exist() {
+    fn an_unknown_action_is_not_found_and_the_refusal_lists_the_fifteen_that_exist() {
         let scratch = Scratch::new("life-action");
         scratch.built_app("notes", "Notes");
         let router = supervised(&scratch);
 
-        let unknown = router.respond(&post("/api/apps/notes/delete")).complete();
+        let unknown = router.respond(&post("/api/apps/notes/rename")).complete();
         assert_eq!(unknown.status, 404);
         assert!(
             body(&unknown).contains(
-                "create, build, start, stop, restart, chat, capture, cancel, escalation, \
-                 history, sessions, agent, agent-result or tools"
+                "create, build, start, stop, restart, delete, chat, capture, cancel, \
+                 escalation, history, sessions, agent, agent-result or tools"
             ),
             "{:?}",
             unknown
@@ -3682,8 +3813,8 @@ mod tests {
         assert_eq!(bare.status, 404);
         assert!(
             body(&bare).contains(
-                "create, build, start, stop, restart, chat, capture, cancel, escalation, \
-                 history, sessions, agent, agent-result or tools"
+                "create, build, start, stop, restart, delete, chat, capture, cancel, \
+                 escalation, history, sessions, agent, agent-result or tools"
             ),
             "{:?}",
             bare
