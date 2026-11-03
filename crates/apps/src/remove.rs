@@ -244,6 +244,9 @@ mod tests {
         assert!(error.to_string().contains("nothing was deleted"), "{error}");
     }
 
+    // Creating a symlink needs a privilege Windows does not grant a normal account, so the setup
+    // only exists on unix; `remove` itself checks the entry the same way on both.
+    #[cfg(unix)]
     #[test]
     fn a_symlink_is_refused_and_neither_side_of_it_is_removed() {
         let scratch = Scratch::new("symlink");
