@@ -4901,6 +4901,10 @@ mod tests {
                 .complete(),
         );
         assert!(script.contains("dnc-root"), "{script}");
+        // Which app the window is talking to comes from the address it was served under. The meta
+        // is not enough: a page in the stage's frame carries none, and a window that read only the
+        // meta would draw nothing in the only shape most people see.
+        assert!(script.contains("location.pathname"), "{script}");
         assert!(!script.contains("deepnest-token"), "{script}");
         // The app's process credential must never reach a page: a page holding it could spend
         // every turn the app has, and no window needs it.

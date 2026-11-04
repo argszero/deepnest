@@ -44,13 +44,36 @@
   var agent = (script && script.getAttribute("data-agent")) || "";
   var label = (script && script.getAttribute("data-label")) || "Assistant";
 
-  // Where the app is, from the meta the gateway writes into every page it serves. Absent means this
-  // page is not being served by deepnest — opened from the filesystem, or the app is running on its
-  // own port during development — and none of the three routes exists to call.
-  var meta = document.querySelector('meta[name="deepnest-app"]');
-  var slug = meta ? meta.getAttribute("content") || "" : "";
+  // Where the app is. Two readings, and the second is not a fallback for a special case — it is the
+  // one that matters: the meta is written into a page deepnest serves directly, and since the app
+  // moved into a frame the frame's page carries no meta at all (the gateway injects the dialog into
+  // the tab's page instead). What every shape does carry is the prefix it was served under,
+  // `/app/<slug>/`, because that is the address the browser asked for. Reading it from the meta
+  // first keeps the older single-page shape working without a second mechanism.
+  var slug = (document.querySelector('meta[name="deepnest-app"]') || {}).content || "";
 
-  if (!slug || !agent) {
+  if (!slug) {
+    var served = /^\/app\/([^\/?#]+)\//.exec(window.location.pathname);
+    if (served) {
+      try {
+        slug = decodeURIComponent(served[1]);
+      } catch (error) {
+        slug = served[1];
+      }
+    }
+  }
+
+  if (!agent) {
+    return;
+  }
+  if (!slug) {
+    // A page opened from the filesystem, or the app running on its own port while it is being
+    // developed: none of the three routes exists there, so there is nothing to draw. Said out loud
+    // rather than silently, because a window that does not appear is otherwise indistinguishable
+    // from one that failed.
+    if (window.console && console.warn) {
+      console.warn("agent-chat: this page is not being served by deepnest, so there is nothing to talk to");
+    }
     return;
   }
 
