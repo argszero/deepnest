@@ -890,6 +890,15 @@ const INDEX_HTML: &str = r#"<!doctype html>
 <body>
 <div id="root"></div>
 <script type="module" src="./main.js"></script>
+<!-- The app's own agent, as a window. One line, and the `assistant` declared in deepnest.toml
+     answers with its answer arriving as it is written, its conversation surviving a reload, and a
+     Stop that reaches the turn. deepnest serves both files; this app builds neither. The `data-agent`
+     name has to match the `[[agent]]` table, and the script draws nothing when it does not.
+
+     Served from deepnest rather than written here for the reason the dialog is: an agent rewriting
+     this page wholesale would otherwise rewrite the chat window too, and every app would get a
+     different one — the one the model happened to write that day. -->
+<script src="/agent-chat.js" data-agent="assistant" data-label="Assistant"></script>
 </body>
 </html>
 "#;

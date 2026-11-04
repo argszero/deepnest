@@ -1038,7 +1038,7 @@ mod tests {
 
         assert_eq!(
             header(&response, "content-security-policy").as_deref(),
-            Some("default-src 'none'; script-src 'self'; style-src 'self'")
+            Some("default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'")
         );
     }
 

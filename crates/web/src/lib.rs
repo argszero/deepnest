@@ -104,6 +104,23 @@ pub const DIALOG_FRAME_SCRIPT: &str = include_str!("dialog-frame.js");
 /// The app page's dialog stylesheet.
 pub const DIALOG_STYLE: &str = include_str!("dialog.css");
 
+/// Where an app's own chat window is served.
+///
+/// A third asset pair beside the panel's and the dialog's, and a different question: the dialog is
+/// deepnest talking about the app, this is the app talking to an agent it declared. An app asks for
+/// it in its own markup — one `<script>` line — so its path is a contract with every app the agent
+/// has already written, which is why it is a constant here rather than a literal in a template.
+pub const AGENT_CHAT_SCRIPT_PATH: &str = "/agent-chat.js";
+
+/// Where that window's stylesheet is served.
+pub const AGENT_CHAT_STYLE_PATH: &str = "/agent-chat.css";
+
+/// The app's own chat window.
+pub const AGENT_CHAT_SCRIPT: &str = include_str!("agent-chat.js");
+
+/// The app's own chat window's stylesheet.
+pub const AGENT_CHAT_STYLE: &str = include_str!("agent-chat.css");
+
 /// What `GET /` is allowed to load.
 ///
 /// `script-src 'self'` and nothing else: no inline script, no `eval`, no third-party origin. There

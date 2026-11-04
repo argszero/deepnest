@@ -34,6 +34,10 @@
 //!   the app wrote `default-src` and no `script-src` — is invented with `default-src`'s own
 //!   sources plus `'self'`, not with `'self'` alone: `default-src 'unsafe-inline'` already allowed
 //!   inline script, and answering it with `script-src 'self'` would take that away.
+//! - **The app's own chat window needs a `fetch`, so `connect-src` moves with them.** It is part of
+//!   the app's page rather than the stage's, and it talks to deepnest over `fetch`; a policy of
+//!   `default-src 'none'` would otherwise leave a window that draws and can say nothing, which is
+//!   the same silent failure one step further along.
 //! - **`'none'` cannot stand beside anything.** It is only legal as the sole source, and a policy
 //!   that lists it with others is one browsers resolve by ignoring it. So it is replaced rather
 //!   than joined, and the result says what it means.
@@ -195,7 +199,12 @@ pub fn policy(value: &str) -> String {
         .find(|(name, _)| name.eq_ignore_ascii_case("default-src"))
         .map(|(_, sources)| sources.clone());
 
-    for wanted in ["script-src", "style-src"] {
+    // `connect-src` is here for the app's own agent: its chat window is part of the app's page and
+    // talks to deepnest with `fetch`, so an app that writes `default-src 'none'` would get a window
+    // that draws and cannot say anything. The same rule as the other two — widened, never invented
+    // out of nothing — and it grants no capability the page did not already have: the cookies it
+    // would spend are minted for that page either way.
+    for wanted in ["script-src", "style-src", "connect-src"] {
         match find(&mut directives, wanted) {
             Some(sources) => allow_self(sources),
             None => {
@@ -365,7 +374,8 @@ mod tests {
         // not judge.
         assert_eq!(
             policy("default-src 'self'; script-src 'unsafe-eval'"),
-            "default-src 'self'; script-src 'unsafe-eval' 'self'; style-src 'self'"
+            "default-src 'self'; script-src 'unsafe-eval' 'self'; style-src 'self'; \
+             connect-src 'self'"
         );
     }
 
@@ -389,7 +399,7 @@ mod tests {
         assert_eq!(
             policy("default-src 'unsafe-inline'"),
             "default-src 'unsafe-inline'; script-src 'unsafe-inline' 'self'; \
-             style-src 'unsafe-inline' 'self'"
+             style-src 'unsafe-inline' 'self'; connect-src 'unsafe-inline' 'self'"
         );
     }
 
@@ -416,7 +426,8 @@ mod tests {
     fn directive_names_are_matched_in_any_spelling() {
         assert_eq!(
             policy("DEFAULT-SRC 'none'; Script-Src 'none'"),
-            "DEFAULT-SRC 'none'; Script-Src 'self'; style-src 'self'"
+            "DEFAULT-SRC 'none'; Script-Src 'self'; style-src 'self'; \
+             connect-src 'self'"
         );
     }
 
