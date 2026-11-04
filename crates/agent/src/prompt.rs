@@ -571,6 +571,12 @@ mod tests {
         ] {
             assert!(prompt.contains(fact), "the section never says `{fact}`");
         }
+        // And the window it should use rather than write: where it is served, how it is switched
+        // on, and the one request that makes it not a text box. A prompt that mentions the agent
+        // loop but not the window is the prompt that produced five different chat windows.
+        for fact in ["/agent-chat.js", "data-agent", "text/event-stream"] {
+            assert!(prompt.contains(fact), "the section never says `{fact}`");
+        }
         assert!(!system_prompt(&ctx()).contains("Your app can have agents of its own"));
     }
 
