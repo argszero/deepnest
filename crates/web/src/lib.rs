@@ -3886,6 +3886,35 @@ mod tests {
     }
 
     #[test]
+    fn the_panel_reads_the_skills_section_again_after_a_refresh() {
+        // A refresh changes what that section says: the skill moves out of the offer list into the
+        // installed one, both counts in the summary change, and the line under its name stops
+        // saying the catalog has it and this machine does not. A page that never read those again
+        // showed a successful install as a press that did nothing, and kept offering Install for a
+        // skill that was already on disk — so the section is re-read from the page rather than
+        // patched here, and both halves cannot disagree about it.
+        assert!(
+            SCRIPT.contains("new DOMParser()"),
+            "the panel never reads the skills section again, so an install leaves the offer row \
+             standing next to the file it just wrote"
+        );
+        assert!(
+            SCRIPT.contains(r#"getElementById("skills-section")"#),
+            "the section the script re-reads is not the one the markup carries"
+        );
+        assert!(
+            PAGE.contains(r#"<section id="skills-section">"#),
+            "the script looks the section up by an id the markup does not have"
+        );
+        // Only that section: the dialog had to give up a whole-tab reload because it took the
+        // conversation with it, and a half-typed app name is the same loss one page over.
+        assert!(
+            !SCRIPT.contains("location.reload()"),
+            "the panel reloads the tab to show one new skill, taking every other field with it"
+        );
+    }
+
+    #[test]
     fn the_script_calls_the_routes_the_server_has() {
         // Cheap guard against a script and a router drifting apart: every path the script fetches
         // is one this repository serves.

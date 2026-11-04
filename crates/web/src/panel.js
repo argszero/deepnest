@@ -491,10 +491,13 @@
       .then(function () {
         return awaitRefresh(name, row, REFRESH_POLLS, verb);
       })
-      .then(function () {
+      .then(function (installed) {
         // Enabled again either way: a refresh that failed can be asked for again, and one that
         // worked is cheap to repeat.
         press.textContent = verb;
+        if (installed) {
+          rereadSkills();
+        }
       })
       .catch(function (error) {
         press.textContent = verb;
@@ -502,6 +505,9 @@
       });
   }
 
+  // Answers whether the file on disk changed, which is the caller's question rather than the
+  // row's: the row is told what the outcome was, and the section above it is what says what this
+  // machine now has installed.
   function awaitRefresh(name, row, left, verb) {
     // "Refreshed" or "Installed", from the word on the press that was used: a first install
     // reported as a refresh would describe something that never happened.
@@ -515,14 +521,14 @@
             done + (refresh.version ? " to " + refresh.version : ", version still unknown"),
             "note"
           );
-        } else {
-          reportRefresh(row, "not " + done + ": " + (refresh.detail || "no reason given"), "bad");
+          return true;
         }
-        return null;
+        reportRefresh(row, "not " + done + ": " + (refresh.detail || "no reason given"), "bad");
+        return false;
       }
       if (left <= 0) {
         reportRefresh(row, "still running; reload the page to see how it ended", "note");
-        return null;
+        return false;
       }
       return new Promise(function (resolve) {
         setTimeout(function () {
@@ -565,6 +571,48 @@
     }
     said.className = kind + " refresh-outcome";
     said.textContent = " " + text;
+  }
+
+  // ---- the section after a refresh -----------------------------------------------------------
+
+  // Read the skills section again from the server, rather than patch it here. A refresh changes
+  // what that section says: a skill it newly installed moves out of the offer list into the
+  // installed one, both counts in the summary change, and the line under its name — "in the
+  // catalog, not installed here" — stops being true. Each of those is a render of what is on disk,
+  // and this file is not a second place they are written down: it has already been the reader of
+  // one section, and a merge of the two would drift the first time the server's half changed.
+  //
+  // Only the section is replaced, and only its open state is carried over. The rest of the page is
+  // none of an install's business — a half-typed app name, a model field, an app row mid-stop —
+  // and a reload is exactly what the dialog had to stop doing for that reason.
+  function rereadSkills() {
+    return fetch("/", { cache: "no-store", mode: "same-origin" })
+      .then(function (response) {
+        return response.text();
+      })
+      .then(function (page) {
+        var fresh = new DOMParser().parseFromString(page, "text/html");
+        var here = document.getElementById("skills-section");
+        var there = fresh.getElementById("skills-section");
+        if (!here || !there) {
+          return;
+        }
+        var box = document.getElementById("skills-box");
+        var freshBox = fresh.getElementById("skills-box");
+        if (box && freshBox) {
+          freshBox.open = box.open;
+        }
+        here.replaceWith(there);
+        // The presses are the script's half of the section, so the markup that arrived has none:
+        // the offers need theirs bound, and the installed rows need their update line asked for.
+        bindOffers();
+        refreshUpdates();
+      })
+      .catch(function (error) {
+        // The install did happen; only this page's copy of it is behind. Said out loud rather than
+        // swallowed, because the row still reads as offered and that is the state that looks broken.
+        say("Installed, but this page could not be read back: " + (error.message || error), "bad");
+      });
   }
 
   bindOffers();

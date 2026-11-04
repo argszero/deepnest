@@ -424,6 +424,14 @@ start leaves behind without starting one. Four decisions:
   `installer::install` writes the file either way and reports which happened through `replaced` — so
   both presses share the refresh queue and poll instead of growing a second copy of each, and the
   outcome sentence takes its word from the press that was used.
+- **A refresh that wrote a file makes the page read the section again** (`decided in implementation`,
+  2026-11-04). The row it was pressed on says "in the catalog, not installed here", the summary
+  counts both lists, and an install changes every one of those — a page left as it was showed a
+  successful install as a press that did nothing. The script takes the section out of a fresh copy
+  of the page rather than patching those sentences itself, which would be a second place the same
+  facts are written down; only that section is replaced, because the dialog had to give up a
+  whole-tab reload for taking the conversation with it, and a half-typed app name is the same loss
+  one page over.
 - **A catalog line that will not parse is reported where unusable skills already are.** The same
   fact one level up: an entry that vanished without a word is indistinguishable from a catalog that
   never held it.
