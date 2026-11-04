@@ -407,6 +407,13 @@ Five decisions came with it:
   `GET` is never one; `agent-result` under `GET` is a `405` naming the method, for the callers that
   can open it at all — the token or the app's ticket, since the page's cookie opens `agent` alone.
 
+One thing moves in the gateway for it: `connect-src` joins the directives the injected page's
+policy is widened with, beside `script-src` and `style-src`. The window is part of the app's page
+rather than the stage's, so an app that writes `default-src 'none'` would otherwise get a window that
+draws and can say nothing — the same silent failure the policy rewrite already exists to prevent, one
+step further along. It grants nothing the page did not already have: the cookies that fetch would
+spend are minted for that page either way.
+
 The window itself is held to the rules the panel is: every piece of text goes in as a node, never as
 markup; a turn that paused mid-batch shows as still pending rather than as a finished answer; and a
 failure is shown on the row that caused it, in the window, not swallowed.
