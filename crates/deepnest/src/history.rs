@@ -522,7 +522,17 @@ fn push(turns: &mut Vec<Turn>, record: &Record) {
 /// The session is asked for rather than assumed: what a turn writes to and what the page reads from
 /// have to be one answer, and [`crate::sessions::history_path`] is where the answer lives.
 pub fn body(app_dir: &Path) -> String {
-    let turns = read_at(&crate::sessions::history_path(app_dir));
+    body_at(&crate::sessions::history_path(app_dir))
+}
+
+/// The same body, of a file named by the caller.
+///
+/// Split out for the app's own agents: an app that declares three of them has three conversations,
+/// each in its own directory, and the page of the second has to read the second one. The parsing
+/// and the shape must be the same as the dialog's, or two transcripts of one repository would
+/// disagree about what a turn looks like.
+pub fn body_at(path: &Path) -> String {
+    let turns = read_at(path);
     serde_json::json!({ "turns": turns }).to_string()
 }
 

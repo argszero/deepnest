@@ -460,6 +460,20 @@ impl Router {
                 "text/javascript; charset=utf-8",
                 deepnest_web::DIALOG_FRAME_SCRIPT.as_bytes().to_vec(),
             )),
+            // The window an app shows to talk to an agent it declared. Served without the token,
+            // for the reason the dialog is: the page that loads it is the app's, and the app's own
+            // script shares this origin. What it may then *do* is bounded by a cookie scoped to the
+            // three routes it calls, not by holding this file.
+            deepnest_web::AGENT_CHAT_SCRIPT_PATH => Answer::Full(Response::new(
+                200,
+                "text/javascript; charset=utf-8",
+                deepnest_web::AGENT_CHAT_SCRIPT.as_bytes().to_vec(),
+            )),
+            deepnest_web::AGENT_CHAT_STYLE_PATH => Answer::Full(Response::new(
+                200,
+                "text/css; charset=utf-8",
+                deepnest_web::AGENT_CHAT_STYLE.as_bytes().to_vec(),
+            )),
             "/api/health" => Answer::Full(Response::json(200, self.health())),
             "/api/config" => {
                 if !self.authorized(request) {
@@ -649,6 +663,10 @@ impl Router {
         let mut response = response;
         for action in [
             chat::ACTION,
+            // The app's own agent, which its own page drives: the same reason `chat` is here, one
+            // route over. An app that declares an `[[agent]]` has a chat window of its own, and the
+            // browser holding that page is what sends the message.
+            crate::appagent::ACTION,
             cancel::ACTION,
             escalation::ACTION,
             rebuild::ACTION,
@@ -1245,11 +1263,16 @@ impl Router {
         // The drawer's list is the third. `POST` on the same route is how a person chooses a
         // conversation, so `GET` here asks without choosing and changes nothing.
         let sessions_read = action == Action::Sessions && request.method == Method::Get;
+        // The fourth is the app's own agent: an app's chat window reads the conversation it is
+        // showing through the same path it sends on, and a read that had to be a `POST` would be a
+        // page pretending to send something in order to look at what it already said.
+        let agent_read = action == Action::Agent && request.method == Method::Get;
         if request.method != Method::Post
             && action != Action::Escalation
             && !build_status_read
             && !history_read
             && !sessions_read
+            && !agent_read
         {
             // `chat` is the one verb here that does not change a process, so it is the one that
             // must not claim to: what a caller needs to know is the method, and the wording only
@@ -1283,8 +1306,15 @@ impl Router {
         // check because none of them needs it — a turn is the agent loop's, and a ticket is a
         // credential rather than a process — and because the check they do need is the ticket,
         // which must refuse before anything else happens.
+        // `agent` is the one of the three a page also reaches, because an app that declares an
+        // agent has a window its own page drives: that window is the browser, not the app's
+        // process, and it holds the cookie deepnest minted when it served the page. The other two
+        // stay the process's — a page able to answer a handed-back batch could invent the app's
+        // tool results, and a page able to offer tools could invent the app's capabilities.
         if matches!(action, Action::Agent | Action::AgentResult | Action::Tools) {
-            if !self.ticket_admits(request, slug.as_str(), action_text) {
+            let admitted = self.ticket_admits(request, slug.as_str(), action_text)
+                || (action == Action::Agent && self.grant_admits(request));
+            if !admitted {
                 return Answer::Full(unauthorized());
             }
             return self.agent_route(request, &slug, action);
@@ -1795,6 +1825,23 @@ impl Router {
             }
         }
 
+        // Reading a conversation and holding one are two different requests, and only one of them
+        // spends anything. `GET` is the read: which conversation is a query parameter, because a
+        // transcript behind a `POST` would be a page that has to pretend to send something in order
+        // to be able to look. Answered before the model is looked for: reading a history asks
+        // nothing of a model, and a machine with no endpoint configured can still show what was
+        // said yesterday.
+        if request.method == Method::Get || request.method == Method::Head {
+            if action != Action::Agent {
+                return Answer::Full(Response::json(
+                    405,
+                    error_body("the result of a handed-back batch is answered with POST"),
+                ));
+            }
+            let reply = crate::appagent::transcript(request, &dir, slug);
+            return Answer::Full(Response::json(reply.status, reply.body.to_string()));
+        }
+
         // The model, built per request rather than held: `POST /api/config` can change the endpoint
         // at any moment, and an agent assembled at startup would answer the old one until the next
         // start. The same reasoning `chat` gives, and the same two refusals before a turn starts.
@@ -1802,11 +1849,95 @@ impl Router {
             Ok(model) => model,
             Err(answer) => return Answer::Full(answer),
         };
-        let reply = match action {
-            Action::Agent => crate::appagent::route(request, Some(model), &home, &dir, slug),
-            _ => crate::appagent::result_route(request, Some(model), &home, &dir, slug),
-        };
-        Answer::Full(Response::json(reply.status, reply.body.to_string()))
+
+        // This turn is registered before it starts, so `POST .../cancel` on another connection has
+        // something to stop — the same registry the dialog's own turns use, because what a person
+        // means by "stop" is "stop this app's work" whoever started it. The ticket lives to the end
+        // of this call in the unwatched shape, and inside the body in the watched one.
+        let ticket = self.turns.begin(slug.as_str());
+
+        // A caller that did not ask to watch gets exactly what this route has always answered: one
+        // body, produced by one turn that nobody observes. An app's own process is that caller —
+        // it sent a request and is waiting for a result to hand back or to show.
+        if !wants_events(request) {
+            let cancel = ticket.cancellation();
+            let reply = match action {
+                Action::Agent => crate::appagent::route(
+                    request,
+                    Some(model),
+                    &home,
+                    &dir,
+                    slug,
+                    &cancel,
+                    &mut |_| {},
+                ),
+                _ => crate::appagent::result_route(
+                    request,
+                    Some(model),
+                    &home,
+                    &dir,
+                    slug,
+                    &cancel,
+                    &mut |_| {},
+                ),
+            };
+            return Answer::Full(Response::json(reply.status, reply.body.to_string()));
+        }
+
+        // The watched shape: the head goes out before the turn starts, and every piece of the
+        // answer goes out as it is written. Everything the body needs is owned rather than
+        // borrowed, because it runs after this call has returned.
+        let home = home.clone();
+        let dir = dir.clone();
+        let slug = slug.clone();
+        // Owned rather than borrowed: this body runs after the call that built it has returned,
+        // and `request` is a reference that dies with that call.
+        let request = request.clone();
+        Answer::Produced(Produced::new(events_head(), move |out| {
+            // Held here rather than in the request: the turn outlives the call that started it,
+            // and dropping the ticket is what takes the turn out of the registry a cancel looks in.
+            let _ticket = ticket;
+            let cancel = _ticket.cancellation();
+            let mut unwritable: Option<std::io::Error> = None;
+            let reply = {
+                let mut on_text = |text: &str| {
+                    if unwritable.is_some() {
+                        // The page closed the tab. The turn keeps running and the writes that
+                        // follow are skipped, rather than retried against a socket that is gone.
+                        return;
+                    }
+                    if let Err(error) = write_event(&mut *out, "text", &json!({ "text": text })) {
+                        unwritable = Some(error);
+                    }
+                };
+                match action {
+                    Action::Agent => crate::appagent::route(
+                        &request,
+                        Some(model),
+                        &home,
+                        &dir,
+                        &slug,
+                        &cancel,
+                        &mut on_text,
+                    ),
+                    _ => crate::appagent::result_route(
+                        &request,
+                        Some(model),
+                        &home,
+                        &dir,
+                        &slug,
+                        &cancel,
+                        &mut on_text,
+                    ),
+                }
+            };
+            if let Some(error) = unwritable {
+                return Err(error);
+            }
+            let kind = if reply.status == 200 { "done" } else { "error" };
+            write_event(out, kind, &reply.body)?;
+            out.flush()
+        }))
     }
 
     /// The model a turn runs on, or the answer that says why there is none.
@@ -2132,7 +2263,7 @@ impl Action {
 /// space because that is what a browser sends for one in a query, and a malformed escape is left as
 /// written rather than dropped: the name it produces then fails the manifest's non-blank check,
 /// which is a reportable failure instead of a silently mangled name.
-fn query_parameter(query: &str, name: &str) -> Option<String> {
+pub(crate) fn query_parameter(query: &str, name: &str) -> Option<String> {
     for pair in query.split('&') {
         let (key, value) = match pair.split_once('=') {
             Some(pair) => pair,
@@ -4543,8 +4674,8 @@ mod tests {
 
     /// The same page, returning the six capabilities the tests below spend.
     ///
-    /// The page mints a seventh — the screenshot route's — which the count just below covers, and
-    /// which the capture test spends by name. It is not handed back here because eleven call sites
+    /// The page mints two more — the screenshot route's and the app's own agent's — which the
+    /// counts just below cover, and which the capture and window tests spend by name. It is not handed back here because eleven call sites
     /// destructure this tuple, and widening it to reach one value would touch eleven tests for a
     /// route none of them exercises.
     #[allow(clippy::type_complexity)]
@@ -4564,7 +4695,7 @@ mod tests {
         let cookies = set_cookies(&page);
         assert_eq!(
             cookies.len(),
-            7,
+            8,
             "a page carries one cookie per route: {cookies:?}"
         );
         let chat = cookies
@@ -4744,6 +4875,169 @@ mod tests {
     }
 
     #[test]
+    fn the_app_chat_window_is_served_without_the_token() {
+        // One line of an app's markup loads this, and that markup is on a page the app owns. If it
+        // needed the token the app's own script could read it, so it is served like the dialog's:
+        // open to the origin, and useful only to a page holding the cookie that names its route.
+        let router = router();
+        for (path, kind) in [
+            (
+                deepnest_web::AGENT_CHAT_SCRIPT_PATH,
+                "text/javascript; charset=utf-8",
+            ),
+            (
+                deepnest_web::AGENT_CHAT_STYLE_PATH,
+                "text/css; charset=utf-8",
+            ),
+        ] {
+            let served = router.respond(&get(path, "127.0.0.1:4270")).complete();
+            assert_eq!(served.status, 200, "{path}");
+            assert_eq!(served.content_type, kind, "{path}");
+        }
+
+        let script = body(
+            &router
+                .respond(&get(deepnest_web::AGENT_CHAT_SCRIPT_PATH, "127.0.0.1:4270"))
+                .complete(),
+        );
+        assert!(script.contains("dnc-root"), "{script}");
+        assert!(!script.contains("deepnest-token"), "{script}");
+        // The app's process credential must never reach a page: a page holding it could spend
+        // every turn the app has, and no window needs it.
+        assert!(!script.contains("DEEPNEST_APP_TICKET"), "{script}");
+
+        let style = body(
+            &router
+                .respond(&get(deepnest_web::AGENT_CHAT_STYLE_PATH, "127.0.0.1:4270"))
+                .complete(),
+        );
+        assert!(style.contains(".dnc-root"), "{style}");
+    }
+
+    #[test]
+    fn the_app_chat_window_reads_a_conversation_through_the_page_cookie() {
+        // The browser's half of the window, end to end: the page mints a cookie of its own, that
+        // cookie opens the read, a name the app never declared is refused with the names it did,
+        // and the read is not reachable without one.
+        let scratch = Scratch::new("window-read");
+        scratch.built_app("notes", "Notes");
+        std::fs::write(
+            scratch
+                .apps()
+                .join("notes")
+                .join(deepnest_apps::MANIFEST_FILE),
+            "[app]\nname = \"Notes\"\n\n[[agent]]\nname = \"assistant\"\n\
+             prompt = \"Show the list.\"\n",
+        )
+        .unwrap();
+        let router = supervised_forwarding(&scratch, RecordingForwarder::answering(200)).0;
+        let started = router.respond(&post("/api/apps/notes/start")).complete();
+        assert_eq!(started.status, 200, "{}", body(&started));
+        let page = router
+            .respond(&get("/app/notes/", "127.0.0.1:4270"))
+            .complete();
+        let cookie = set_cookies(&page)
+            .iter()
+            .find(|raw| raw.starts_with("deepnest-agent="))
+            .expect("the window's cookie")
+            .clone();
+        let value = grant_value(&cookie);
+
+        let path = "/api/apps/notes/agent?agent=assistant";
+        // Neither the app's process nor the panel: this is the browser, and it has no cookie yet.
+        let bare = router.respond(&get(path, "127.0.0.1:4270")).complete();
+        assert_eq!(bare.status, 401, "{:?}", bare);
+
+        let read = router
+            .respond(&with_named_grant(
+                "GET",
+                path,
+                crate::grant::AGENT_COOKIE,
+                &value,
+            ))
+            .complete();
+        assert_eq!(read.status, 200, "{}", body(&read));
+        // A conversation nobody has had is an empty list, not a refusal: a window that says
+        // "nothing yet" is right, and a `500` there would look like a broken app.
+        assert!(body(&read).contains("\"turns\":[]"), "{}", body(&read));
+
+        let undeclared = router
+            .respond(&with_named_grant(
+                "GET",
+                "/api/apps/notes/agent?agent=nope",
+                crate::grant::AGENT_COOKIE,
+                &value,
+            ))
+            .complete();
+        assert_eq!(undeclared.status, 404, "{}", body(&undeclared));
+        assert!(
+            body(&undeclared).contains("assistant"),
+            "{}",
+            body(&undeclared)
+        );
+    }
+
+    #[test]
+    fn the_window_cookie_opens_the_read_and_nothing_else() {
+        // The reason the app's own route has a cookie of its own rather than a second use of the
+        // dialog's: a page that may show a conversation must not be able to answer a handed-back
+        // batch, which would let it invent the app's tool results.
+        let scratch = Scratch::new("window-scope");
+        scratch.built_app("notes", "Notes");
+        let router = supervised_forwarding(&scratch, RecordingForwarder::answering(200)).0;
+        let started = router.respond(&post("/api/apps/notes/start")).complete();
+        assert_eq!(started.status, 200, "{}", body(&started));
+        let page = router
+            .respond(&get("/app/notes/", "127.0.0.1:4270"))
+            .complete();
+        let value = grant_value(
+            &set_cookies(&page)
+                .iter()
+                .find(|raw| raw.starts_with("deepnest-agent="))
+                .expect("the window's cookie")
+                .clone(),
+        );
+
+        for path in [
+            "/api/apps/notes/agent-result",
+            "/api/apps/notes/chat",
+            "/api/apps/notes/tools",
+        ] {
+            let refused = router
+                .respond(&with_named_grant(
+                    "POST",
+                    path,
+                    crate::grant::AGENT_COOKIE,
+                    &value,
+                ))
+                .complete();
+            assert_eq!(
+                refused.status, 401,
+                "{path} was opened by the window: {:?}",
+                refused
+            );
+        }
+    }
+
+    #[test]
+    fn the_result_of_a_handed_back_batch_is_answered_with_post() {
+        // The read and the write share one path and part company on the method. A program holding
+        // the token — the shape of an app's own process, which never has a cookie — is told which
+        // method it wanted instead of being sent the conversation.
+        let scratch = Scratch::new("window-method");
+        scratch.app("notes", "Notes");
+        let router = supervised(&scratch);
+        let mut asked = get("/api/apps/notes/agent-result", "127.0.0.1:4270");
+        asked.headers.push((
+            "authorization".to_string(),
+            format!("bearer {}", "a".repeat(64)),
+        ));
+        let answered = router.respond(&asked).complete();
+        assert_eq!(answered.status, 405, "{}", body(&answered));
+        assert!(body(&answered).contains("POST"), "{}", body(&answered));
+    }
+
+    #[test]
     fn the_token_still_opens_the_chat_route_without_any_cookie() {
         // The grant is an addition, not a replacement: a program holding the token keeps working
         // exactly as it did.
@@ -4773,21 +5067,27 @@ mod tests {
         .unwrap();
         let reloaded = router.respond(&again).complete();
         assert_eq!(reloaded.status, 200);
-        // The page presents six of the seven. None of those six is minted again — which is the
-        // churn this test is about — and the seventh, the screenshot route's, is handed over
-        // because this rewrite of the request does not carry it. Named rather than counted, so a
+        // The page presents six of the eight. None of those six is minted again — which is the
+        // churn this test is about — and the two this rewrite does not carry, the screenshot
+        // route's and the app's own agent's, are handed over. Named rather than counted, so a
         // capability added later fails here instead of passing quietly.
         let minted = set_cookies(&reloaded);
-        assert_eq!(minted.len(), 1, "a capability was minted twice: {minted:?}");
+        assert_eq!(minted.len(), 2, "a capability was minted twice: {minted:?}");
         assert!(
-            minted[0].starts_with("deepnest-capture="),
+            minted
+                .iter()
+                .any(|raw| raw.starts_with("deepnest-capture=")),
+            "the wrong capability was minted again: {minted:?}"
+        );
+        assert!(
+            minted.iter().any(|raw| raw.starts_with("deepnest-agent=")),
             "the wrong capability was minted again: {minted:?}"
         );
     }
 
     #[test]
     fn a_page_holding_one_capability_is_given_the_other_and_keeps_the_one_it_has() {
-        // The values are separate, so a page that has only one is given exactly the other six.
+        // The values are separate, so a page that has only one is given exactly the other seven.
         let scratch = Scratch::new("grant-half");
         scratch.built_app("notes", "Notes");
         let (router, chat, _, _, _, _, _) = app_page_with_grants(&scratch, "notes");
@@ -4798,7 +5098,7 @@ mod tests {
         .unwrap();
         let reloaded = router.respond(&again).complete();
         let minted = set_cookies(&reloaded);
-        assert_eq!(minted.len(), 6, "{minted:?}");
+        assert_eq!(minted.len(), 7, "{minted:?}");
         assert!(
             minted
                 .iter()
@@ -4839,7 +5139,7 @@ mod tests {
             .complete();
 
         let cookies = set_cookies(&page);
-        assert_eq!(cookies.len(), 7, "{cookies:?}");
+        assert_eq!(cookies.len(), 8, "{cookies:?}");
         let chat = cookies
             .iter()
             .find(|raw| raw.starts_with("deepnest-chat="))

@@ -356,7 +356,29 @@ app's own server answers one request at a time as it always did. Keep it that wa
 round is one handoff, so put independent calls in the same round — each pause is a round trip of \
 its own, in wall time and in tokens.\n\n\
 The template's `src/deepnest.rs` is a working example of the whole loop, including the HTTP client \
-the app needs to talk to deepnest. Read it before writing your own.\n\
+the app needs to talk to deepnest. Read it before writing your own.\n\n\
+**When the person should talk to that agent, give it a window — do not write one.** deepnest serves \
+a finished chat window at `/agent-chat.js` and `/agent-chat.css`, and one line in the app's page \
+turns it on:\n\n\
+```html\n<script src=\"/agent-chat.js\" data-agent=\"triage\" data-label=\"Triage\"></script>\n```\n\n\
+`data-agent` is the name from the app's `[[agent]]` table. What that window already does, and what a \
+hand-written one loses:\n\n\
+- **The answer arrives as it is written.** It asks for the turn with `Accept: text/event-stream` and \
+draws each piece as it comes. A hand-written `fetch` that awaits the whole reply leaves the person \
+looking at nothing while the turn runs — and a turn with tools runs for a minute or more.\n\
+- **Reloading does not lose the conversation.** It reads `GET /api/apps/<slug>/agent?agent=<name>`, \
+the same `history.jsonl` the turn appends to.\n\
+- **Stop works.** Its Stop button calls `POST /api/apps/<slug>/cancel`, which ends the turn — \
+including a model call already in flight. A hand-written window has nothing to press.\n\
+- **It is safe with the model's words.** Everything is inserted with `textContent`, so an answer \
+containing markup stays an answer.\n\n\
+Those three routes need no token and no ticket: the browser presents the cookies deepnest minted when \
+it served the app's page, scoped to those paths. So the window works on an app whose own server knows \
+nothing about it. Do not put `DEEPNEST_APP_TICKET` into a page — that credential is the app's process, \
+and a page carrying it can spend every turn the app has.\n\n\
+Style it from your own CSS if the default does not fit: everything the window creates is inside \
+`.dnc-root` and prefixed `dnc-`, so your rules and its rules cannot collide. Do not copy the file into \
+the app; the copy is the version that stops being fixed.\n\
 ",
         );
     }

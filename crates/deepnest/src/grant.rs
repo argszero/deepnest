@@ -115,6 +115,14 @@ pub const SESSIONS_COOKIE: &str = "deepnest-sessions";
 /// module states above, which is why the paragraph exists instead of a sentence saying "safe".
 pub const CAPTURE_COOKIE: &str = "deepnest-capture";
 
+/// The capability to send a message to an agent the app declared.
+///
+/// A second cookie beside [`COOKIE`] rather than a reuse of it: the dialog's agent edits the app's
+/// source and the app's own agent answers the app's users, and a page that may reach one has no
+/// business reaching the other by accident. What an app's own scripts get is exactly the route its
+/// own chat window calls.
+pub const AGENT_COOKIE: &str = "deepnest-agent";
+
 /// How long a minted value stays usable.
 ///
 /// Long enough for a day's work in one tab, short enough that a value lifted out of a browser
@@ -144,6 +152,7 @@ pub fn cookie_name(action: &str) -> Option<&'static str> {
         crate::history::ACTION => Some(HISTORY_COOKIE),
         crate::sessions::ACTION => Some(SESSIONS_COOKIE),
         crate::capture::ACTION => Some(CAPTURE_COOKIE),
+        crate::appagent::ACTION => Some(AGENT_COOKIE),
         _ => None,
     }
 }

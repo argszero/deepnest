@@ -41,6 +41,12 @@ use crate::chat::Reply;
 use crate::http::{Method, Request};
 use crate::ticket;
 
+/// The verb this module answers, under `/api/apps/<slug>/`.
+///
+/// Spelled here because two places need it: the router, which routes on it, and the page's grants,
+/// which mint one cookie per route an app's own scripts may reach.
+pub const ACTION: &str = "agent";
+
 /// `POST /api/apps/<slug>/agent` — one turn of an agent the app declared.
 ///
 /// The body names the agent and carries the message:
@@ -67,6 +73,8 @@ pub fn route(
     home: &Path,
     app_dir: &Path,
     slug: &Slug,
+    cancel: &Cancellation,
+    on_text: &mut dyn FnMut(&str),
 ) -> Reply {
     let text = match body_text(request) {
         Ok(text) => text,
@@ -120,10 +128,11 @@ pub fn route(
         Err(reply) => return reply,
     };
 
-    // A stop cannot reach this turn: there is no page holding it and no second request naming it,
-    // so the flag is one nobody holds. The app can end a turn by not asking for the next one.
-    let cancel = Cancellation::new();
-    match agent.run_turn(message, &cancel) {
+    // Two things the app's own page asked for by sending this request: the turn is stoppable
+    // because the router registered it before calling here, and the answer is handed over as it is
+    // written because the caller passed an observer. An app that only wants the result passes a
+    // flag nobody holds and an observer that discards — which is what the app's own process does.
+    match agent.run_turn_watched(message, &[], cancel, on_text) {
         Ok(outcome) => reply(outcome),
         Err(error) => error_reply(&error),
     }
@@ -145,6 +154,8 @@ pub fn result_route(
     home: &Path,
     app_dir: &Path,
     slug: &Slug,
+    cancel: &Cancellation,
+    on_text: &mut dyn FnMut(&str),
 ) -> Reply {
     let text = match body_text(request) {
         Ok(text) => text,
@@ -205,8 +216,9 @@ pub fn result_route(
         Ok(agent) => agent,
         Err(reply) => return reply,
     };
-    let cancel = Cancellation::new();
-    match agent.resume(&results, &cancel) {
+    // The same two as the opening turn: the resumed round is a turn like any other, and a person
+    // who pressed stop while the app was running the calls meant this round too.
+    match agent.resume_watched(&results, cancel, on_text) {
         Ok(outcome) => reply(outcome),
         Err(error) => error_reply(&error),
     }
@@ -352,6 +364,119 @@ pub fn declared(app_dir: &Path, slug: &Slug, name: &str) -> Result<(), Reply> {
     ))
 }
 
+/// Where one declared agent's conversation lives.
+///
+/// One directory per agent, so two agents of one app never append to the same file — the failure
+/// that would produce is a turn reading another agent's memory as its own. A `session` key from the
+/// app nests one level further, sanitized rather than trusted: it becomes a directory name, and an
+/// app that sent `../../config` would otherwise choose where this writes. Same rule as a skill name
+/// and an agent name — lowercase letters, digits, hyphen — because this value ends up in a path on
+/// somebody's disk.
+///
+/// Pulled out of [`build`] rather than repeated by the transcript route: a page that reads a
+/// different file from the one the turn writes is a dialog showing another conversation's words,
+/// and it would look like a working page.
+pub fn conversation(
+    app_dir: &Path,
+    name: &str,
+    session_key: Option<&str>,
+) -> Result<AgentPaths, Reply> {
+    let root = AgentPaths::for_app(app_dir)
+        .root()
+        .join("agents")
+        .join(name);
+    let paths = match session_key {
+        Some(key) => {
+            let safe: String = key
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                        c.to_ascii_lowercase()
+                    } else {
+                        '-'
+                    }
+                })
+                .collect();
+            if safe.trim_matches('-').is_empty() {
+                return Err(failed(
+                    400,
+                    "the session key has no characters a directory name can use".to_string(),
+                ));
+            }
+            AgentPaths::at(root.join("sessions").join(safe))
+        }
+        None => AgentPaths::at(root),
+    };
+    if let Err(error) = paths.ensure() {
+        return Err(failed(
+            500,
+            format!("the agent's directory could not be created: {error}"),
+        ));
+    }
+    Ok(paths)
+}
+
+/// `GET /api/apps/<slug>/agent` — the conversation one declared agent has had.
+///
+/// The read half of the route above, and the reason an app's own chat window survives a reload: the
+/// turn writes `<app>/.agent/agents/<name>/history.jsonl` and this reads the same file back through
+/// the same parser the dialog's transcript uses, so two pages of one repository cannot disagree
+/// about what a turn looks like.
+///
+/// `agent` and `session` are query parameters rather than a body, because this changes nothing: a
+/// transcript behind a `POST` would be a page that has to pretend to send something in order to be
+/// able to look. A name the app never declared is refused with the names it does declare, and a
+/// conversation nobody has had is an empty list — a page that cannot show what happened is worse
+/// than a page saying "nothing yet".
+pub fn transcript(request: &Request, app_dir: &Path, slug: &Slug) -> Reply {
+    let name = crate::router::query_parameter(&request.query, "agent").unwrap_or_default();
+    if name.trim().is_empty() {
+        return failed(
+            400,
+            format!(
+                "the query names no agent: GET /api/apps/{slug}/agent?agent=<name>. {}",
+                declared_names(app_dir)
+            ),
+        );
+    }
+    let name = name.trim();
+    if let Err(reply) = declared(app_dir, slug, name) {
+        return reply;
+    }
+    let session_key = crate::router::query_parameter(&request.query, "session");
+    let paths = match conversation(app_dir, name, session_key.as_deref()) {
+        Ok(paths) => paths,
+        Err(reply) => return reply,
+    };
+    // The agent's own directory, so a page opens on an empty conversation rather than a `500`.
+    let turns = crate::history::read_at(&paths.history());
+    Reply {
+        status: 200,
+        body: json!({
+            "agent": name,
+            "session": session_key,
+            "turns": turns,
+        }),
+    }
+}
+
+/// What this app declares, as one sentence, for a refusal to end with.
+fn declared_names(app_dir: &Path) -> String {
+    let names: Vec<String> = match manifest::load(app_dir) {
+        Ok(manifest) => manifest
+            .agents
+            .iter()
+            .map(|agent| agent.name.clone())
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    if names.is_empty() {
+        "this app declares no agents — add an [[agent]] table to its deepnest.toml".to_string()
+    } else {
+        format!("this app declares: {}", names.join(", "))
+    }
+}
+
 /// Build one declared agent's turn.
 fn build(
     model: Arc<dyn Model>,
@@ -388,45 +513,7 @@ fn build(
         ));
     };
 
-    // One conversation directory per declared agent, so two agents of one app never append to the
-    // same file — the failure that would produce is a turn reading another agent's memory as its
-    // own.
-    let root = AgentPaths::for_app(app_dir)
-        .root()
-        .join("agents")
-        .join(name);
-    let paths = match session_key {
-        // A key from the app, sanitized rather than trusted: it becomes a directory name, and an
-        // app that sent `../../config` would otherwise choose where this writes. Same rule as a
-        // skill name and an agent name — lowercase letters, digits, hyphen — because this value
-        // ends up in a path on somebody's disk.
-        Some(key) => {
-            let safe: String = key
-                .chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                        c.to_ascii_lowercase()
-                    } else {
-                        '-'
-                    }
-                })
-                .collect();
-            if safe.trim_matches('-').is_empty() {
-                return Err(failed(
-                    400,
-                    "the session key has no characters a directory name can use".to_string(),
-                ));
-            }
-            AgentPaths::at(root.join("sessions").join(safe))
-        }
-        None => AgentPaths::at(root),
-    };
-    if let Err(error) = paths.ensure() {
-        return Err(failed(
-            500,
-            format!("the agent's directory could not be created: {error}"),
-        ));
-    }
+    let paths = conversation(app_dir, name, session_key)?;
 
     // Where it works: the manifest's `workdir`, resolved against the app's own directory so a
     // relative path means "beside the app" and never "wherever deepnest was started".
@@ -792,6 +879,14 @@ mod tests {
             request
         }
 
+        /// A `GET` with a query string, the way an app's own page reads its conversation.
+        fn read(&self, action: &str, query: &str) -> Request {
+            crate::http::parse(&format!(
+                "GET /api/apps/notes/{action}?{query} HTTP/1.1\r\nHost: 127.0.0.1:4270\r\n\r\n"
+            ))
+            .unwrap()
+        }
+
         /// The declarations an app sends with its request: one tool, run in the app.
         fn tools() -> Value {
             json!({
@@ -832,6 +927,8 @@ mod tests {
             &scratch.home(),
             &scratch.dir(),
             &scratch.slug(),
+            &Cancellation::new(),
+            &mut |_| {},
         );
 
         assert_eq!(reply.status, 200, "{:?}", reply.body);
@@ -866,6 +963,8 @@ mod tests {
             &scratch.home(),
             &scratch.dir(),
             &scratch.slug(),
+            &Cancellation::new(),
+            &mut |_| {},
         );
         assert_eq!(paused.body["outcome"], "paused", "{}", paused.body);
 
@@ -886,6 +985,8 @@ mod tests {
             &scratch.home(),
             &scratch.dir(),
             &scratch.slug(),
+            &Cancellation::new(),
+            &mut |_| {},
         );
 
         assert_eq!(resumed.status, 200, "{:?}", resumed.body);
@@ -920,6 +1021,8 @@ mod tests {
             &scratch.home(),
             &scratch.dir(),
             &scratch.slug(),
+            &Cancellation::new(),
+            &mut |_| {},
         );
 
         let resumed = result_route(
@@ -931,6 +1034,8 @@ mod tests {
             &scratch.home(),
             &scratch.dir(),
             &scratch.slug(),
+            &Cancellation::new(),
+            &mut |_| {},
         );
         assert!(resumed.status >= 400, "{:?}", resumed.body);
     }
@@ -965,5 +1070,87 @@ mod tests {
             }
             other => panic!("the app's own tool must come back, not run here: {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_transcript_reads_the_same_file_the_turn_wrote() {
+        // The whole point of the read route: a reload shows what was said. Two files would make
+        // that a window that opens empty on a conversation that happened, which looks like the
+        // feature being broken rather than the path being wrong.
+        let scratch = Scratch::new("transcript-read");
+        let model = Scripted::new(vec![says("nothing to do.")]);
+        let request = scratch.post("agent", &json!({"agent": "triage", "message": "hello"}));
+        let answered = route(
+            &request,
+            Some(model),
+            &scratch.home(),
+            &scratch.dir(),
+            &scratch.slug(),
+            &Cancellation::new(),
+            &mut |_| {},
+        );
+        assert_eq!(answered.status, 200, "{:?}", answered.body);
+
+        let read = transcript(
+            &scratch.read("agent", "agent=triage"),
+            &scratch.dir(),
+            &scratch.slug(),
+        );
+        assert_eq!(read.status, 200, "{:?}", read.body);
+        let turns = read.body["turns"].as_array().unwrap();
+        assert_eq!(turns.len(), 1, "{}", read.body);
+        assert_eq!(turns[0]["user"], "hello", "{}", read.body);
+        assert_eq!(turns[0]["reply"], "nothing to do.", "{}", read.body);
+
+        // And it is the agent's own file, not the app's dialog transcript one directory up.
+        let paths = conversation(&scratch.dir(), "triage", None).unwrap();
+        let app_level = crate::sessions::history_path(&scratch.dir());
+        assert_ne!(paths.history(), app_level);
+        assert!(
+            paths.history().ends_with("triage/history.jsonl"),
+            "{:?}",
+            paths
+        );
+    }
+
+    #[test]
+    fn a_session_key_names_a_conversation_but_cannot_choose_where_it_lives() {
+        // The key arrives from the app, becomes a directory name, and an app that sent `../..`
+        // would otherwise pick a path on somebody's disk. Sanitized rather than refused where it
+        // is still usable, and refused where nothing usable is left.
+        let scratch = Scratch::new("transcript-session");
+        let for_app = AgentPaths::for_app(scratch.dir());
+        let root = for_app.root();
+        let nested = conversation(&scratch.dir(), "triage", Some("../../elsewhere")).unwrap();
+        assert!(
+            nested
+                .history()
+                .starts_with(root.join("agents").join("triage").join("sessions")),
+            "a session key escaped its directory: {:?}",
+            nested.history()
+        );
+        let refused = conversation(&scratch.dir(), "triage", Some("../..")).unwrap_err();
+        assert_eq!(refused.status, 400, "{:?}", refused.body);
+    }
+
+    #[test]
+    fn a_transcript_for_a_name_that_was_never_declared_lists_the_ones_that_were() {
+        let scratch = Scratch::new("transcript-unknown");
+        let unknown = transcript(
+            &scratch.read("agent", "agent=nope"),
+            &scratch.dir(),
+            &scratch.slug(),
+        );
+        assert_eq!(unknown.status, 404, "{:?}", unknown.body);
+        assert!(
+            unknown.body.to_string().contains("triage"),
+            "{}",
+            unknown.body
+        );
+
+        // A query with no name at all says how to name one, rather than reading the first agent.
+        let bare = transcript(&scratch.read("agent", ""), &scratch.dir(), &scratch.slug());
+        assert_eq!(bare.status, 400, "{:?}", bare.body);
+        assert!(bare.body.to_string().contains("?agent="), "{}", bare.body);
     }
 }

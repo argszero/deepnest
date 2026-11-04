@@ -371,6 +371,46 @@ keeps its own history under `<app>/.agent/agents/<name>/`, with its own `llm.jso
 transcript is the dialog's, and mixing the two would put a machine's turns in front of a person who
 never asked for them.
 
+**And the app gets a window to talk to it through** (`decided in implementation`, 2026-11-04). A
+person cannot talk to an agent the app declared unless the app draws a chat window, and an app author
+— or a model writing that app — drawing one from scratch produces the window that already failed
+once in the panel: a text box that shows nothing while a tool-using turn runs for a minute, loses the
+conversation on reload, and has no Stop. So deepnest ships the window: `crates/web/src/agent-chat.js`
+and `agent-chat.css`, served at `/agent-chat.js` and `/agent-chat.css`, switched on by one line of
+the app's own markup.
+
+Five decisions came with it:
+
+- **The window is a file the app includes, not code the app copies.** `/agent-chat.js` is a contract
+  with every app the agent has already written, which is why its path is a constant in
+  [`deepnest_web`] rather than a literal inside a template — the copy in an app is the copy that
+  stops being fixed. `data-agent` names which of the app's declared agents it talks to; absent, it
+  draws nothing and says so, because guessing is worse than asking the app's author.
+- **Three routes, and no credential in the page.** The window reads the conversation with
+  `GET /api/apps/<slug>/agent?agent=<name>`, sends with `POST` on the same path, and stops with
+  `POST /api/apps/<slug>/cancel`. It carries no token: the browser presents the cookies the gateway
+  minted when it served the app's page. `DEEPNEST_APP_TICKET` must never reach a page — that
+  credential is the app's process, and a page holding it can spend every turn the app has.
+- **`agent` is the one app-agent route a browser may call, so it is the one on the cookie list.**
+  [`grant::AGENT_COOKIE`], minted by the same loop that mints the dialog's, and scoped to that path:
+  a page that may send a message to the app's agent has no business reaching `agent-result` or
+  `tools`, and a second name states that rather than relying on a reader to notice one cookie shared
+  by two audiences.
+- **The route answers a stream when the caller asks for one, and one body when it does not.** The
+  app's own process is the caller that does not: it sent a request and wants a result to hand back.
+  The browser asks with `Accept: text/event-stream` and gets `text` events while the turn runs, then
+  `done` or `error` — the shape `/chat` already answers. Both ends of one route, because the turn is
+  the same turn; only the audience differs.
+- **`GET` reads a conversation and `POST` holds one.** Which conversation is a query parameter,
+  because a transcript reachable only by `POST` would be a page that has to pretend to send something
+  in order to look at what it already said. The same path in the other verb answers a turn, so a
+  `GET` is never one; `agent-result` under `GET` is a `405` naming the method, for the callers that
+  can open it at all — the token or the app's ticket, since the page's cookie opens `agent` alone.
+
+The window itself is held to the rules the panel is: every piece of text goes in as a node, never as
+markup; a turn that paused mid-batch shows as still pending rather than as a finished answer; and a
+failure is shown on the row that caused it, in the window, not swallowed.
+
 ### `crates/skills` — Anthropic Agent Skills
 
 Loader reads two roots (`~/.deepnest/skills/`, `<app>/.agent/skills/`) and both layouts (`<name>.md`, `<name>/SKILL.md`); a same-named agent skill shadows the user skill. Progressive disclosure: only `name` + `description` + `path` enter the prompt. A file with no `description` is not loaded (`impl, ref: emrg/skills/loader.py`).
