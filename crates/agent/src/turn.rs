@@ -32,6 +32,59 @@ use crate::session::{
     fit_tail, fold, fold_start, fold_tool_results, Record, Session, SUMMARY_PREFIX,
 };
 
+/// The one line the loop adds to a request whose last round dispatched a single tool call.
+///
+/// Short on purpose. It is not a restatement of the rule — the rule is in the prompt, and a
+/// restatement is exactly what stopped working: measured on the app with the longest history on
+/// this machine, a turn that is reminded answers with five calls, then two, then one again, while
+/// the same sentence sitting in the system prompt every round changes nothing. What makes this
+/// line work is where it lands: at the **tail** of the request, one message away from the point
+/// where the next round's calls are decided.
+pub const BATCH_CALL_NUDGE: &str = "batch call";
+
+/// The request to send, given the conversation it is built from.
+///
+/// The rule "one response may carry several calls" is in the prompt and stays there — it says
+/// what to do. This says it **again, where it is being done**, and only when the last round shows
+/// it was not: a round that dispatched exactly one call is the shape the rule forbids, so the next
+/// request ends with [`BATCH_CALL_NUDGE`]. A round that dispatched none took no action to batch,
+/// and one that already dispatched several did the thing being asked for; neither is reminded.
+///
+/// Two decisions worth stating.
+///
+/// **It is a `system` message, not a `user` one.** The content is what the model reads; the role
+/// is what every *other* reader reads. A user turn is the person's voice — the bubble the page
+/// draws, the role the transcript attributes to the host, the thing a summariser compacts as
+/// something the person said. This is the loop's instruction to the model, so a user role would
+/// put words in the person's mouth in every one of those readers.
+///
+/// **Which round is "the last one" is read from the conversation, not kept in a variable.** The
+/// tail of the request says it: the nearest assistant message, and how many calls it carried. A
+/// counter in the loop would be lost at every handoff — and a turn that hands back on every round
+/// is exactly the turn that pays the most for batching — whereas the transcript survives the
+/// pause, the restart and the second request that answers it. It is the same reason
+/// [`Session::owed`] reads what is owed out of the file instead of remembering it.
+///
+/// A conversation whose last assistant message carried no calls has finished a turn, so the next
+/// round of a *new* turn is never reminded; and one whose calls were trimmed out of the budget
+/// window is not reminded either, because a rule about the round that just ran cannot be stated to
+/// a request that no longer contains it.
+///
+/// A turn offered a single tool is left alone: it cannot keep the rule, and a reminder it cannot
+/// obey is a reminder to call that one tool twice.
+fn with_batch_call_nudge(mut messages: Vec<Message>, tools: &[ToolDefinition]) -> Vec<Message> {
+    let dispatched = messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "assistant")
+        .and_then(|message| message.tool_calls.as_ref())
+        .map_or(0, Vec::len);
+    if dispatched == 1 && tools.len() > 1 {
+        messages.push(Message::system(BATCH_CALL_NUDGE));
+    }
+    messages
+}
+
 /// The model, as this loop needs it.
 ///
 /// A trait rather than `deepnest_llm::Client` for two reasons: the loop is then testable with no
@@ -718,9 +771,16 @@ impl Agent {
             } else {
                 messages
             };
+            // The request is the conversation plus, sometimes, one line the conversation never
+            // keeps: [`with_batch_call_nudge`]. Built first so the log below records what was
+            // actually sent — a log that hides a message the model read is a log that cannot
+            // explain the answer it is sitting next to — while `history.jsonl` still never sees
+            // it, because the reminder is not in `messages` and every later round derives its
+            // request from that list again.
+            let request = with_batch_call_nudge(messages, &definitions);
             // What was sent is recorded before the answer is acted on: a request that is then
             // answered with a failure is exactly the one somebody comes to this file to read.
-            self.record_request(&messages, &definitions)?;
+            self.record_request(&request, &definitions)?;
             // The stop flag travels *into* the call, not just around it. This is the one wait in a
             // turn long enough that reading the flag only between calls reads as a button that
             // does nothing: a model call is tens of seconds, and a person who stopped the work
@@ -731,7 +791,7 @@ impl Agent {
             };
             let turn = match self
                 .model
-                .turn_until(&messages, &definitions, &mut *on_text, &stop)
+                .turn_until(&request, &definitions, &mut *on_text, &stop)
             {
                 Ok(turn) => {
                     self.record_answer(&turn)?;
@@ -1976,6 +2036,126 @@ mod tests {
             .unwrap();
         assert!(user.images.is_none());
         assert_eq!(user.content.as_deref(), Some("hello"));
+    }
+
+    /// The rule "one response may carry several calls" is in the prompt, and this is the same rule
+    /// said again where the calls are actually chosen: at the tail of the next request.
+    ///
+    /// Every reading below is the `messages` the model was handed, captured in the fake — so these
+    /// assert what was sent rather than the shape of the code that built it. Dropping the append,
+    /// inverting its condition, or letting it into the conversation each reddens one of them.
+    #[test]
+    fn a_round_that_dispatched_one_call_is_reminded_before_the_next_one() {
+        let scratch = Scratch::new("nudge-one");
+        let model =
+            ScriptedModel::new(vec![Ok(asks(vec![call("read", "{}")])), Ok(answer("done"))]);
+        let agent = scratch.agent(model.clone());
+        let outcome = agent.run_turn("do it", &Cancellation::new()).unwrap();
+        assert_eq!(outcome.text(), "done");
+
+        let seen = model.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "one round of calls, then the answer");
+        assert!(
+            !seen[0]
+                .iter()
+                .any(|message| message.text() == BATCH_CALL_NUDGE),
+            "the first request of a turn is never reminded: nothing has gone wrong yet"
+        );
+        let last = seen[1].last().expect("a second request");
+        assert_eq!(last.role, "system", "the loop's word, not the person's");
+        assert_eq!(last.text(), BATCH_CALL_NUDGE);
+    }
+
+    #[test]
+    fn a_round_that_already_batched_is_not_reminded() {
+        // A round that dispatched several calls did the thing being asked for, and reminding it
+        // would teach the model that the reminder is noise.
+        let scratch = Scratch::new("nudge-many");
+        let model = ScriptedModel::new(vec![
+            Ok(asks(vec![
+                call("read", "{}"),
+                call("read", "{}"),
+                call("read", "{}"),
+            ])),
+            Ok(answer("done")),
+        ]);
+        let agent = scratch.agent(model.clone());
+        agent.run_turn("do it", &Cancellation::new()).unwrap();
+
+        let seen = model.seen.lock().unwrap();
+        assert!(
+            !seen[1]
+                .iter()
+                .any(|message| message.text() == BATCH_CALL_NUDGE),
+            "a batch of three was reminded: {:?}",
+            seen[1].iter().map(|m| m.text()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_turn_offered_one_tool_is_left_alone() {
+        // The rule cannot be kept by a turn that has one thing to call, and a reminder it cannot
+        // obey is a reminder to call that one tool twice.
+        struct Only {
+            name: &'static str,
+        }
+        impl Tool for Only {
+            fn name(&self) -> &str {
+                self.name
+            }
+            fn definition(&self) -> ToolDefinition {
+                ToolDefinition::function(
+                    self.name,
+                    "the only tool",
+                    serde_json::json!({"type": "object"}),
+                )
+            }
+            fn call(&self, _args: &Value, _ctx: &ToolContext) -> ToolResult {
+                ToolResult::ok(self.name, "ok")
+            }
+        }
+        let scratch = Scratch::new("nudge-one-tool");
+        let model =
+            ScriptedModel::new(vec![Ok(asks(vec![call("only", "{}")])), Ok(answer("done"))]);
+        let agent = scratch.agent_with_tools(model.clone(), vec![Box::new(Only { name: "only" })]);
+        agent.run_turn("do it", &Cancellation::new()).unwrap();
+
+        let seen = model.seen.lock().unwrap();
+        assert!(
+            !seen[1]
+                .iter()
+                .any(|message| message.text() == BATCH_CALL_NUDGE),
+            "a single-tool turn was reminded it should have called five things"
+        );
+    }
+
+    #[test]
+    fn the_reminder_is_in_the_request_and_in_no_conversation() {
+        // Two files, read differently on purpose. `history.jsonl` is what was said: a reminder kept
+        // there would be replayed for the rest of the conversation and drawn in the person's
+        // transcript as if the loop had spoken to them. The model log is what was actually sent,
+        // and a log that hid a message the model read could not explain the answer beside it.
+        let scratch = Scratch::new("nudge-files");
+        let model =
+            ScriptedModel::new(vec![Ok(asks(vec![call("read", "{}")])), Ok(answer("done"))]);
+        let log = scratch.base.join("llm.jsonl");
+        let agent = scratch.agent(model.clone()).with_llm_log(&log);
+        agent.run_turn("do it", &Cancellation::new()).unwrap();
+
+        let history = std::fs::read_to_string(scratch.base.join("history.jsonl")).unwrap();
+        assert!(
+            !history.contains(BATCH_CALL_NUDGE),
+            "the reminder reached the conversation: {history}"
+        );
+        let sent = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            sent.contains(BATCH_CALL_NUDGE),
+            "the log does not say what was sent: {sent}"
+        );
+
+        // And it does not accumulate: one round of one call leaves exactly one reminder in one
+        // request, however many rounds the turn ran.
+        assert_eq!(sent.matches(BATCH_CALL_NUDGE).count(), 1, "{sent}");
     }
 
     /// A model that reports its answer while writing it, the way a streamed endpoint does.

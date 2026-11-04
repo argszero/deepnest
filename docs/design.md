@@ -249,6 +249,24 @@ Four decisions were made while implementing it and are recorded here rather than
 - **The model is reached through a `Model` trait, not through `deepnest_llm::Client`.** The loop is then testable with no network and no HTTP adapter, and the adapter (which belongs to `crates/gateway`) is swappable. `Client` implements the trait, so the binary wires the real one in one line — and both of that trait's shapes read a stream: `Model::turn` assembles one whole answer, which is all a caller that only wants the result needs, and `Model::turn_with` hands each fragment of the text to an observer while the model is still writing it. The second has a **default implementation** that ignores the observer and calls the first, so a model that cannot report early — a fake in a test, an adapter with only a whole response — says so by staying quiet rather than by being forced to write a stub, and the observer's silence is the truthful report of it.
 - **The trim budget is by characters and defaults to 120,000 per request**, with two repairs that a provider otherwise rejects outright: the kept tail must begin at a `user` message, and a `tool` result whose `assistant` call was trimmed away is dropped with it. A request that reports itself too long halves the budget and retries at most twice; a **refusal is never** retried that way.
 - **Cancellation is a shared flag checked before every request and before every tool call in a batch**, so a cancelled turn runs no further command. The calls that did not run are recorded in `history.jsonl` as a note, so a reader can tell a cancelled batch from a model that asked for less.
+- **A round of one call is reminded where the next round is decided** (`decided in implementation`,
+  2026-11-04). The rule — a round carries either no call or five or more — is in the prompt and
+  stays there, but on the sibling agent that runs on the same provider the sentence was measured
+  losing its grip within a round or two of being said: five calls the round after a reminder, two
+  the round after that, one again by the fourth. What the prompt cannot do, the loop can, because it
+  knows what the last round actually dispatched. So a request whose previous round carried exactly
+  one call ends with `{"role": "system", "content": "batch call"}` — a **system** message and not a
+  user one, since the content is what the model reads while the role is what every other reader
+  reads, and a user turn is the person's voice in the transcript, in the page and in a compaction.
+  Three further decisions came with it: **which round was the last one is read from the tail of the
+  conversation**, not kept in a loop variable, because a variable is lost at every handoff and a turn
+  that hands back on every round is the one that pays most for batching — the same reason
+  `Session::owed` reads what is owed out of the file; **the reminder never enters the conversation**,
+  since every round derives its request from `messages` again, so it cannot be replayed, cannot
+  accumulate, and cannot be drawn as something the person said (the model log does record it, so the
+  log stays an account of what was sent); and **a turn offered a single tool is not reminded**, since
+  the rule cannot be kept there and a reminder it cannot obey is a reminder to call that one tool
+  twice.
 - **The layout under `~/.deepnest/apps/<slug>/.agent/`** is `history.jsonl`, `memory/<id>.md`, `memory/MEMORY.md`, and `subagents/<NNNN>/history.jsonl` — one conversation file per subagent call, because a child appending to its parent's file is two writers on one conversation.
 
 **The agent is in the binary, and it answers a message** (`decided in implementation`, 2026-10-31).
