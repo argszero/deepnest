@@ -254,10 +254,13 @@ list is a call that cannot run:\n\n",
         // again, so the independent reads belong together — and each round re-sends the whole
         // conversation, which is why a round saved is also money saved.
         out.push_str(
-            "\n**When two calls do not depend on each other, put them in the same response.** This \
-loop runs every call of a response before it asks you again, so four independent reads made \
-together cost one round and the same four made one at a time cost four. Make a call on its own \
-only when its arguments are something an earlier call returned.\n",
+            "\n**A round has two shapes and no third: no call at all, or five or more.** Before the \
+first call, list every call this request needs and make the independent ones together — this loop \
+runs every call of a response before it asks you again, and every round re-sends the whole \
+conversation, so five calls in one response cost a fifth of what the same five cost one at a time. \
+A call on its own has to earn it: its arguments are something an earlier call returned, or the \
+turn genuinely does not have that much independent work in it. \"I needed one read\" is not that — \
+the read was one of the reads you had not looked for yet.\n",
         );
     }
     out.push('\n');
@@ -509,17 +512,22 @@ mod tests {
         // on this machine, the model batches unprompted 78% of the time (798 of 1021 responses
         // carried two calls, 223 carried one), so this sentence is a floor under the remaining
         // fifth rather than the thing that makes batching happen.
+        //
+        // It states a number now. "Put independent calls together" was the same rule without a
+        // line to cross, and what the model did with it was two calls and then one again; the
+        // shape it can check itself against is a round of five. The escape clause is asserted with
+        // it, because a rule with no honest exception is a rule that produces five reads of one
+        // file.
         let prompt = system_prompt(&ctx());
-        assert!(prompt.contains("put them in the same response"), "{prompt}");
+        assert!(prompt.contains("two shapes and no third"), "{prompt}");
+        assert!(prompt.contains("five or more"), "{prompt}");
         assert!(prompt.contains("before it asks you again"), "{prompt}");
+        assert!(prompt.contains("earn it"), "{prompt}");
 
         // A turn with no tools cannot make a call, so the rule would be an instruction it cannot
         // follow: it is about the shape of a call and belongs only where there are calls.
         let toolless = system_prompt(&PromptContext::new("notes", "/apps/notes", "read-only"));
-        assert!(
-            !toolless.contains("put them in the same response"),
-            "{toolless}"
-        );
+        assert!(!toolless.contains("two shapes and no third"), "{toolless}");
     }
 
     #[test]
