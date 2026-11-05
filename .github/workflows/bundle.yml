@@ -191,6 +191,14 @@ jobs:
               *"Signature=adhoc"*) echo "unsigned release: ad-hoc signature only" ;;
               *) echo "expected an ad-hoc signature on an unsigned bundle: $signature" >&2; exit 1 ;;
             esac
+            # The linker ad-hoc signs the *executable*, not the bundle, and an arm64 executable's
+            # signature declares a resource seal the `.app` never had — which is why a strict
+            # verify of the bundle as the linker left it fails with "code has no resources but
+            # signature indicates they must be present". Re-sealing writes
+            # `Contents/_CodeSignature/CodeResources` and makes the check below true. Ad-hoc still:
+            # this changes what the bundle carries, not who vouches for it.
+            codesign --force --sign - dist/Deepnest.app
+            codesign --verify --strict --verbose=2 dist/Deepnest.app
             echo "**unsigned build** — no Developer ID; open it with right-click → Open" \
               >> "$GITHUB_STEP_SUMMARY"
             exit 0

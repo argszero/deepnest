@@ -224,6 +224,8 @@ Protected files — unwritable in every mode, compared by file **identity** rath
 
 The Windows backend is the largest one by a wide margin (EMRG: ~3.2k lines across ACL, FFI, restricted token, spawn). The `windows` crate removes the hand-rolled FFI, not the ACL or token logic. Size the schedule on that, not on the average backend.
 
+**Status, stated where the plan is:** `WindowsAcl::plan` derives the ACL plan and `available_backend` returns it, but the applier — the code that writes the ACEs and builds the restricted token — is not written. A confined command on Windows is therefore **refused**, by `BashTool::plan`, with a message saying exactly that; it is not run unconfined. That is the fail-closed rule doing its job, and it is the one gap between the Windows download and the macOS one: file tools, app builds and app runs do not go through that path and work.
+
 ### `crates/command_scan` — what a fence cannot see `(host 19:03)`
 
 A shell-text scanner for the read-direction escapes and for the one prohibition the fence cannot express: **the agent must not stop or restart deepnest itself**. Tokenize the command, expand nested commands, recognize wrappers (`eval`, `-exec`, `builtin cd`), then judge whether a word sits in command position (`impl, ref: emrg/tools/command_scan.py`).
