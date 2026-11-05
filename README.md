@@ -4,7 +4,7 @@
 
 One binary, one double-click, one page in your browser. You describe the app you want; an agent writes it on your own machine — React front end, Rust back end, SQLite storage — and the page reloads while it is being written.
 
-> **Status: early, and it runs.** Nothing is released yet. The design, the sandbox, the tool set, the agent loop, the app generator, the control panel and the skill loader are in the repository: `cargo run -p deepnest` serves `http://127.0.0.1:4270/`, opens that page in your desktop's browser, and writes its control token to `~/.deepnest/deepnest.token`. A model endpoint over `https` works, verified against this machine's own certificate store. The packaging is in the repository too: the binary embeds a toolchain payload and unpacks it on first use, and `crates/bundle` lays out a macOS `.app` and signs every Mach-O in it, which CI turns into a `hdiutil`-verified `.dmg`. **What is still ahead is a release, and it waits on two inputs rather than on code.** The payload archive is a build input — `payload/toolchain.zst`, or whatever `DEEPNEST_PAYLOAD` names — so it is not in the repository, and a source checkout embeds nothing and builds with the toolchain your machine already has. The signature needs a Developer ID certificate and an app-specific password that no runner holds yet: builds are ad-hoc signed today, carry no secure timestamp, and are not notarized.
+> **Status: early, and it runs. `v0.1.0` is published for macOS arm64.** [Download it](https://github.com/argszero/deepnest/releases/latest), or run it from source: `cargo run -p deepnest` serves `http://127.0.0.1:4270/`, opens that page in your desktop's browser, and writes its control token to `~/.deepnest/deepnest.token`. A model endpoint over `https` works, verified against this machine's own certificate store. **What the published build is not:** it is ad-hoc signed rather than Developer-ID signed, so macOS makes you open the first copy by right-click → **Open** ([why](#opening-a-macos-build)); and it is macOS arm64 only. The design, the sandbox, the tool set, the agent loop, the app generator, the control panel and the skill loader are all in the repository, and a source checkout runs on all three platforms today. The binary embeds a toolchain payload and unpacks it on first use, and `crates/bundle` lays out the `.app` and signs every Mach-O in it, which CI turns into a `hdiutil`-verified `.dmg`.
 
 ---
 
@@ -54,6 +54,20 @@ deepnest does not bundle a C toolchain, and will not: it is large, platform-spec
 - **Windows** — Visual Studio C++ Build Tools
 
 deepnest checks for them before the first build and walks you through installing what is missing, instead of failing halfway through compilation.
+
+## Download
+
+`v0.1.0` ships one file, on the [releases page](https://github.com/argszero/deepnest/releases/latest):
+
+| Platform | File | What it is |
+|---|---|---|
+| macOS arm64 | `Deepnest-0.1.0-arm64-mac.dmg` | ad-hoc signed, not notarized — read the next section before opening it |
+
+A `.sha256` sits beside the disk image. It is ~135 MB and carries the Rust toolchain and the JavaScript runtime, so the first app can be built on a machine with nothing installed beyond the OS and its C toolchain (see [System requirements](#system-requirements)).
+
+Windows and Linux have no download yet. Both back ends are in the repository and both are exercised in CI on every change; what is missing is the packaging, not the platform.
+
+Every download is built from a tag by CI and never from a laptop: a `v*` tag is the only thing that builds, signs and attaches an artifact.
 
 ## Opening a macOS build
 

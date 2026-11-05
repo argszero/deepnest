@@ -198,13 +198,22 @@ jobs:
           cargo run --release --locked -p deepnest-bundle -- --sign dist
           codesign --verify --strict --verbose=2 dist/Deepnest.app
 
+      # A bare `Deepnest.dmg` in a download list says neither which version it is nor which machine
+      # it runs on, and the second one is the difference between an app that launches and an app the
+      # system refuses. Version, then architecture, then platform — the order the sibling projects'
+      # asset names use — and the README's own table names the same file, so the two have to agree.
+      #
+      # The name is recomputed in each step below rather than exported once: `steps.version.outputs`
+      # is available to every step, while a shell variable is not, and a path that is spelled out
+      # five times is one path to keep in step instead of five ways to disagree.
       - name: Make the disk image
         run: |
           set -eux
+          dmg="dist/Deepnest-${{ steps.version.outputs.version }}-arm64-mac.dmg"
           hdiutil create -volname Deepnest -srcfolder dist/Deepnest.app \
-            -ov -format UDZO dist/Deepnest.dmg
-          hdiutil verify dist/Deepnest.dmg
-          shasum -a 256 dist/Deepnest.dmg | tee dist/Deepnest.dmg.sha256
+            -ov -format UDZO "$dmg"
+          hdiutil verify "$dmg"
+          shasum -a 256 "$dmg" | tee "${dmg}.sha256"
 
       - name: Sign the disk image
         env:
@@ -215,9 +224,10 @@ jobs:
             echo "no signing identity: the disk image travels unsigned"
             exit 0
           fi
+          dmg="dist/Deepnest-${{ steps.version.outputs.version }}-arm64-mac.dmg"
           codesign --sign "${DEEPNEST_SIGNING_IDENTITY}" --options runtime --timestamp \
-            --force dist/Deepnest.dmg
-          codesign --verify --strict --verbose=2 dist/Deepnest.dmg
+            --force "$dmg"
+          codesign --verify --strict --verbose=2 "$dmg"
 
       # Notarization needs all three, and it is skipped as a set rather than one at a time: a
       # submission with two of them fails with an authentication error that says nothing about which
@@ -235,19 +245,20 @@ jobs:
             echo "no notary credentials: the disk image is not notarized" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          xcrun notarytool submit dist/Deepnest.dmg --wait \
+          dmg="dist/Deepnest-${{ steps.version.outputs.version }}-arm64-mac.dmg"
+          xcrun notarytool submit "$dmg" --wait \
             --apple-id "${APPLE_ID}" --team-id "${TEAM_ID}" --password "${NOTARY_PASSWORD}"
-          xcrun stapler staple dist/Deepnest.dmg
-          xcrun stapler validate dist/Deepnest.dmg
-          spctl --assess --type open --context context:primary-signature -vv dist/Deepnest.dmg
+          xcrun stapler staple "$dmg"
+          xcrun stapler validate "$dmg"
+          spctl --assess --type open --context context:primary-signature -vv "$dmg"
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: Deepnest-macos-${{ steps.version.outputs.version }}
           path: |
-            dist/Deepnest.dmg
-            dist/Deepnest.dmg.sha256
+            dist/Deepnest-${{ steps.version.outputs.version }}-arm64-mac.dmg
+            dist/Deepnest-${{ steps.version.outputs.version }}-arm64-mac.dmg.sha256
           if-no-files-found: error
           retention-days: 14
 
@@ -263,6 +274,7 @@ jobs:
           tag="${GITHUB_REF_NAME}"
           gh release view "$tag" >/dev/null 2>&1 \
             || gh release create "$tag" --title "deepnest ${tag}" --generate-notes
-          gh release upload "$tag" dist/Deepnest.dmg dist/Deepnest.dmg.sha256 --clobber
+          dmg="dist/Deepnest-${{ steps.version.outputs.version }}-arm64-mac.dmg"
+          gh release upload "$tag" "$dmg" "${dmg}.sha256" --clobber
           gh release view "$tag" --json tagName,assets \
             --jq '.tagName, (.assets[].name)'
