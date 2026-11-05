@@ -35,8 +35,10 @@ env:
   CARGO_TERM_COLOR: always
   # The toolchain the payload carries. Pinned rather than floating: a release that quietly changed
   # compiler between two tags is a difference nobody can see in the tag's name.
-  TOOLCHAIN: "1.95.0"
-  BUN: "1.2.21"
+  # Not `TOOLCHAIN`: that name belongs to `dtolnay/rust-toolchain`, which reads it as its own
+  # input and answered `toolchain is a required input` on a Windows runner when the job set one.
+  DEEPNEST_RUST: "1.95.0"
+  DEEPNEST_BUN: "1.2.21"
 
 jobs:
   windows:
@@ -53,8 +55,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # `rustup` directly rather than `dtolnay/rust-toolchain`: the action reads a job-level
+      # `TOOLCHAIN` variable as one of its own inputs and refused the Windows runner over it. This
+      # is the same install with nothing between the shell and the tool.
       - name: Install the Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: |
+          set -eux
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          cargo --version
+          rustc --version
 
       - name: Cache the build
         uses: Swatinem/rust-cache@v2
@@ -84,7 +94,7 @@ jobs:
       - name: Assemble the toolchain the executable will carry
         run: |
           set -eux
-          triple="${TOOLCHAIN}-x86_64-pc-windows-msvc"
+          triple="${DEEPNEST_RUST}-x86_64-pc-windows-msvc"
           rustup toolchain install "$triple" --profile minimal --no-self-update
           root=$(rustup run "$triple" rustc --print sysroot)
           test -d "$root"
@@ -93,7 +103,7 @@ jobs:
           # The JavaScript runtime, from the zip its own releases publish, then copied in: what is
           # packed is a file in the payload tree, not a path in the runner's home.
           curl -fsSL -o bun.zip \
-            "https://github.com/oven-sh/bun/releases/download/bun-v${BUN}/bun-windows-x64.zip"
+            "https://github.com/oven-sh/bun/releases/download/bun-v${DEEPNEST_BUN}/bun-windows-x64.zip"
           powershell -NoProfile -Command \
             "Expand-Archive -Force -LiteralPath bun.zip -DestinationPath bun-out"
           cp bun-out/bun-windows-x64/bun.exe payload-tree/bin/bun.exe
