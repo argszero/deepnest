@@ -4,7 +4,7 @@
 
 一个可执行文件，双击运行，打开浏览器里的一个页面。你说出想要的应用，agent 就在你自己的机器上把它写出来 —— React 前端、Rust 后端、SQLite 存储 —— 边写边刷新。
 
-> **状态：早期，但已经能跑。** 尚未发布任何版本。设计、沙箱、工具集、agent 循环、应用生成、控制面板与 skill 加载器都已进仓库：`cargo run -p deepnest` 会在 `http://127.0.0.1:4270/` 上起服务，在桌面浏览器里打开这张页面，并把控制令牌写到 `~/.deepnest/deepnest.token`。`https` 的模型端点已经能用，证书按本机自己的证书库校验。打包也在仓库里：二进制里嵌着一份工具链载荷，第一次用到时解包；`crates/bundle` 铺出 macOS 的 `.app` 并逐个签里面每个 Mach-O，CI 再把它做成经 `hdiutil verify` 校验的 `.dmg`。**还差的是一个发布，而它等的是两份输入，不是代码。** 载荷归档是构建输入 —— `payload/toolchain.zst`，或 `DEEPNEST_PAYLOAD` 指名的那个文件 —— 所以它不在仓库里；从源码跑出来的二进制不带载荷，用的是你机器上已有的工具链。签名要一张 Developer ID 证书和一个专用密码，而还没有任何 runner 拿着它们：今天的构建是 ad-hoc 签名，没有可信时间戳，也没有公证。
+> **状态：早期，但已经能跑。`v0.1.0` 已发布，macOS arm64。** [这里下载](https://github.com/argszero/deepnest/releases/latest)，或从源码跑：`cargo run -p deepnest` 会在 `http://127.0.0.1:4270/` 上起服务，在桌面浏览器里打开这张页面，并把控制令牌写到 `~/.deepnest/deepnest.token`。`https` 的模型端点已经能用，证书按本机自己的证书库校验。**这份已发布的构建不是什么：** 它是 ad-hoc 签名而不是 Developer ID 签名，所以第一次打开那一份副本时 macOS 要你右键 → **打开**（[原因](#打开-macos-上的构建)）；而且它只有 macOS arm64。设计、沙箱、工具集、agent 循环、应用生成、控制面板与 skill 加载器都在仓库里，从源码在三个平台上今天都能跑。二进制里嵌着一份工具链载荷，第一次用到时解包；`crates/bundle` 铺出 `.app` 并逐个签里面每个 Mach-O，CI 再把它做成经 `hdiutil verify` 校验的 `.dmg`。
 
 ---
 
@@ -54,6 +54,20 @@ deepnest 不自带 C 工具链，也不打算自带：它体积大、与平台�
 - **Windows** —— Visual Studio C++ Build Tools
 
 deepnest 会在第一次编译前检查，缺什么就引导你装什么，而不是编译到一半才失败。
+
+## 下载
+
+`v0.1.0` 只有一个文件，在[发行页](https://github.com/argszero/deepnest/releases/latest)上：
+
+| 平台 | 文件 | 它是什么 |
+|---|---|---|
+| macOS arm64 | `Deepnest-0.1.0-arm64-mac.dmg` | ad-hoc 签名、未公证 —— 打开之前先读下一节 |
+
+磁盘映像旁边有一份 `.sha256`。它约 135 MB，里面带着 Rust 工具链与 JavaScript 运行时，所以第一应用可以在一个除操作系统和 C 工具链之外什么都没装的机器上编出来。
+
+Windows 与 Linux 还没有下载。两边的后端都在仓库里，也都在每次改动时过 CI；缺的是打包，不是平台。
+
+每一份下载都由 CI 从 tag 编出来，而不是从某台笔记本上：`v*` tag 是唯一会去编译、签名并挂上资产的东西。
 
 ## 打开 macOS 上的构建
 
