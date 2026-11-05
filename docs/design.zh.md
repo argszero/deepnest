@@ -92,6 +92,8 @@
 
 Windows 后端在体量上远超其它两个（EMRG：ACL、FFI、受限令牌、spawn 合计约 3.2k 行）。`windows` crate 省掉的是手写 FFI，不是 ACL 与令牌的逻辑。排期按这一块估，不按平均值估。
 
+**现状，就写在计划旁边：** `WindowsAcl::plan` 已经能推导出 ACL 计划，`available_backend` 也会返回它，但**施加者**——真正写 ACE、建受限令牌的那段代码——还没写。所以 Windows 上受围栏的命令由 `BashTool::plan` **拒绝**，报错原话就是这一点；它不会被改成不受围栏地跑。这正是 fail-closed 该有的样子，也是 Windows 下载与 macOS 下载之间唯一的缺口：文件工具、应用构建与应用运行都不走那条路径，正常工作。
+
 ### `crates/command_scan` —— 围栏看不见的那一层 `（宿主 19:03）`
 
 命令文本扫描器，守两类东西：读方向的外泄，以及围栏无法表达的那一条禁令 —— **agent 不许停掉或重启 deepnest 自身**。做法是切词、展开嵌套命令、识别 wrapper（`eval`、`-exec`、`builtin cd`），再判断某个词是否处于命令位（`实现自决, ref: emrg/tools/command_scan.py`）。

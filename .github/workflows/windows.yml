@@ -1,0 +1,212 @@
+name: Windows executable
+
+# What this produces is a bare `deepnest.exe`, and — when it is dispatched by a tag — a release that
+# carries it.
+#
+# Windows gets an executable and nothing else, because that is the shape this project has: the
+# `.app` in the macOS job is a container the *system* needs in order to carry a signature, and
+# Windows has no equivalent requirement. Signed not at all (`host 20:56`), so SmartScreen warns on
+# the first run and the README says so plainly rather than teaching a user to dismiss prompts.
+#
+# The payload is built here rather than committed: a Rust toolchain and the JavaScript runtime are
+# assembled on the runner, packed by `deepnest-pack`, and embedded through `DEEPNEST_PAYLOAD`. The
+# toolchain is the `-msvc` one, so a machine that builds apps still needs Visual Studio C++ Build
+# Tools — the same rule as macOS and Xcode Command Line Tools, and stated in the README's system
+# requirements instead of being discovered at the first build.
+#
+# A tag is the release path; a manual dispatch produces the same executable and attaches nothing.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+# `contents: write` is what attaching an asset to a release costs, and it is granted on the tag path
+# only — a dispatch from a branch has no tag to attach to.
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # The toolchain the payload carries. Pinned rather than floating: a release that quietly changed
+  # compiler between two tags is a difference nobody can see in the tag's name.
+  TOOLCHAIN: "1.95.0"
+  BUN: "1.2.21"
+
+jobs:
+  windows:
+    name: Windows executable
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    # Git Bash, because every step below is the macOS job's step with a different platform in it:
+    # `cp -R`, `test` and `stat -c%s` mean there what they mean there, and nothing in PowerShell
+    # does.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache the build
+        uses: Swatinem/rust-cache@v2
+
+      # A tag is `v0.1.0`; the version the executable reports is `0.1.0`. A dispatch from a branch
+      # has no tag, so it reports the workspace's own version — the honest one for a build that is
+      # not a release. `sed` rather than `cargo metadata` plus a parser: the workspace version is
+      # one line in one file, and a runner does not need an interpreter to read it.
+      - name: Decide the version
+        id: version
+        run: |
+          set -eux
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -1)
+          fi
+          case "$version" in
+            ''|*[!0-9.]*) echo "not a version: $version" >&2; exit 1 ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "releasing=${GITHUB_REF_TYPE}" >> "$GITHUB_OUTPUT"
+
+      # `rustup run … rustc --print sysroot` rather than parsing `rustup toolchain list -v`: the
+      # path it prints contains the user's name and possibly a space, and `awk` on a line with a
+      # space in it takes the wrong field on exactly the machines this would be run on again.
+      - name: Assemble the toolchain the executable will carry
+        run: |
+          set -eux
+          triple="${TOOLCHAIN}-x86_64-pc-windows-msvc"
+          rustup toolchain install "$triple" --profile minimal --no-self-update
+          root=$(rustup run "$triple" rustc --print sysroot)
+          test -d "$root"
+          mkdir -p payload-tree/bin
+          cp -R "$root/bin" "$root/lib" payload-tree/
+          # The JavaScript runtime, from the zip its own releases publish, then copied in: what is
+          # packed is a file in the payload tree, not a path in the runner's home.
+          curl -fsSL -o bun.zip \
+            "https://github.com/oven-sh/bun/releases/download/bun-v${BUN}/bun-windows-x64.zip"
+          powershell -NoProfile -Command \
+            "Expand-Archive -Force -LiteralPath bun.zip -DestinationPath bun-out"
+          cp bun-out/bun-windows-x64/bun.exe payload-tree/bin/bun.exe
+          # A payload with no compiler in it unpacks perfectly and changes nothing, so the tree is
+          # checked for the programs the first build will look for — by their Windows names, which
+          # is the whole difference between this step and the macOS one.
+          for tool in rustc cargo bun; do
+            test -f "payload-tree/bin/$tool.exe" || { echo "no $tool.exe in the payload" >&2; exit 1; }
+          done
+          du -sh payload-tree
+          payload-tree/bin/rustc.exe --version
+          payload-tree/bin/bun.exe --version
+
+      - name: Pack the payload
+        run: |
+          set -eux
+          mkdir -p payload
+          cargo run --release --locked -p deepnest-packaging --bin deepnest-pack -- \
+            --from payload-tree --into payload/toolchain.zst
+          size=$(stat -c%s payload/toolchain.zst)
+          echo "payload ${size} bytes" | tee -a "$GITHUB_STEP_SUMMARY"
+          # A truncated or empty archive unpacks to a tree with no compiler in it, and that failure
+          # would surface at a user's first build rather than here.
+          test "$size" -gt 1000000
+
+      # `DEEPNEST_PAYLOAD` is set here and not on the test steps: `payload::tests` asserts that a
+      # build without a payload says so, so a test run that inherited this variable would fail on a
+      # binary behaving exactly as intended. The unit tests run in `ci.yml` with no payload — which
+      # is the build a developer has.
+      - name: Build, carrying the payload
+        env:
+          DEEPNEST_PAYLOAD: payload/toolchain.zst
+        run: cargo build --release --locked -p deepnest
+
+      - name: Check the executable carries what it says
+        run: |
+          set -eux
+          exe=target/release/deepnest.exe
+          bare=$(stat -c%s "$exe")
+          payload=$(stat -c%s payload/toolchain.zst)
+          echo "executable ${bare} bytes, payload ${payload} bytes" | tee -a "$GITHUB_STEP_SUMMARY"
+          # The payload is embedded byte for byte, so the binary has to be at least this large. A
+          # floor rather than an equality: the code around it is not this step's business.
+          test "$bare" -gt "$payload"
+          "$exe" --version | tee -a "$GITHUB_STEP_SUMMARY"
+          "$exe" --version | grep -F "${{ steps.version.outputs.version }}"
+
+      # The executable is *started*, because a binary that reports its version and then refuses to
+      # serve is exactly the failure a packaging job is supposed to catch. `/api/health` is the one
+      # route that needs no token, which is why it is the probe. `DEEPNEST_PORT` moves the listener
+      # off 4270 so a stray process on the runner cannot make this pass or fail for the wrong
+      # reason.
+      - name: Start the executable and ask it whether it is alive
+        run: |
+          set -eux
+          export DEEPNEST_PORT=4299
+          ./target/release/deepnest.exe --no-open > server.log 2>&1 &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true' EXIT
+          healthy=""
+          for _ in $(seq 1 60); do
+            if curl -fsS -o health.json "http://127.0.0.1:${DEEPNEST_PORT}/api/health"; then
+              healthy=1
+              break
+            fi
+            sleep 1
+          done
+          if [ -z "$healthy" ]; then
+            echo "no health answer in 60s" >&2
+            cat server.log >&2
+            exit 1
+          fi
+          cat health.json
+          # A run that answered but minted no token is a server nobody can drive.
+          test -s "$HOME/.deepnest/deepnest.token"
+          kill "$server" 2>/dev/null || true
+          wait "$server" 2>/dev/null || true
+          echo "started, answered, and minted a token" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Version, then architecture, then platform — the order the sibling projects' asset names use,
+      # and the same order the README's download table names. A bare `deepnest.exe` says neither
+      # which version it is nor which machine it runs on.
+      - name: Name, hash and keep the executable
+        run: |
+          set -eux
+          exe="dist/Deepnest-${{ steps.version.outputs.version }}-x64-windows.exe"
+          mkdir -p dist
+          cp target/release/deepnest.exe "$exe"
+          sha256sum "$exe" | tee "${exe}.sha256"
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: Deepnest-windows-${{ steps.version.outputs.version }}
+          path: |
+            dist/Deepnest-${{ steps.version.outputs.version }}-x64-windows.exe
+            dist/Deepnest-${{ steps.version.outputs.version }}-x64-windows.exe.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      # The release path. `--clobber` because re-running a tag's workflow must replace the asset
+      # rather than fail on one that is already there: a release is a name for an artifact, and the
+      # artifact a tag points at is the one this run produced.
+      - name: Attach the executable to the release
+        if: steps.version.outputs.releasing == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          tag="${GITHUB_REF_NAME}"
+          gh release view "$tag" >/dev/null 2>&1 \
+            || gh release create "$tag" --title "deepnest ${tag}" --generate-notes
+          exe="dist/Deepnest-${{ steps.version.outputs.version }}-x64-windows.exe"
+          gh release upload "$tag" "$exe" "${exe}.sha256" --clobber
+          gh release view "$tag" --json tagName,assets \
+            --jq '.tagName, (.assets[].name)'

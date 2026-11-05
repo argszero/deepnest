@@ -113,7 +113,7 @@ dependencies = [
 
 [[package]]
 name = "deepnest"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "ctrlc",
@@ -136,7 +136,7 @@ dependencies = [
 
 [[package]]
 name = "deepnest-agent"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "deepnest-llm",
  "deepnest-sandbox",
@@ -147,7 +147,7 @@ dependencies = [
 
 [[package]]
 name = "deepnest-apps"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "socket2",
@@ -156,18 +156,18 @@ dependencies = [
 
 [[package]]
 name = "deepnest-bundle"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "deepnest-command-scan"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "deepnest-sandbox",
 ]
 
 [[package]]
 name = "deepnest-gateway"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "deepnest-llm",
  "native-tls",
@@ -175,7 +175,7 @@ dependencies = [
 
 [[package]]
 name = "deepnest-llm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -183,7 +183,7 @@ dependencies = [
 
 [[package]]
 name = "deepnest-packaging"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "tar",
  "zstd",
@@ -191,14 +191,14 @@ dependencies = [
 
 [[package]]
 name = "deepnest-sandbox"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "same-file",
 ]
 
 [[package]]
 name = "deepnest-skills"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -206,7 +206,7 @@ dependencies = [
 
 [[package]]
 name = "deepnest-tools"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "deepnest-command-scan",
  "deepnest-llm",
@@ -218,7 +218,7 @@ dependencies = [
 
 [[package]]
 name = "deepnest-web"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "digest"
