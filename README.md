@@ -4,7 +4,7 @@
 
 One binary, one double-click, one page in your browser. You describe the app you want; an agent writes it on your own machine — React front end, Rust back end, SQLite storage — and the page reloads while it is being written.
 
-> **Status: early, and it runs. `v0.1.1` is published for macOS arm64 and Windows x64.** [Download it](https://github.com/argszero/deepnest/releases/latest), or run it from source: `cargo run -p deepnest` serves `http://127.0.0.1:4270/`, opens that page in your desktop's browser, and writes its control token to `~/.deepnest/deepnest.token`. A model endpoint over `https` works, verified against this machine's own certificate store. **What the published build is not:** it is ad-hoc signed rather than Developer-ID signed, so macOS makes you open the first copy by right-click → **Open** ([why](#opening-a-macos-build)); the Windows executable is signed not at all, so SmartScreen warns once; and the agent's shell tool does not run on Windows yet ([why](#download)). The design, the sandbox, the tool set, the agent loop, the app generator, the control panel and the skill loader are all in the repository, and a source checkout runs on all three platforms today. The binary embeds a toolchain payload and unpacks it on first use, and `crates/bundle` lays out the `.app` and signs every Mach-O in it, which CI turns into a `hdiutil`-verified `.dmg`.
+> **Status: early, and it runs. `v0.1.1` is published for macOS arm64, Windows x64 and Linux x64.** [Download it](https://github.com/argszero/deepnest/releases/latest), or run it from source: `cargo run -p deepnest` serves `http://127.0.0.1:4270/`, opens that page in your desktop's browser, and writes its control token to `~/.deepnest/deepnest.token`. A model endpoint over `https` works, verified against this machine's own certificate store. **What the published build is not:** it is ad-hoc signed rather than Developer-ID signed, so macOS makes you open the first copy by right-click → **Open** ([why](#opening-a-macos-build)); the Windows executable is signed not at all, so SmartScreen warns once; and the agent's shell tool does not run on Windows yet ([why](#download)). The design, the sandbox, the tool set, the agent loop, the app generator, the control panel and the skill loader are all in the repository, and a source checkout runs on all three platforms today. The binary embeds a toolchain payload and unpacks it on first use, and `crates/bundle` lays out the `.app` and signs every Mach-O in it, which CI turns into a `hdiutil`-verified `.dmg`.
 
 ---
 
@@ -52,6 +52,7 @@ deepnest does not bundle a C toolchain, and will not: it is large, platform-spec
 
 - **macOS** — Xcode Command Line Tools (`xcode-select --install`)
 - **Windows** — Visual Studio C++ Build Tools
+- **Linux** — a C compiler and linker (`build-essential` on Debian/Ubuntu, `base-devel` on Fedora)
 
 deepnest checks for them before the first build and walks you through installing what is missing, instead of failing halfway through compilation.
 
@@ -63,14 +64,15 @@ deepnest checks for them before the first build and walks you through installing
 |---|---|---|
 | macOS arm64 | `Deepnest-0.1.1-arm64-mac.dmg` | ad-hoc signed, not notarized — read the next section before opening it |
 | Windows x64 | `Deepnest-0.1.1-x64-windows.exe` | not signed at all — SmartScreen asks once; one file, nothing to install |
+| Linux x64 | `Deepnest-0.1.1-x64-linux.tar.gz` | not signed at all; a tarball because that is what carries the executable bit — glibc, not musl |
 
-A `.sha256` sits beside each download. Both are ~135–145 MB and carry the Rust toolchain and the JavaScript runtime, so the first app can be built on a machine with nothing installed beyond the OS and its C toolchain (see [System requirements](#system-requirements)).
+A `.sha256` sits beside each download. Each carries the Rust toolchain and the JavaScript runtime, so the first app can be built on a machine with nothing installed beyond the OS and its C toolchain (see [System requirements](#system-requirements)).
 
-Linux has no download yet. Its back end is in the repository and exercised in CI on every change; what is missing is the packaging, not the platform.
+The Linux download is a tarball holding one file, `deepnest`: extract it and run it. It is built against glibc, and the JavaScript runtime it carries is the glibc build, so a musl-only distribution such as Alpine is not covered yet.
 
 **One thing the Windows build does not do yet.** The agent's `bash` tool refuses to run a command there. Windows confines a command with an ACL plan plus a restricted token, and the code that applies that plan is not in this build; a plan derived but never applied is no fence at all, so the call is refused rather than run unconfined. Everything else is the same as on macOS — the panel, the dialog, the file tools, and building and running apps, which deepnest spawns itself with the toolchain it carries.
 
-Every download is built from a tag by CI and never from a laptop: a `v*` tag is the only thing that builds, signs and attaches an artifact.
+Every download is built by CI and never from a laptop, and a `v*` tag is what builds, signs and attaches all of them. The Linux asset in `v0.1.1` was attached after its tag, because a workflow has to reach the default branch before it can be run at all: it was built from the commit the tag points at, with only that workflow added.
 
 ## Opening a macOS build
 
