@@ -1,0 +1,230 @@
+name: Linux executable
+
+# What this produces is a `tar.gz` holding one executable, and — when it is dispatched by a tag — a
+# release that carries it.
+#
+# A tarball rather than the bare file the Windows job ships, because the executable bit is the whole
+# difference: a file downloaded over the web arrives with no permission to run, and `tar` is the
+# smallest thing that carries the mode across that trip. Not a `.deb` or an `.rpm`: a package
+# installs into the system's own directories and needs a package manager to take it away again, which
+# is the opposite of one file beside the user.
+#
+# The payload is built here rather than committed: a Rust toolchain and the JavaScript runtime are
+# assembled on the runner, packed by `deepnest-pack`, and embedded through `DEEPNEST_PAYLOAD`. The
+# toolchain is the `-gnu` one and the runtime is its glibc build, so this runs on a glibc system and
+# not on a musl-only one such as Alpine — said here and in the README, rather than discovered as
+# "cannot execute binary file" on a user's first run.
+#
+# A tag is the release path; a manual dispatch produces the same tarball and attaches nothing.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+# `contents: write` is what attaching an asset to a release costs, and it is granted on the job only:
+# a dispatch from a branch has no tag to attach to, and a run that cannot write has no business
+# holding the permission.
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pinned rather than floating, for the reason `windows.yml` gives: a release that quietly changed
+  # compiler between two tags is a difference nobody can see in the tag's name.
+  # Not `TOOLCHAIN`: that name belongs to `dtolnay/rust-toolchain`, which reads it as its own input.
+  DEEPNEST_RUST: "1.95.0"
+  DEEPNEST_BUN: "1.2.21"
+
+jobs:
+  linux:
+    name: Linux executable
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # `rustup` directly rather than `dtolnay/rust-toolchain`, the same install with nothing between
+      # the shell and the tool — and the one spelling all three packaging jobs share.
+      - name: Install the Rust toolchain
+        run: |
+          set -eux
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          cargo --version
+          rustc --version
+
+      - name: Cache the build
+        uses: Swatinem/rust-cache@v2
+
+      # A tag is `v0.1.0`; the version the executable reports is `0.1.0`. A dispatch from a branch
+      # has no tag, so it reports the workspace's own version — the honest one for a build that is
+      # not a release.
+      - name: Decide the version
+        id: version
+        run: |
+          set -eux
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -1)
+          fi
+          case "$version" in
+            ''|*[!0-9.]*) echo "not a version: $version" >&2; exit 1 ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "releasing=${GITHUB_REF_TYPE}" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble the toolchain the executable will carry
+        run: |
+          set -eux
+          triple="${DEEPNEST_RUST}-x86_64-unknown-linux-gnu"
+          rustup toolchain install "$triple" --profile minimal --no-self-update
+          root=$(rustup run "$triple" rustc --print sysroot)
+          test -d "$root"
+          mkdir -p payload-tree/bin
+          # `-L`: a payload carrying a symbolic link is one the packer cannot write on Windows and
+          # the unpacker refuses on some systems, so nothing is carried across as a link.
+          cp -RL "$root/bin" "$root/lib" payload-tree/
+          # The JavaScript runtime, from the zip its own releases publish, then copied in: what is
+          # packed is a file in the payload tree, not a path in the runner's home.
+          curl -fsSL -o bun.zip \
+            "https://github.com/oven-sh/bun/releases/download/bun-v${DEEPNEST_BUN}/bun-linux-x64.zip"
+          unzip -q bun.zip -d bun-out
+          cp bun-out/bun-linux-x64/bun payload-tree/bin/bun
+          chmod 755 payload-tree/bin/bun
+          # A payload with no compiler in it unpacks perfectly and changes nothing, so the tree is
+          # checked for the programs the first build will look for, and for the mode that makes them
+          # runnable — a tarball was chosen to keep that mode, so a payload that lost it is caught
+          # here rather than at a user's first build.
+          for tool in rustc cargo bun; do
+            test -x "payload-tree/bin/$tool" || { echo "no runnable $tool in the payload" >&2; exit 1; }
+          done
+          test -z "$(find payload-tree -type l -print -quit)" \
+            || { echo "the payload carries a symbolic link" >&2; exit 1; }
+          du -sh payload-tree
+          payload-tree/bin/rustc --version
+          payload-tree/bin/bun --version
+
+      - name: Pack the payload
+        run: |
+          set -eux
+          mkdir -p payload
+          cargo run --release --locked -p deepnest-packaging --bin deepnest-pack -- \
+            --from payload-tree --into payload/toolchain.zst
+          size=$(stat -c%s payload/toolchain.zst)
+          echo "payload ${size} bytes" | tee -a "$GITHUB_STEP_SUMMARY"
+          # A truncated or empty archive unpacks to a tree with no compiler in it, and that failure
+          # would surface at a user's first build rather than here.
+          test "$size" -gt 1000000
+
+      # `DEEPNEST_PAYLOAD` is set here and not on the test steps: `payload::tests` asserts that a
+      # build without a payload says so, so a test run that inherited this variable would fail on a
+      # binary behaving exactly as intended. The unit tests run in `ci.yml` with no payload — which
+      # is the build a developer has.
+      - name: Build, carrying the payload
+        env:
+          DEEPNEST_PAYLOAD: payload/toolchain.zst
+        run: cargo build --release --locked -p deepnest
+
+      - name: Check the executable carries what it says
+        run: |
+          set -eux
+          exe=target/release/deepnest
+          bare=$(stat -c%s "$exe")
+          payload=$(stat -c%s payload/toolchain.zst)
+          echo "executable ${bare} bytes, payload ${payload} bytes" | tee -a "$GITHUB_STEP_SUMMARY"
+          # The payload is embedded byte for byte, so the binary has to be at least this large. A
+          # floor rather than an equality: the code around it is not this step's business.
+          test "$bare" -gt "$payload"
+          "$exe" --version | tee -a "$GITHUB_STEP_SUMMARY"
+          "$exe" --version | grep -F "${{ steps.version.outputs.version }}"
+
+      # The executable is *started*, because a binary that reports its version and then refuses to
+      # serve is exactly the failure a packaging job is supposed to catch. `/api/health` is the one
+      # route that needs no token, which is why it is the probe. `DEEPNEST_PORT` moves the listener
+      # off 4270 so a stray process on the runner cannot make this pass or fail for the wrong reason,
+      # and `DEEPNEST_HOME` moves the token out of the runner's home for the same reason.
+      - name: Start the executable and ask it whether it is alive
+        run: |
+          set -eux
+          export DEEPNEST_PORT=4299
+          export DEEPNEST_HOME="$PWD/smoke-home"
+          ./target/release/deepnest --no-open > server.log 2>&1 &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true' EXIT
+          healthy=""
+          for _ in $(seq 1 60); do
+            if curl -fsS -o health.json "http://127.0.0.1:${DEEPNEST_PORT}/api/health"; then
+              healthy=1
+              break
+            fi
+            sleep 1
+          done
+          if [ -z "$healthy" ]; then
+            echo "no health answer in 60s" >&2
+            cat server.log >&2
+            exit 1
+          fi
+          cat health.json
+          # A run that answered but minted no token is a server nobody can drive, and a token the
+          # group and the world can read is a credential this machine hands out.
+          token="$DEEPNEST_HOME/deepnest.token"
+          test -s "$token"
+          mode=$(stat -c%a "$token")
+          test "$mode" = "600" || { echo "token mode is $mode, not 600" >&2; exit 1; }
+          kill "$server" 2>/dev/null || true
+          wait "$server" 2>/dev/null || true
+          echo "started, answered, and minted a 0600 token" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Version, then architecture, then platform — the order the sibling projects' asset names use,
+      # and the same order the README's download table names. The hash is written from inside `dist`
+      # so the file beside the download can be checked where it is downloaded: `sha256sum -c`.
+      - name: Name, package, hash and keep the executable
+        run: |
+          set -eux
+          name="Deepnest-${{ steps.version.outputs.version }}-x64-linux"
+          mkdir -p dist
+          # A bare file loses its mode on the way over the web; the tarball is what carries it.
+          tar -czf "dist/${name}.tar.gz" -C target/release deepnest
+          ls -l "dist/${name}.tar.gz" | tee -a "$GITHUB_STEP_SUMMARY"
+          ( cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256" )
+          ( cd dist && sha256sum -c "${name}.tar.gz.sha256" )
+          # What a downloader gets: one file, executable, and it runs.
+          mkdir -p check && tar -xzf "dist/${name}.tar.gz" -C check
+          test "$(find check -type f | wc -l)" = "1"
+          test -x check/deepnest
+          ./check/deepnest --version
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: Deepnest-linux-${{ steps.version.outputs.version }}
+          path: |
+            dist/Deepnest-${{ steps.version.outputs.version }}-x64-linux.tar.gz
+            dist/Deepnest-${{ steps.version.outputs.version }}-x64-linux.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      # The release path. `--clobber` because re-running a tag's workflow must replace the asset
+      # rather than fail on one that is already there: a release is a name for an artifact, and the
+      # artifact a tag points at is the one this run produced.
+      - name: Attach the tarball to the release
+        if: steps.version.outputs.releasing == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          tag="${GITHUB_REF_NAME}"
+          gh release view "$tag" >/dev/null 2>&1 \
+            || gh release create "$tag" --title "deepnest ${tag}" --generate-notes
+          asset="dist/Deepnest-${{ steps.version.outputs.version }}-x64-linux.tar.gz"
+          gh release upload "$tag" "$asset" "${asset}.sha256" --clobber
+          gh release view "$tag" --json tagName,assets \
+            --jq '.tagName, (.assets[].name)'
