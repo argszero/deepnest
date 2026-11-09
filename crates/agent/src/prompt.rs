@@ -361,8 +361,7 @@ its own, in wall time and in tokens.\n\n\
 The template's `src/deepnest.rs` is a working example of the whole loop, including the HTTP client \
 the app needs to talk to deepnest. Read it before writing your own.\n\n\
 **When the person should talk to that agent, give it a window — do not write one.** deepnest serves \
-a finished chat window at `/agent-chat.js` and `/agent-chat.css`, and one line in the app's page \
-turns it on:\n\n\
+a finished chat window at `/agent-chat.js`, and one line in the app's page turns it on:\n\n\
 ```html\n<script src=\"/agent-chat.js\" data-agent=\"triage\" data-label=\"Triage\"></script>\n```\n\n\
 `data-agent` is the name from the app's `[[agent]]` table. What that window already does, and what a \
 hand-written one loses:\n\n\
@@ -379,9 +378,10 @@ Those three routes need no token and no ticket: the browser presents the cookies
 it served the app's page, scoped to those paths. So the window works on an app whose own server knows \
 nothing about it. Do not put `DEEPNEST_APP_TICKET` into a page — that credential is the app's process, \
 and a page carrying it can spend every turn the app has.\n\n\
-Style it from your own CSS if the default does not fit: everything the window creates is inside \
-`.dnc-root` and prefixed `dnc-`, so your rules and its rules cannot collide. Do not copy the file into \
-the app; the copy is the version that stops being fixed.\n\
+It is deepnest's own dialog — the same window that stands beside your app's page — so deepnest's \
+stylesheet is what draws it. Leave those selectors alone rather than restyling the window from outside \
+it, and style your own page around it. Do not copy the file into the app; the copy is the version that \
+stops being fixed.\n\
 ",
         );
     }

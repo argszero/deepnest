@@ -469,11 +469,6 @@ impl Router {
                 "text/javascript; charset=utf-8",
                 deepnest_web::AGENT_CHAT_SCRIPT.as_bytes().to_vec(),
             )),
-            deepnest_web::AGENT_CHAT_STYLE_PATH => Answer::Full(Response::new(
-                200,
-                "text/css; charset=utf-8",
-                deepnest_web::AGENT_CHAT_STYLE.as_bytes().to_vec(),
-            )),
             "/api/health" => Answer::Full(Response::json(200, self.health())),
             "/api/config" => {
                 if !self.authorized(request) {
@@ -4880,42 +4875,32 @@ mod tests {
         // needed the token the app's own script could read it, so it is served like the dialog's:
         // open to the origin, and useful only to a page holding the cookie that names its route.
         let router = router();
-        for (path, kind) in [
-            (
-                deepnest_web::AGENT_CHAT_SCRIPT_PATH,
-                "text/javascript; charset=utf-8",
-            ),
-            (
-                deepnest_web::AGENT_CHAT_STYLE_PATH,
-                "text/css; charset=utf-8",
-            ),
-        ] {
-            let served = router.respond(&get(path, "127.0.0.1:4270")).complete();
-            assert_eq!(served.status, 200, "{path}");
-            assert_eq!(served.content_type, kind, "{path}");
-        }
+        let served = router
+            .respond(&get(deepnest_web::AGENT_CHAT_SCRIPT_PATH, "127.0.0.1:4270"))
+            .complete();
+        assert_eq!(served.status, 200);
+        assert_eq!(served.content_type, "text/javascript; charset=utf-8");
 
-        let script = body(
-            &router
-                .respond(&get(deepnest_web::AGENT_CHAT_SCRIPT_PATH, "127.0.0.1:4270"))
-                .complete(),
-        );
-        assert!(script.contains("dnc-root"), "{script}");
-        // Which app the window is talking to comes from the address it was served under. The meta
-        // is not enough: a page in the stage's frame carries none, and a window that read only the
-        // meta would draw nothing in the only shape most people see.
-        assert!(script.contains("location.pathname"), "{script}");
+        let script = body(&served);
+        // The point of this file is that it is not a second window: it names the agent and loads the
+        // one renderer. A second renderer here is how the app's window came to have no compaction
+        // note, no escalation request and no screenshot — three capabilities nobody had written
+        // twice yet, beside one copy that already had them.
+        assert!(script.contains("deepnestDialogTarget"), "{script}");
+        assert!(script.contains("\"/dialog.js\""), "{script}");
+        assert!(script.contains("data-agent"), "{script}");
+        // A file cannot be an initializer and a copy of the window at once: if any of the dialog's
+        // own markup names appear here, a second renderer has grown back.
+        for own in ["dnc-root", "deepnest-dialog-panel", "deepnest-dialog-ball"] {
+            assert!(
+                !script.contains(own),
+                "the initializer carries the renderer's own markup — {own}: {script}"
+            );
+        }
         assert!(!script.contains("deepnest-token"), "{script}");
         // The app's process credential must never reach a page: a page holding it could spend
         // every turn the app has, and no window needs it.
         assert!(!script.contains("DEEPNEST_APP_TICKET"), "{script}");
-
-        let style = body(
-            &router
-                .respond(&get(deepnest_web::AGENT_CHAT_STYLE_PATH, "127.0.0.1:4270"))
-                .complete(),
-        );
-        assert!(style.contains(".dnc-root"), "{style}");
     }
 
     #[test]

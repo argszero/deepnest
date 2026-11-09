@@ -53,6 +53,40 @@
   var meta = document.querySelector('meta[name="deepnest-app"]');
   var slug = meta ? meta.getAttribute("content") || "" : "";
 
+  // Two readings of where this app is, and the second is not a fallback for a special case: the meta
+  // is written into a page deepnest serves directly, while an app's own page carries none — it is
+  // the app's own markup. What every shape does carry is the prefix it was served under,
+  // `/app/<slug>/`, because that is the address the browser asked for.
+  if (!slug) {
+    var served = /^\/app\/([^\/?#]+)\//.exec(window.location.pathname);
+    if (served) {
+      try {
+        slug = decodeURIComponent(served[1]);
+      } catch (error) {
+        slug = served[1];
+      }
+    }
+  }
+
+  // ---- one dialog, two channels ----------------------------------------------------------------
+  //
+  // On deepnest's own stage page this holds the app's control conversation: `POST /chat`,
+  // `GET /history`, the conversations drawer, the build watch, the screenshot. An app can also ask
+  // for this same dialog in its own page, with one line of markup that loads `/agent-chat.js` — and
+  // then it holds the conversation with the agent that app declared, which is
+  // `POST`/`GET /api/apps/<slug>/agent` and nothing else.
+  //
+  // `deepnestDialogTarget` is how the second shape says what it wants. The initializer sets it
+  // before this file loads, and its absence is the first shape rather than a mode to thread through
+  // every function below. Only the routes differ: the turns on the wire are the same shape, because
+  // both are read out of the same `history.jsonl` by `crate::history::read_at`, and both answer a
+  // turn as the same `event: text` … `event: done` stream (`appagent::route` and `chat` share the
+  // router's writer). So the transcript, the streaming reader, Stop, Enter, Expand, the copy
+  // controls and the compaction note are one implementation, and this file is the only renderer
+  // there is.
+  var wanted = window.deepnestDialogTarget || null;
+  var agentName = (wanted && wanted.agent) || "";
+
   // The frame the app is in, when this page is the stage. `null` is the older shape — a client that
   // sent no `Sec-Fetch-Dest`, so the gateway could not tell a top-level navigation from anything
   // else and put this script in the app's own page. Everything below works in both, and the one
@@ -86,7 +120,7 @@
 
   var title = document.createElement("p");
   title.id = "deepnest-dialog-title";
-  title.textContent = slug || "this app";
+  title.textContent = (wanted && wanted.label) || slug || "this app";
 
   // The way into the conversations, beside the app's name. A button rather than a link: it opens a
   // panel inside this one, and a link would navigate away from the app the person is talking about.
@@ -115,7 +149,12 @@
   var head = document.createElement("div");
   head.id = "deepnest-dialog-head";
   head.appendChild(title);
-  head.appendChild(toggle);
+  if (!agentName) {
+    // The drawer is the *app's* control conversation and only that: an app's own window holds the
+    // conversation with its declared agent, and `/sessions` is not a route that conversation has. A
+    // button opening a list this channel cannot fill is worse than no button.
+    head.appendChild(toggle);
+  }
   head.appendChild(expand);
 
   var note = document.createElement("p");
@@ -919,9 +958,14 @@
   });
 
   form.appendChild(input);
-  form.appendChild(attach);
-  form.appendChild(capture);
-  form.appendChild(picker);
+  if (!agentName) {
+    // Attachments travel on the control conversation's route, which is the only one that accepts
+    // them. Hiding the three ways in is the honest shape of that: a button whose request the route
+    // would refuse is a broken button, and a picker that silently drops what it collected is worse.
+    form.appendChild(attach);
+    form.appendChild(capture);
+    form.appendChild(picker);
+  }
   form.appendChild(send);
   form.appendChild(stop);
 
@@ -1316,6 +1360,16 @@
   var holdingPlace = false;
 
   function historyRoute() {
+    if (agentName) {
+      // The agent's own conversation: the same `{turns: […]}` from the same reader, addressed by the
+      // name the app's `[[agent]]` table declares.
+      return (
+        "/api/apps/" +
+        encodeURIComponent(slug) +
+        "/agent?agent=" +
+        encodeURIComponent(agentName)
+      );
+    }
     return "/api/apps/" + encodeURIComponent(slug) + "/history";
   }
 
@@ -2911,6 +2965,12 @@
   var REBUILD_PATIENCE = 5 * 60 * 1000;
 
   function watchTheRebuild() {
+    if (agentName) {
+      // The build watch is the stage page's: it exists so a rebuild reloads the *frame* while the
+      // conversation stays in the page beside it. An app's own window is inside the app that gets
+      // rebuilt, so there is no frame to spare — its page is the app's own business to reload.
+      return;
+    }
     watch(routeFor("build"), REBUILD_PATIENCE, Date.now());
   }
 
@@ -3026,17 +3086,36 @@
     // Each key is added only when there is something in it: a typed message keeps the exact body it
     // had before the box could paste anything, which is one fewer shape a server has to accept.
     var body = { message: text };
-    if (images.length > 0) {
+    if (agentName) {
+      // The agent route's body: which agent, what was said, and the tools the app offers. Pictures
+      // and files belong to the control conversation — `/chat` is the only route that accepts them
+      // — so a window on the agent channel says that instead of posting a body the route would
+      // ignore, which would look like a picture that was sent.
+      if (images.length > 0 || files.length > 0) {
+        say(
+          "This window sends words to the app's agent; pictures and files go through deepnest's own dialog.",
+          true
+        );
+        return Promise.resolve();
+      }
+      body.agent = agentName;
+      if (window.deepnestAgentTools) {
+        // The app's own tools travel with the request, so a turn never has to call back into the app
+        // it is running inside — the deadlock the batch hand-back exists to prevent.
+        body.tools = window.deepnestAgentTools;
+      }
+    } else if (images.length > 0) {
       body.images = images;
-    }
-    if (files.length > 0) {
+    } else if (files.length > 0) {
       // Name and bytes, and nothing else: a file's type is what this browser guessed from the
       // extension, and the server would only be reading the guess back.
       body.files = files.map(function (entry) {
         return { name: entry.name, data: entry.data };
       });
     }
-    return fetch("/api/apps/" + encodeURIComponent(slug) + "/chat", {
+    return fetch(
+      "/api/apps/" + encodeURIComponent(slug) + (agentName ? "/agent" : "/chat"),
+      {
       method: "POST",
       // Same-origin is what attaches the cookie this page was given, and it is the default — but
       // spelled out, because the whole mechanism rests on it and a later `credentials: "omit"`

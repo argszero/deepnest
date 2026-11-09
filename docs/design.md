@@ -395,12 +395,22 @@ never asked for them.
 person cannot talk to an agent the app declared unless the app draws a chat window, and an app author
 — or a model writing that app — drawing one from scratch produces the window that already failed
 once in the panel: a text box that shows nothing while a tool-using turn runs for a minute, loses the
-conversation on reload, and has no Stop. So deepnest ships the window: `crates/web/src/agent-chat.js`
-and `agent-chat.css`, served at `/agent-chat.js` and `/agent-chat.css`, switched on by one line of
-the app's own markup.
+conversation on reload, and has no Stop. So deepnest ships the window: `/agent-chat.js`, switched on
+by one line of the app's own markup — and that line loads `/dialog.js`, the same dialog that stands
+beside the app's page.
 
-Five decisions came with it:
+Six decisions came with it:
 
+- **One window, two channels.** `crates/web/src/agent-chat.js` is an initializer: it names the app's
+  agent in `window.deepnestDialogTarget` and loads `crates/web/src/dialog.js`, which is the only
+  renderer there is. The second window this replaced was 471 lines against the dialog's 3,646, and it
+  had no compaction note, no escalation request and no screenshot — three capabilities nobody had
+  written twice yet, beside one copy that already had all three. The channel changes a route and a
+  body and nothing else: `/chat` carries pictures and files, `/agent` carries the agent's name and
+  the app's tools; both read the same `history.jsonl` through the same reader, so the turns on the
+  wire are the same shape, and both answer a turn as the same `event: text` … `event: done` stream.
+  The three controls an app's window has no route for — the conversations drawer, the build watch and
+  the screenshot — are gated rather than drawn and refused.
 - **The window is a file the app includes, not code the app copies.** `/agent-chat.js` is a contract
   with every app the agent has already written, which is why its path is a constant in
   [`deepnest_web`] rather than a literal inside a template — the copy in an app is the copy that
