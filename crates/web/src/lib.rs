@@ -104,22 +104,22 @@ pub const DIALOG_FRAME_SCRIPT: &str = include_str!("dialog-frame.js");
 /// The app page's dialog stylesheet.
 pub const DIALOG_STYLE: &str = include_str!("dialog.css");
 
-/// Where an app's own chat window is served.
+/// Where an app's own chat window is switched on.
 ///
-/// A third asset pair beside the panel's and the dialog's, and a different question: the dialog is
-/// deepnest talking about the app, this is the app talking to an agent it declared. An app asks for
-/// it in its own markup — one `<script>` line — so its path is a contract with every app the agent
-/// has already written, which is why it is a constant here rather than a literal in a template.
+/// One asset beside the panel's and the dialog's, and a different question: the dialog is deepnest
+/// talking about the app, this is the app talking to an agent it declared. An app asks for it in
+/// its own markup — one `<script>` line — so its path is a contract with every app the agent has
+/// already written, which is why it is a constant here rather than a literal in a template.
 pub const AGENT_CHAT_SCRIPT_PATH: &str = "/agent-chat.js";
 
-/// Where that window's stylesheet is served.
-pub const AGENT_CHAT_STYLE_PATH: &str = "/agent-chat.css";
-
-/// The app's own chat window.
+/// What that line loads: an initializer, not a second window.
+///
+/// It names the app's agent and loads [`DIALOG_SCRIPT`], so an app's conversation is drawn by the
+/// same renderer, in the same stylesheet, as deepnest's own dialog. The second window this replaced
+/// was 471 lines against the dialog's 3,646 and had no compaction note, no escalation request and
+/// no screenshot — each of them a capability nobody had written twice yet, next to one copy that
+/// already had all three.
 pub const AGENT_CHAT_SCRIPT: &str = include_str!("agent-chat.js");
-
-/// The app's own chat window's stylesheet.
-pub const AGENT_CHAT_STYLE: &str = include_str!("agent-chat.css");
 
 /// What `GET /` is allowed to load.
 ///
@@ -3234,6 +3234,30 @@ mod tests {
         assert!(
             DIALOG_STYLE.contains("#deepnest-dialog-stop[hidden]"),
             "the control is unstyled, so hiding it does nothing"
+        );
+    }
+
+    #[test]
+    fn one_dialog_holds_either_conversation() {
+        // An app's window is this dialog, not a second one: `/agent-chat.js` names the agent and
+        // loads this file. So this file reaches both conversations, and what separates them is a
+        // route and a body — never a second transcript, a second reader or a second Stop.
+        for fact in [
+            r#""/agent?agent="#,
+            "body.agent = agentName",
+            "window.deepnestDialogTarget",
+        ] {
+            assert!(
+                DIALOG_SCRIPT.contains(fact),
+                "the dialog cannot hold an app's own conversation — {fact} is missing"
+            );
+        }
+        // The three things an app's window has no route for are gated rather than drawn and refused:
+        // a control whose request would 404 is a broken control, and one whose request would be
+        // ignored is worse.
+        assert!(
+            DIALOG_SCRIPT.contains("if (!agentName)"),
+            "nothing is gated on the channel, so the app's window draws controls it cannot use"
         );
     }
 
