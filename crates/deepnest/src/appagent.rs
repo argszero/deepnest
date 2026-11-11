@@ -55,6 +55,11 @@ pub const ACTION: &str = "agent";
 /// { "agent": "triage", "message": "…", "session": "optional-key" }
 /// ```
 ///
+/// `images` is optional and is the field `/chat` reads, read by the same reader: `data:image/...`
+/// URLs, which is what a pasted or screenshotted picture is. A body carrying pictures and no words
+/// is a message — a screenshot whose question is already in the picture — so the emptiness check
+/// below asks about both.
+///
 /// `session` is optional and is the app's own name for a conversation. Absent means the agent's one
 /// conversation (`<app>/.agent/agents/<name>/history.jsonl`); present means
 /// `sessions/<key>.jsonl` beside it, so an app that handles a thousand messages can keep a thousand
@@ -99,10 +104,21 @@ pub fn route(
                 .to_string(),
         );
     };
-    let Some(message) = body.get("message").and_then(Value::as_str) else {
-        return failed(400, "the body carries no `message` string".to_string());
+    // The pictures that came with the words. Read by `/chat`'s own reader rather than by a second
+    // one written here: two readers of one field are two answers to "may this be sent", and the
+    // screen a person screenshots is the same screen on both routes. What depends on it is the
+    // window the app draws — its screenshot button posts to `/capture`, gets a `data:` URL back, and
+    // would otherwise put it in a body this route dropped on the floor while answering `200`.
+    let images = match crate::chat::images_from(&body) {
+        Ok(images) => images,
+        Err(reason) => return failed(400, reason),
     };
-    if message.trim().is_empty() {
+    let message = body.get("message").and_then(Value::as_str);
+    if message.is_none() && images.is_empty() {
+        return failed(400, "the body carries no `message` string".to_string());
+    }
+    let message = message.unwrap_or_default();
+    if message.trim().is_empty() && images.is_empty() {
         return failed(400, "the message is empty".to_string());
     }
     let session_key = body.get("session").and_then(Value::as_str);
@@ -132,7 +148,7 @@ pub fn route(
     // because the router registered it before calling here, and the answer is handed over as it is
     // written because the caller passed an observer. An app that only wants the result passes a
     // flag nobody holds and an observer that discards — which is what the app's own process does.
-    match agent.run_turn_watched(message, &[], cancel, on_text) {
+    match agent.run_turn_watched(message, &images, cancel, on_text) {
         Ok(outcome) => reply(outcome),
         Err(error) => error_reply(&error),
     }
@@ -943,6 +959,97 @@ mod tests {
             "{:?}",
             model.last_offer()
         );
+    }
+
+    /// A 1×1 PNG as a `data:` URL — the spelling a capture or a paste arrives in.
+    const PIXEL: &str = "data:image/png;base64,iVBORw0KGgo=";
+
+    #[test]
+    fn a_picture_reaches_the_model_on_the_route_the_apps_own_window_uses() {
+        // The app's window is `/dialog.js` on the agent channel, and its screenshot button posts to
+        // `/capture` and puts the `data:` URL it gets back into the message. A body that carried
+        // that picture and had it dropped at the model call is a button that looks like it worked:
+        // the route took the request, answered `200`, and the model was never shown the screen.
+        let scratch = Scratch::new("picture");
+        let model = Scripted::new(vec![says("A white pixel.")]);
+        let request = scratch.post(
+            "agent",
+            &json!({
+                "agent": "triage",
+                "message": "what is this?",
+                "images": [PIXEL],
+                "tools": Scratch::tools(),
+            }),
+        );
+
+        let reply = route(
+            &request,
+            Some(model.clone()),
+            &scratch.home(),
+            &scratch.dir(),
+            &scratch.slug(),
+            &Cancellation::new(),
+            &mut |_| {},
+        );
+
+        assert_eq!(reply.status, 200, "{:?}", reply.body);
+        let seen = model.seen.lock().unwrap();
+        let user = seen[0]
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .unwrap();
+        assert_eq!(user.text(), "what is this?");
+        assert_eq!(user.image_count(), 1, "the picture never reached the model");
+
+        // And in the conversation afterwards, so the next turn still has the screen. The declared
+        // agent's own file, not the dialog's: `<app>/.agent/agents/<name>/history.jsonl`.
+        let history = conversation(&scratch.dir(), "triage", None)
+            .unwrap()
+            .history();
+        let text = std::fs::read_to_string(&history).unwrap();
+        assert!(text.contains("what is this?"), "{text}");
+    }
+
+    #[test]
+    fn a_picture_with_no_words_is_still_a_message() {
+        // A screenshot and nothing typed is the ordinary shape of "this bit is wrong" — the question
+        // is in the picture. Refusing it as an empty message would answer the capture button with a
+        // `400` on the one press that has no words to go with it.
+        let scratch = Scratch::new("picture-only");
+        let model = Scripted::new(vec![says("That is a white pixel.")]);
+        let request = scratch.post(
+            "agent",
+            &json!({
+                "agent": "triage",
+                "message": "",
+                "images": [PIXEL],
+                "tools": Scratch::tools(),
+            }),
+        );
+
+        let reply = route(
+            &request,
+            Some(model.clone()),
+            &scratch.home(),
+            &scratch.dir(),
+            &scratch.slug(),
+            &Cancellation::new(),
+            &mut |_| {},
+        );
+
+        assert_eq!(
+            reply.status, 200,
+            "a picture and no words was refused: {:?}",
+            reply.body
+        );
+        let seen = model.seen.lock().unwrap();
+        let user = seen[0]
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .unwrap();
+        assert_eq!(user.image_count(), 1);
     }
 
     #[test]

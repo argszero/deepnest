@@ -443,6 +443,18 @@
       takePicture(file, next);
       return;
     }
+    if (agentName) {
+      // The app's own window carries words and pictures, and nothing else: a file travels by having
+      // its contents written into the prompt, which only `/chat` does, so collecting one here would
+      // put a marker in the message that no request ever carries the bytes for. Said at the way in —
+      // one press, one sentence — rather than at send time, after the person was told it attached.
+      say(
+        "This window sends words and pictures to the app's agent; files go through deepnest's own dialog.",
+        true
+      );
+      next();
+      return;
+    }
     takeFile(file, next);
   }
 
@@ -959,13 +971,18 @@
 
   form.appendChild(input);
   if (!agentName) {
-    // Attachments travel on the control conversation's route, which is the only one that accepts
-    // them. Hiding the three ways in is the honest shape of that: a button whose request the route
-    // would refuse is a broken button, and a picker that silently drops what it collected is worse.
+    // A file is the control conversation's: `/chat` writes its contents into the prompt and `/agent`
+    // has nowhere to put them. Hiding the way in is the honest shape of that — a picker that
+    // silently drops what it collected is worse than one that is not offered.
     form.appendChild(attach);
-    form.appendChild(capture);
     form.appendChild(picker);
   }
+  // The screenshot is on both channels. `/capture` photographs this machine and answers a `data:`
+  // URL, and a `data:` URL is a picture — the one thing both routes carry. The permission is
+  // already on an app's own page: the gateway mints one cookie per route it serves a page for, and
+  // `capture` is one of them, so the second window stops being the place a person cannot point at
+  // what they mean.
+  form.appendChild(capture);
   form.appendChild(send);
   form.appendChild(stop);
 
@@ -3087,18 +3104,22 @@
     // had before the box could paste anything, which is one fewer shape a server has to accept.
     var body = { message: text };
     if (agentName) {
-      // The agent route's body: which agent, what was said, and the tools the app offers. Pictures
-      // and files belong to the control conversation — `/chat` is the only route that accepts them
-      // — so a window on the agent channel says that instead of posting a body the route would
-      // ignore, which would look like a picture that was sent.
-      if (images.length > 0 || files.length > 0) {
+      // The agent route's body: which agent, what was said, the pictures that came with it, and the
+      // tools the app offers. Files are not among them — `/chat` inlines their contents into the
+      // prompt and this route has nowhere to put them — and `take` already said so when the file was
+      // dropped. What is left here is the key the route would ignore, refused rather than posted,
+      // because a body carrying a field nobody reads looks like a file that was sent.
+      if (files.length > 0) {
         say(
-          "This window sends words to the app's agent; pictures and files go through deepnest's own dialog.",
+          "This window sends words and pictures to the app's agent; files go through deepnest's own dialog.",
           true
         );
         return Promise.resolve();
       }
       body.agent = agentName;
+      if (images.length > 0) {
+        body.images = images;
+      }
       if (window.deepnestAgentTools) {
         // The app's own tools travel with the request, so a turn never has to call back into the app
         // it is running inside — the deadlock the batch hand-back exists to prevent.

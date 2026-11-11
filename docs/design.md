@@ -353,8 +353,9 @@ person typing in a panel. The shape is four pieces:
   environment variables are the whole of what it needs: `DEEPNEST_URL`, `DEEPNEST_APP_TICKET` and
   `DEEPNEST_APP_SLUG`. The ticket ([`ticket`]) is minted per app per start and opens exactly three
   routes — `agent`, `agent-result`, `tools` — and nothing that manages the machine. Body:
-  `{"agent","message","session","tools"}`; `session` is the app's own name for a conversation and
-  `tools` is the app's capabilities in MCP's `tools/list` shape.
+  `{"agent","message","session","images","tools"}`; `session` is the app's own name for a
+  conversation, `images` is the same field `/chat` reads and the app's own window sends, and `tools`
+  is the app's capabilities in MCP's `tools/list` shape.
 - **A turn can pause, and that is the design.** The app is inside a request of its own when it asks
   for a turn. A tool of the app's own therefore must not be *called* — a server that answers one
   request at a time cannot answer a callback from inside the request it has not finished, and the
@@ -406,11 +407,15 @@ Six decisions came with it:
   renderer there is. The second window this replaced was 471 lines against the dialog's 3,646, and it
   had no compaction note, no escalation request and no screenshot — three capabilities nobody had
   written twice yet, beside one copy that already had all three. The channel changes a route and a
-  body and nothing else: `/chat` carries pictures and files, `/agent` carries the agent's name and
-  the app's tools; both read the same `history.jsonl` through the same reader, so the turns on the
-  wire are the same shape, and both answer a turn as the same `event: text` … `event: done` stream.
-  The three controls an app's window has no route for — the conversations drawer, the build watch and
-  the screenshot — are gated rather than drawn and refused.
+  body and nothing else: `/chat` carries pictures and files, `/agent` carries the agent's name, the
+  pictures that came with the words and the app's tools; both read the same `history.jsonl` through
+  the same reader, so the turns on the wire are the same shape, and both answer a turn as the same
+  `event: text` … `event: done` stream. Two controls an app's window has no route for — the
+  conversations drawer and the build watch — are gated rather than drawn and refused. The screenshot
+  is not one of them: `/capture` answers a `data:` URL, a `data:` URL is a picture, and a picture is
+  what both routes carry, so the button is drawn on both channels. A file is what is left over — its
+  contents are written into the prompt by `/chat` alone — and it is refused where it is dropped
+  rather than after it appears to have been attached.
 - **The window is a file the app includes, not code the app copies.** `/agent-chat.js` is a contract
   with every app the agent has already written, which is why its path is a constant in
   [`deepnest_web`] rather than a literal inside a template — the copy in an app is the copy that
