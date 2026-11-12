@@ -199,7 +199,11 @@ pub fn ask_from(body: &[u8]) -> Result<Ask, String> {
 /// a beacon that tells a third party what this machine is looking at — and it would make the
 /// conversation file a record of remote links rather than of the pictures themselves, so the turn
 /// replayed tomorrow would show whatever that URL serves then.
-fn images_from(value: &Value) -> Result<Vec<String>, String> {
+///
+/// `pub(crate)` because the app's own agent route reads this same field by these same rules
+/// ([`crate::appagent::route`]): one reader, so a picture this route accepts is not refused by the
+/// window that stands inside the app — and a rule tightened here is not tightened in one place only.
+pub(crate) fn images_from(value: &Value) -> Result<Vec<String>, String> {
     let Some(field) = value.get("images") else {
         return Ok(Vec::new());
     };

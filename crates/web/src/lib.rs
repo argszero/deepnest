@@ -1717,6 +1717,23 @@ mod tests {
     }
 
     #[test]
+    fn the_dialog_stops_refusing_pictures_on_the_apps_own_channel() {
+        // What this can and cannot prove, stated rather than implied: it is a search of the script,
+        // so it sees the sentence that told a person pictures go through the other dialog and it
+        // does not see which element a `appendChild` sits inside. The channel's own behaviour — the
+        // screenshot button drawn, the picture in the body the agent route accepts — is measured in
+        // a real browser, not here. What is pinned is the refusal coming back.
+        assert!(
+            !DIALOG_SCRIPT.contains("pictures and files go through"),
+            "the dialog still tells the app's channel that pictures have to go elsewhere"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains("files go through deepnest's own dialog"),
+            "nothing says what happens to a file on the app's channel"
+        );
+    }
+
+    #[test]
     fn the_transcript_counts_files_instead_of_pouring_them_into_the_chat() {
         // The record holds what the model was shown: the words, then the files' contents. The page
         // is showing a person what they said. A csv inside a chat line is a screen of data where a
