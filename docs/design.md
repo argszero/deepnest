@@ -410,12 +410,15 @@ Six decisions came with it:
   body and nothing else: `/chat` carries pictures and files, `/agent` carries the agent's name, the
   pictures that came with the words and the app's tools; both read the same `history.jsonl` through
   the same reader, so the turns on the wire are the same shape, and both answer a turn as the same
-  `event: text` … `event: done` stream. Two controls an app's window has no route for — the
-  conversations drawer and the build watch — are gated rather than drawn and refused. The screenshot
-  is not one of them: `/capture` answers a `data:` URL, a `data:` URL is a picture, and a picture is
-  what both routes carry, so the button is drawn on both channels. A file is what is left over — its
-  contents are written into the prompt by `/chat` alone — and it is refused where it is dropped
-  rather than after it appears to have been attached.
+  `event: text` … `event: done` stream. The conversations drawer is on both channels: `sessions` is a
+  store rooted either at the app's own `.agent` or at one declared agent's directory, so an app's
+  window asks the same route with the agent named and draws the same rows — the same files, the same
+  pointer, the same grammar, one implementation. The build watch is the one control an app's window
+  has no route for, and it is gated rather than drawn and refused. The screenshot is not one of
+  them: `/capture` answers a `data:` URL, a `data:` URL is a picture, and a picture is what both
+  routes carry, so the button is drawn on both channels. A file is what is left over — its contents
+  are written into the prompt by `/chat` alone — and it is refused where it is dropped rather than
+  after it appears to have been attached.
 - **The window is a file the app includes, not code the app copies.** `/agent-chat.js` is a contract
   with every app the agent has already written, which is why its path is a constant in
   [`deepnest_web`] rather than a literal inside a template — the copy in an app is the copy that

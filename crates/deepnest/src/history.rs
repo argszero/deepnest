@@ -520,9 +520,9 @@ fn push(turns: &mut Vec<Turn>, record: &Record) {
 /// The body of the `history` route: the conversation the page is on, oldest first.
 ///
 /// The session is asked for rather than assumed: what a turn writes to and what the page reads from
-/// have to be one answer, and [`crate::sessions::history_path`] is where the answer lives.
+/// have to be one answer, and [`crate::sessions::Store::history`] is where the answer lives.
 pub fn body(app_dir: &Path) -> String {
-    body_at(&crate::sessions::history_path(app_dir))
+    body_at(&crate::sessions::Store::for_app(app_dir).history())
 }
 
 /// The same body, of a file named by the caller.
