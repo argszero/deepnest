@@ -73,8 +73,9 @@
   // On deepnest's own stage page this holds the app's control conversation: `POST /chat`,
   // `GET /history`, the conversations drawer, the build watch, the screenshot. An app can also ask
   // for this same dialog in its own page, with one line of markup that loads `/agent-chat.js` — and
-  // then it holds the conversation with the agent that app declared, which is
-  // `POST`/`GET /api/apps/<slug>/agent` and nothing else.
+  // then it holds the conversation with the agent that app declared: `POST`/`GET
+  // /api/apps/<slug>/agent` for that conversation, and `GET`/`POST /api/apps/<slug>/sessions` with
+  // the agent named, which is the same drawer holding that agent's conversations.
   //
   // `deepnestDialogTarget` is how the second shape says what it wants. The initializer sets it
   // before this file loads, and its absence is the first shape rather than a mode to thread through
@@ -149,12 +150,11 @@
   var head = document.createElement("div");
   head.id = "deepnest-dialog-head";
   head.appendChild(title);
-  if (!agentName) {
-    // The drawer is the *app's* control conversation and only that: an app's own window holds the
-    // conversation with its declared agent, and `/sessions` is not a route that conversation has. A
-    // button opening a list this channel cannot fill is worse than no button.
-    head.appendChild(toggle);
-  }
+  // The conversations, on both channels. The panel's drawer lists the app's own control
+  // conversation; an app's window asks for the same route with the agent it is talking to named, and
+  // the server answers with that agent's conversations in the same shape — one store, one set of
+  // rows, so the two windows cannot disagree about what a conversation is.
+  head.appendChild(toggle);
   head.appendChild(expand);
 
   var note = document.createElement("p");
@@ -1391,7 +1391,13 @@
   }
 
   function sessionsRoute() {
-    return "/api/apps/" + encodeURIComponent(slug) + "/sessions";
+    var path = "/api/apps/" + encodeURIComponent(slug) + "/sessions";
+    // Whose conversations: the app's own control conversation, or the one the app's window is
+    // holding with the agent it declares. The second is named the same way its messages are.
+    if (agentName) {
+      path += "?agent=" + encodeURIComponent(agentName);
+    }
+    return path;
   }
 
   // When a conversation was last used, as a row in a list can show it: the day and the minute, and

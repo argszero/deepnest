@@ -394,26 +394,61 @@ impl Drop for Install {
     }
 }
 
+/// How far up from an executable the profile directory may be.
+///
+/// Two levels reach it from `target/<profile>/deps`, and five from
+/// `target/<profile>/build/<package>-<hash>/out`. Six covers both with a step to spare, and a
+/// bound is what keeps the search from wandering above the target directory and finding some
+/// unrelated `examples/` on the way.
+const ANCESTORS_SEARCHED: usize = 6;
+
 /// The stand-in app, built as an example beside this test binary.
+///
+/// Beside is not a fixed number of directories up, which is what this function used to assume.
+/// Cargo has put test executables in `target/<profile>/deps`, where counting two parents lands on
+/// the profile directory, and in `target/<profile>/build/<package>-<hash>/out`, where the same
+/// count lands inside a build script's output directory and finds nothing. The second layout is
+/// not hypothetical: when the stable toolchain was promoted to 1.100 on 2026-11-13, all four
+/// tests in this file went red on all three platforms at once, each panicking here before it had
+/// started anything, while the same file was green on 1.99 the day before.
+///
+/// So the directory is searched for rather than counted to: the ancestors of this executable and
+/// the ancestors of the binary the same build linked at `CARGO_BIN_EXE_deepnest` are asked in turn
+/// whether each holds `examples/<name>`. The binary is searched as well because a layout that
+/// moves the test executable is as likely to move the binary, and because its path is the one
+/// cargo's own contract fixes.
 fn standin_app() -> PathBuf {
-    let test_binary = std::env::current_exe().expect("the path of this test binary");
-    let debug_dir = test_binary
-        .parent()
-        .and_then(Path::parent)
-        .expect("the test binary lives in target/<profile>/deps");
     let name = if cfg!(windows) {
         "standin_app.exe"
     } else {
         "standin_app"
     };
-    let path = debug_dir.join("examples").join(name);
-    assert!(
-        path.is_file(),
-        "the stand-in app is not at {} — `cargo test` builds examples, so this means the test was \
-         run from a stale target directory; `cargo build -p deepnest --examples` fixes it",
-        path.display()
+
+    let test_binary = std::env::current_exe().expect("the path of this test binary");
+    let the_binary = Path::new(env!("CARGO_BIN_EXE_deepnest"));
+
+    let mut looked: Vec<PathBuf> = Vec::new();
+    for start in [test_binary.as_path(), the_binary] {
+        for directory in start.ancestors().skip(1).take(ANCESTORS_SEARCHED) {
+            let path = directory.join("examples").join(name);
+            if path.is_file() {
+                return path;
+            }
+            if !looked.contains(&path) {
+                looked.push(path);
+            }
+        }
+    }
+
+    let looked: Vec<String> = looked
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    panic!(
+        "the stand-in app is not at any of:\n  {}\n`cargo test` builds examples, so this means the \
+         test was run from a stale target directory; `cargo build -p deepnest --examples` fixes it",
+        looked.join("\n  ")
     );
-    path
 }
 
 /// Connect with timeouts, so a hang is a failure rather than a hung suite.
