@@ -1602,23 +1602,31 @@ impl Router {
         )
     }
 
-    /// `GET`/`POST /api/apps/<slug>/sessions` — the app's conversations, and which one is open.
+    /// `GET`/`POST /api/apps/<slug>/sessions` — the conversations, and which one is open.
     ///
     /// The `GET` is the drawer: every conversation this app has, the newest first, with the one the
     /// page is on marked. The `POST` is the choice, and it answers with the same body the `GET` does
     /// — one shape for the page to render, whether it is opening the drawer or picking a row, so a
     /// page cannot end up drawing a list it has no current session for.
     ///
-    /// Two answers the caller can act on and one it cannot: `404` for a name this app does not have
-    /// (it is a mistake worth saying), `400` for a body this route cannot read or a name that is not
-    /// a session name (also a mistake), and `503` when the write failed, which is the only one that
-    /// says something is wrong here rather than there.
+    /// **Whose conversations** is one parameter, naming the same thing the message route names:
+    /// absent is the app's own control conversation — what the panel and the floating ball show — and
+    /// an agent's name is that agent's, which is what the app's own window shows. Two roots and one
+    /// store ([`sessions::Store`]), so the drawer renders the same rows for either.
+    ///
+    /// Two answers the caller can act on and one it cannot: `404` for a session name this app does
+    /// not have (it is a mistake worth saying), `400` for a body this route cannot read or a name
+    /// that is not a session name (also a mistake), and `503` when the write failed, which is the
+    /// only one that says something is wrong here rather than there. An agent this app never
+    /// declared is a `404` naming the ones it did, rather than an empty drawer.
     fn sessions_route(&self, request: &Request, slug: &Slug, dir: &Path) -> Response {
-        if request.method == Method::Get || request.method == Method::Head {
-            return Response::json(200, sessions::body(dir));
-        }
+        let reading = request.method == Method::Get || request.method == Method::Head;
         #[derive(serde::Deserialize)]
         struct Choice {
+            /// Which of the app's agents, when the app's own window is asking. Absent means the
+            /// conversation the app has always had.
+            #[serde(default)]
+            agent: Option<String>,
             /// The conversation to continue.
             #[serde(default)]
             open: Option<String>,
@@ -1626,17 +1634,40 @@ impl Router {
             #[serde(default)]
             new: Option<bool>,
         }
-        let choice: Choice = match serde_json::from_slice(&request.body) {
-            Ok(choice) => choice,
-            Err(error) => {
-                return Response::json(
-                    400,
-                    error_body(&format!(
-                        "the body is not the JSON this route reads (open, new): {error}"
-                    )),
-                )
+        // The drawer reads and the choice writes, so the name arrives in the query or in the body
+        // depending on which half this is — the same split `agent` already uses for the message
+        // route, and for the same reason: a read behind a `POST` is a page pretending to send.
+        let choice: Choice = if reading {
+            Choice {
+                agent: query_parameter(&request.query, "agent"),
+                open: None,
+                new: None,
+            }
+        } else {
+            match serde_json::from_slice(&request.body) {
+                Ok(choice) => choice,
+                Err(error) => {
+                    return Response::json(
+                        400,
+                        error_body(&format!(
+                            "the body is not the JSON this route reads (agent, open, new): {error}"
+                        )),
+                    )
+                }
             }
         };
+        let store = match choice.agent.as_deref().map(str::trim) {
+            Some(name) if !name.is_empty() => {
+                if let Err(reply) = crate::appagent::declared(dir, slug, name) {
+                    return Response::json(reply.status, reply.body.to_string());
+                }
+                sessions::Store::for_agent(dir, name)
+            }
+            _ => sessions::Store::for_app(dir),
+        };
+        if reading {
+            return Response::json(200, store.body());
+        }
         // A conversation is where a running turn is *writing*, and the file a turn appends to is
         // fixed when it starts. Letting the pointer move under it would leave that turn's records
         // landing in a session the page is no longer looking at — a transcript split in two with
@@ -1655,14 +1686,14 @@ impl Router {
         match (choice.new.unwrap_or(false), choice.open) {
             // `new` is read first so a body carrying both starts a session rather than silently
             // ignoring half of what it asked for.
-            (true, _) => match sessions::create(dir) {
+            (true, _) => match store.create() {
                 // The body after the pointer moved, so the answer already says `current` is the
                 // new session and the page has nothing to ask for a second time.
-                Ok(_) => Response::json(201, sessions::body(dir)),
+                Ok(_) => Response::json(201, store.body()),
                 Err(error) => Response::json(500, error_body(&error)),
             },
-            (false, Some(id)) => match sessions::open(dir, &id) {
-                Ok(_) => Response::json(200, sessions::body(dir)),
+            (false, Some(id)) => match store.open(&id) {
+                Ok(_) => Response::json(200, store.body()),
                 Err(error) => Response::json(404, error_body(&error)),
             },
             (false, None) => Response::json(
@@ -4956,6 +4987,135 @@ mod tests {
                 "/api/apps/notes/agent?agent=nope",
                 crate::grant::AGENT_COOKIE,
                 &value,
+            ))
+            .complete();
+        assert_eq!(undeclared.status, 404, "{}", body(&undeclared));
+        assert!(
+            body(&undeclared).contains("assistant"),
+            "{}",
+            body(&undeclared)
+        );
+    }
+
+    #[test]
+    fn the_drawer_lists_the_agents_conversations_when_the_apps_own_window_asks() {
+        // The app's window is the second channel, and this is its half of the drawer: the same
+        // route, named with the agent it is talking to. What it must not do is answer with the
+        // app's own control conversation — that drawer is the panel's, and a row from it would open
+        // a conversation this window cannot write to.
+        let scratch = Scratch::new("window-drawer");
+        scratch.built_app("notes", "Notes");
+        std::fs::write(
+            scratch
+                .apps()
+                .join("notes")
+                .join(deepnest_apps::MANIFEST_FILE),
+            "[app]\nname = \"Notes\"\n\n[[agent]]\nname = \"assistant\"\n\
+             prompt = \"Show the list.\"\n",
+        )
+        .unwrap();
+        let router = supervised_forwarding(&scratch, RecordingForwarder::answering(200)).0;
+        let started = router.respond(&post("/api/apps/notes/start")).complete();
+        assert_eq!(started.status, 200, "{}", body(&started));
+        // One conversation each, with a different first question, so the two answers cannot be
+        // mistaken for one another.
+        for (file, words) in [
+            (
+                "notes/.agent/agents/assistant/history.jsonl",
+                "what is on the list",
+            ),
+            ("notes/.agent/history.jsonl", "rewrite the app"),
+        ] {
+            let path = scratch.apps().join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &path,
+                format!(
+                    "{{\"type\":\"message\",\"role\":\"user\",\"content\":\"{words}\",\
+                     \"at\":\"2026-11-01T01:00:00Z\"}}\n"
+                ),
+            )
+            .unwrap();
+        }
+
+        let page = router
+            .respond(&get("/app/notes/", "127.0.0.1:4270"))
+            .complete();
+        let drawer = grant_value(
+            &set_cookies(&page)
+                .iter()
+                .find(|raw| raw.starts_with("deepnest-sessions="))
+                .expect("the drawer's cookie")
+                .clone(),
+        );
+
+        let mine = router
+            .respond(&with_named_grant(
+                "GET",
+                "/api/apps/notes/sessions?agent=assistant",
+                crate::grant::SESSIONS_COOKIE,
+                &drawer,
+            ))
+            .complete();
+        assert_eq!(mine.status, 200, "{}", body(&mine));
+        let window: serde_json::Value = serde_json::from_str(&body(&mine)).unwrap();
+        assert_eq!(window["current"], "main");
+        assert_eq!(
+            window["sessions"][0]["title"],
+            "what is on the list",
+            "the window's drawer lists the app's conversation rather than its own: {}",
+            body(&mine)
+        );
+
+        let panel = router
+            .respond(&with_named_grant(
+                "GET",
+                "/api/apps/notes/sessions",
+                crate::grant::SESSIONS_COOKIE,
+                &drawer,
+            ))
+            .complete();
+        let app: serde_json::Value = serde_json::from_str(&body(&panel)).unwrap();
+        assert_eq!(app["sessions"][0]["title"], "rewrite the app");
+
+        // Choosing is the same split: the window moves its own pointer, and the app's stays where it
+        // was — one route, two stores, and nobody's conversation opened by the other window.
+        let chosen = router
+            .respond(&post_body(
+                "/api/apps/notes/sessions",
+                r#"{"agent":"assistant","new":true}"#,
+            ))
+            .complete();
+        assert_eq!(chosen.status, 201, "{}", body(&chosen));
+        let after: serde_json::Value = serde_json::from_str(&body(&chosen)).unwrap();
+        let opened = after["current"].as_str().expect("a name").to_string();
+        assert_ne!(opened, "main");
+        assert_eq!(after["sessions"].as_array().unwrap().len(), 2);
+        assert!(
+            scratch
+                .apps()
+                .join("notes/.agent/agents/assistant/sessions")
+                .join(&opened)
+                .is_dir(),
+            "the session was started in the app's own store: {}",
+            body(&chosen)
+        );
+        assert!(
+            !scratch
+                .apps()
+                .join("notes/.agent/sessions/current")
+                .exists(),
+            "starting a conversation in the app's window moved the app's own pointer"
+        );
+
+        // And a name the app never declared is the `404` its message route gives, naming the ones it
+        // did declare: an empty drawer would look like an app with no conversations at all.
+        let undeclared = router
+            .respond(&with_named_grant(
+                "GET",
+                "/api/apps/notes/sessions?agent=nope",
+                crate::grant::SESSIONS_COOKIE,
+                &drawer,
             ))
             .complete();
         assert_eq!(undeclared.status, 404, "{}", body(&undeclared));

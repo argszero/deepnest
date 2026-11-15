@@ -479,7 +479,7 @@ pub fn watched(
     }
     // The session the page is on, not the file every app used to have only one of: a turn writes
     // where the drawer says the page is looking, and `sessions` is the one place that decides.
-    let session = match Session::open(crate::sessions::history_path(app_dir)) {
+    let session = match Session::open(crate::sessions::Store::for_app(app_dir).history()) {
         Ok(session) => session,
         Err(error) => {
             return Reply::error(

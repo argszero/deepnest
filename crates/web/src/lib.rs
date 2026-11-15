@@ -1210,6 +1210,27 @@ mod tests {
         );
     }
 
+    /// The conversations drawer is the app window's too. It was gated off with the build watch, on
+    /// the grounds that `/sessions` was the app's own control conversation and an app's window had
+    /// no conversation of that kind — but it has one: `sessions` answers for the agent the window
+    /// names, so the button was the last channel difference with no reason left.
+    #[test]
+    fn the_conversations_drawer_is_drawn_on_both_channels() {
+        assert!(
+            DIALOG_SCRIPT.contains("head.appendChild(toggle)"),
+            "the drawer's control is created and never drawn, so no channel has conversations"
+        );
+        assert!(
+            !DIALOG_SCRIPT.contains("a list this channel cannot fill"),
+            "the drawer is still refused on the app channel, which is where it was missing"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#""?agent=" + encodeURIComponent(agentName)"#),
+            "the drawer's route does not name the agent, so an app's window would be shown the \
+             app's own control conversation and could not open any of the rows it drew"
+        );
+    }
+
     /// The panel a conversation is read in is 22rem wide and `78vh` tall at the most, so a long
     /// exchange could only be read through a 280 px window (#85). `Expand` is the way out of that
     /// box, and what it must not do is grow the panel to the whole screen: `#deepnest-dialog` is a

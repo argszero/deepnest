@@ -392,6 +392,13 @@ pub fn declared(app_dir: &Path, slug: &Slug, name: &str) -> Result<(), Reply> {
 /// Pulled out of [`build`] rather than repeated by the transcript route: a page that reads a
 /// different file from the one the turn writes is a dialog showing another conversation's words,
 /// and it would look like a working page.
+///
+/// The key resolves the way the drawer's rows are named, which is what lets one list serve one
+/// window: a key chooses a conversation, no key at all means the one the drawer last opened, and
+/// [`crate::sessions::MAIN`] is the conversation the agent has always had, at the path it has always
+/// had. The pointer is read here rather than carried by the page because a turn that changes the app
+/// reloads it, and a reloaded page that had forgotten which conversation it was on would send the
+/// next message into a different one.
 pub fn conversation(
     app_dir: &Path,
     name: &str,
@@ -401,27 +408,30 @@ pub fn conversation(
         .root()
         .join("agents")
         .join(name);
-    let paths = match session_key {
-        Some(key) => {
-            let safe: String = key
-                .chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                        c.to_ascii_lowercase()
-                    } else {
-                        '-'
-                    }
-                })
-                .collect();
-            if safe.trim_matches('-').is_empty() {
-                return Err(failed(
-                    400,
-                    "the session key has no characters a directory name can use".to_string(),
-                ));
-            }
-            AgentPaths::at(root.join("sessions").join(safe))
+    let key = match session_key {
+        Some(key) => key.trim().to_string(),
+        None => crate::sessions::Store::for_agent(app_dir, name).current(),
+    };
+    let paths = if key == crate::sessions::MAIN {
+        AgentPaths::at(root)
+    } else {
+        let safe: String = key
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        if safe.trim_matches('-').is_empty() {
+            return Err(failed(
+                400,
+                "the session key has no characters a directory name can use".to_string(),
+            ));
         }
-        None => AgentPaths::at(root),
+        AgentPaths::at(root.join("sessions").join(safe))
     };
     if let Err(error) = paths.ensure() {
         return Err(failed(
@@ -1211,7 +1221,7 @@ mod tests {
 
         // And it is the agent's own file, not the app's dialog transcript one directory up.
         let paths = conversation(&scratch.dir(), "triage", None).unwrap();
-        let app_level = crate::sessions::history_path(&scratch.dir());
+        let app_level = crate::sessions::Store::for_app(scratch.dir()).history();
         assert_ne!(paths.history(), app_level);
         assert!(
             paths.history().ends_with("triage/history.jsonl"),
