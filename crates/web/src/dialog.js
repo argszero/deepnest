@@ -876,8 +876,13 @@
   shotCancel.type = "button";
   shotCancel.id = "deepnest-dialog-shot-cancel";
   shotCancel.textContent = "Cancel";
+  // Cancel is an exit like the other three, so it takes the same two calls. It used to read
+  // `closeShot(true)` — an argument this file's `closeShot` never took — so the sheet closed and
+  // the ball and panel stayed hidden, leaving the page looking like an app with no dialog until it
+  // was reloaded.
   shotCancel.addEventListener("click", function () {
-    closeShot(true);
+    closeShot();
+    restorePanel();
   });
 
   shotBar.appendChild(shotHint);
