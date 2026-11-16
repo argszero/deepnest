@@ -1,0 +1,25 @@
+# The compiler this repository is built and tested with, pinned rather than followed.
+#
+# CI used to track the `stable` channel through `dtolnay/rust-toolchain@stable`, which means the
+# toolchain moved without a commit. It did, on 2026-11-09: 1.100.0 was promoted to `stable`, and
+# the next pull request to run CI went red on all three platforms in a file it had not touched.
+# Nothing about the compiler was wrong — it put test executables in `target/<profile>/build/
+# <package>-<hash>/out/` instead of `target/<profile>/deps/`, and a test helper had been counting
+# directories up from its own executable to find a sibling example. That is a defect worth fixing
+# either way, and it was, but the shape of the failure is the point: a dependency of the build
+# that nobody chose, changing underneath a branch that had done nothing.
+#
+# So the channel is named here, at the version the three-platform run passed on. Raising it is a
+# commit like any other, with a run attached, instead of something that happens to the next
+# contributor.
+#
+# The components are named for the same reason: `dtolnay/rust-toolchain@stable` installs clippy
+# and rustfmt for `stable`, and those are not this toolchain's components, so without this line
+# the first `cargo clippy` after a fresh rustup would fail on a missing component.
+#
+# This is the toolchain that builds deepnest. It is not the toolchain deepnest ships: that one is
+# the payload unpacked into `~/.deepnest/toolchain/<version>/`, built by the release workflows, and
+# it is pinned by crates/packaging rather than by this file.
+[toolchain]
+channel = "1.100.0"
+components = ["clippy", "rustfmt"]
