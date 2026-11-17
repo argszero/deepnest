@@ -1631,6 +1631,30 @@ mod tests {
     }
 
     #[test]
+    fn cancelling_the_screenshot_gives_the_dialog_back() {
+        // Measured in Chrome from a cold start: press Screenshot, press Cancel, and the ball and the
+        // panel are both still hidden — the page is left looking like an app that has no dialog, and
+        // reloading it is the only way back. The capture hides them so they are not in their own
+        // picture, so every way out of the sheet has to put them back, and Cancel was the one exit
+        // that passed `closeShot(true)` — an argument the function never took — instead of calling
+        // the restore its three neighbours call beside it.
+        let anchor = r#"shotCancel.addEventListener("click""#;
+        let start = DIALOG_SCRIPT
+            .find(anchor)
+            .expect("the sheet has no cancel of its own");
+        let handler = &DIALOG_SCRIPT[start..];
+        let handler = &handler[..handler.find("\n  });").expect("the handler ends")];
+        assert!(
+            !handler.contains("closeShot(true)"),
+            "Cancel hands `closeShot` an argument it does not take: {handler}"
+        );
+        assert!(
+            handler.contains("restorePanel()"),
+            "cancelling the screenshot takes the ball and the panel with it: {handler}"
+        );
+    }
+
+    #[test]
     fn the_dialog_takes_a_file_the_same_way_it_takes_a_picture() {
         // A file is the picture case with one difference that decides the whole design: it has a
         // name. `[file report.csv]` is the marker, so what the person's sentence points at and what
