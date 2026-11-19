@@ -337,6 +337,23 @@ impl Client {
                         ));
                     }
                     if finish == FinishReason::Absent && !saw_done {
+                        // A stop and a broken endpoint both leave the stream with no finish, and
+                        // only one of them is a failure. The adapter abandons a call by shutting
+                        // the socket down from a second thread (`crates/gateway/src/transport.rs`,
+                        // `interruptible`), and `Shutdown::Both` makes the blocked read return zero
+                        // bytes — which the reading loop below it takes for a clean end of stream.
+                        // So an `Ok` here carries no news about the endpoint when a stop is what
+                        // ended it, and read as one it costs more than a log line: the round writes
+                        // "the model call failed: …" into the conversation and every later round
+                        // sends that note to the model again.
+                        //
+                        // Checked after the flag is set, never before: the adapter polls this same
+                        // flag and only then shuts the socket down, so by the time the read has
+                        // returned the answer is settled and this is not a race. A stream that did
+                        // finish keeps its answer — the button abandons a wait, not a delivery.
+                        if stop() {
+                            return Err(LlmError::stopped());
+                        }
                         return Err(LlmError::transport(
                             "stream ended without a finish_reason or an end-of-stream sentinel",
                         ));
@@ -989,6 +1006,114 @@ mod tests {
             transport.request_count(),
             0,
             "a request went out after the turn had already been stopped"
+        );
+    }
+
+    /// A transport that ends its stream *cleanly* when the caller stops — which is what the real
+    /// adapter's shutdown looks like from the reading thread. `Shutdown::Both` makes the blocked
+    /// read return zero bytes, and the adapter's loop reads that as the end of the stream, so an
+    /// abandoned call reaches the client as `Ok(())` with nothing delivered to finish it.
+    struct EndsCleanlyWhenStopped {
+        sent: Mutex<usize>,
+    }
+
+    impl Transport for EndsCleanlyWhenStopped {
+        fn post(&self, _request: &HttpRequest) -> Result<HttpResponse, LlmError> {
+            Err(LlmError::unsupported("non-streaming"))
+        }
+
+        fn post_stream(
+            &self,
+            _request: &HttpRequest,
+            _on_event: &mut dyn FnMut(SseEvent) -> Result<(), LlmError>,
+        ) -> Result<(), LlmError> {
+            Err(LlmError::unsupported(
+                "this fake only answers the interrupted way",
+            ))
+        }
+
+        fn post_stream_until(
+            &self,
+            _request: &HttpRequest,
+            on_event: &mut dyn FnMut(SseEvent) -> Result<(), LlmError>,
+            stop: Arc<dyn Fn() -> bool + Send + Sync>,
+        ) -> Result<(), LlmError> {
+            *self.sent.lock().unwrap() += 1;
+            on_event(SseEvent {
+                event: None,
+                data: r#"{"choices":[{"index":0,"delta":{"content":"half a th"}}]}"#.into(),
+            })?;
+            for _ in 0..2000 {
+                if stop() {
+                    // Not an error: a shut-down socket reads as the end of the stream, and this
+                    // adapter reports what the read did rather than what it meant.
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            panic!("the stop never arrived, so this is a call that would have hung the turn");
+        }
+    }
+
+    /// The way a press of `Stop` actually ends a streamed call, stated as a test.
+    ///
+    /// The test above has the adapter report the stop as an error, which is what the adapter in
+    /// `crates/gateway` does for a read that fails. A `Shutdown::Both` does not have to fail the
+    /// read — it returns zero bytes — so the abandoned call arrives here as a stream that ended
+    /// with no finish reason. Before this, that reading was named a broken endpoint ("stream ended
+    /// without a finish_reason or an end-of-stream sentinel"), and the round wrote it into the
+    /// conversation as "the model call failed: …", which every later round sent to the model again.
+    #[test]
+    fn a_stream_that_ends_cleanly_because_it_was_stopped_is_a_stop_not_a_broken_endpoint() {
+        let transport = Arc::new(EndsCleanlyWhenStopped {
+            sent: Mutex::new(0),
+        });
+        let sleeper = Arc::new(RecordingSleeper::default());
+        let client = client_with(transport.clone(), sleeper.clone());
+
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&cancelled);
+        let stop: Arc<dyn Fn() -> bool + Send + Sync> =
+            Arc::new(move || flag.load(Ordering::SeqCst));
+        let presser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            cancelled.store(true, Ordering::SeqCst);
+        });
+
+        let error = client
+            .chat_stream_with_until(&request(), &mut |_| {}, stop)
+            .expect_err("a stopped call is not an answer");
+        presser.join().unwrap();
+
+        assert!(error.is_stopped(), "{error:?}");
+        assert_eq!(error.kind, crate::FailureKind::Stopped);
+        assert_eq!(
+            *transport.sent.lock().unwrap(),
+            1,
+            "the stopped call was re-sent"
+        );
+        assert!(
+            sleeper.waited.lock().unwrap().is_empty(),
+            "a stop must not be answered with the retry budget"
+        );
+    }
+
+    /// The other half of that rule, so the fix cannot be widened into it: a stream that really did
+    /// end early, with nobody having asked to stop, is still a broken endpoint and still named so.
+    #[test]
+    fn an_end_of_stream_nobody_stopped_is_still_a_broken_endpoint() {
+        let transport = StreamTransport::new(vec![Ok(vec![
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"half a th\"}}]}\n\n".into(),
+        ])]);
+        let client = client_with(transport.clone(), Arc::new(RecordingSleeper::default()));
+
+        let error = client
+            .chat_stream_with_until(&request(), &mut |_| {}, Arc::new(|| false))
+            .expect_err("a truncated answer is not a turn");
+        assert!(!error.is_stopped(), "{error:?}");
+        assert!(
+            error.body.contains("without a finish_reason"),
+            "a broken endpoint has to stay named as one: {error:?}"
         );
     }
 }
