@@ -210,6 +210,28 @@
   var STOP_LABEL = "Stop";
   var STOPPING_LABEL = "Stopping\u2026";
 
+  // Whether the turn this page is waiting on has been registered by the server.
+  //
+  // Set when the head of the answer arrives, and that is an exact reading rather than a guess: the
+  // route begins the turn and only then writes the head (`crates/deepnest/src/router.rs::chat`),
+  // so a stop posted after this flag is set has a turn to reach. Cleared with the turn.
+  var turnIsRegistered = false;
+
+  // A press of Stop that arrived before the server had a turn to stop.
+  //
+  // The route answers `stopping: 0` and that is the truth: nothing was running yet. The turn the
+  // person meant is the one this page is waiting for, so the press is not dropped -- it is made
+  // again at the one moment `turnIsRegistered` says that turn exists. A press armed this way leaves
+  // with the turn (`stopWatching`), or the press would stop the *next* message before it started.
+  var stopWhenItStarts = false;
+
+  // Whether the press has already been asked once the turn was known to exist.
+  //
+  // The head of the answer and the answer to the stop are two round trips, and they can finish in
+  // either order. So a zero either arms the press (the head has not arrived) or is the second ask
+  // (it had) -- and this is what tells the two apart, so the page asks exactly twice at most.
+  var askedSinceRegistered = false;
+
   // The line under the box, and the only surface a turn that is running writes to.
   //
   // It is a reading of the machine — which round, how many calls, how long — and never the agent's
@@ -2848,6 +2870,11 @@
     // this function, and a flag left standing would silence the next turn's progress line.
     stopping = false;
     stop.textContent = STOP_LABEL;
+    // And the same clearing for the two things this page knew about the turn: every exit from a
+    // turn goes through here, so this is also where a press that never found its turn is dropped.
+    turnIsRegistered = false;
+    stopWhenItStarts = false;
+    askedSinceRegistered = false;
     // And the line goes with it: a reading of a turn that ended is a claim about a turn that is
     // not running. What the turn did is in the transcript, which is the record and outlives it.
     clearStatus();
@@ -2934,6 +2961,11 @@
     stop.disabled = false;
     stop.textContent = STOP_LABEL;
     stopping = false;
+    // What the last turn left behind is not carried into this one: this send registers a turn of
+    // its own, and a press armed against the previous one would stop it before it started.
+    turnIsRegistered = false;
+    stopWhenItStarts = false;
+    askedSinceRegistered = false;
     // Read once immediately rather than a second from now: the first thing the person sees after
     // pressing send must not be the word the last 112 seconds were spent on.
     readHistory();
@@ -3452,6 +3484,21 @@
 
     ask(text, picturesReferredTo(text), filesReferredTo(text))
       .then(function (response) {
+        // A stop pressed before the server registered this turn is asked again here, and here is
+        // the one exact moment to ask it: the route begins the turn and only then writes the head
+        // of its answer, so a head that has arrived is a turn that can be stopped. Nothing is
+        // guessed about how long the request took to arrive, and a refusal -- which has no turn
+        // behind it -- leaves the press unarmed rather than asking about a turn that never was.
+        if (response.ok) {
+          turnIsRegistered = true;
+          if (stopWhenItStarts) {
+            stopWhenItStarts = false;
+            // This is the ask the registration allows, so the answer below reads it as the second
+            // one rather than arming a press that has already been made.
+            askedSinceRegistered = true;
+            askToStop();
+          }
+        }
         if (wantsEvents(response)) {
           // Both readings end in the same place: the last event of a stream carries the reply the
           // JSON path would have handed over whole, so everything below this line is unchanged
@@ -3565,6 +3612,23 @@
     // turned every press of this control into a `400` and the flag was never set. Measured on the
     // running page: a turn went on spending after the press, and the only thing that changed was
     // the wording above it.
+    askToStop();
+  });
+
+  // The route, asked once for the press -- and once more when the first ask found no turn to stop.
+  //
+  // The press itself is said above, before anything leaves this page: that is the half a press
+  // cannot wait for. What this function owns is the answer, and there are three of them, each a
+  // different fact about the turn the person ended:
+  //
+  // - a count above zero: the turn was asked, and the control stays as it is -- disabled and
+  //   reading `Stopping...` -- because the ending belongs to the turn's own request;
+  // - a count of zero while this page is still waiting for its turn: the press arrived first. The
+  //   page holds the request, so it asks again at the moment the answer's head proves the turn
+  //   exists, rather than on a timer that would have to guess how long a request takes;
+  // - a count of zero after that: a turn that had already ended. Said, with the control back in
+  //   the person's reach, instead of `Stopping...` left standing over work nobody is doing.
+  function askToStop() {
     fetch(stoppingRoute(), {
       method: "POST",
       credentials: "same-origin"
@@ -3581,11 +3645,40 @@
       })
       .then(function (result) {
         if (result.status === 200 && result.body && typeof result.body.note === "string") {
-          // The turn may have a moment left — a command being killed, the flag reaching the loop — so
-          // this says what was asked rather than what has happened. The control stays as it is,
-          // disabled and reading "Stopping…": the ending is the turn's own request finishing, and
-          // the only thing a second press could do is ask again.
-          showStopping("Stopping \u2014 " + result.body.note);
+          var asked = typeof result.body.stopping === "number" ? result.body.stopping : 0;
+          if (asked > 0) {
+            // The turn may have a moment left -- a command being killed, the flag reaching the loop
+            // -- so this says what was asked rather than what has happened.
+            showStopping("Stopping \u2014 " + result.body.note);
+            return;
+          }
+          if (!turnIsRegistered) {
+            // Nothing was running because the turn had not been registered yet, which is the one
+            // window a page can still close: the request that turn belongs to is in this page's
+            // hands, and its head is when the turn exists.
+            stopWhenItStarts = true;
+            showStopping(
+              "Stopping \u2014 the turn has not started yet; this page asks again the moment it " +
+                "does."
+            );
+            return;
+          }
+          if (!askedSinceRegistered) {
+            // The other order of the same race: this zero arrived after the head did, so the turn
+            // exists now and this press has not yet been asked of it. Asking here is not a retry
+            // of a failed request -- it is the same press arriving at a turn that is there.
+            askedSinceRegistered = true;
+            askToStop();
+            return;
+          }
+          // And once it has been asked of a turn that exists, a zero is a turn that ended between
+          // the press and the answer. Said, and the control handed back, because a second press
+          // could at least be a press the person sees land.
+          stopping = false;
+          stopWhenItStarts = false;
+          stop.disabled = false;
+          stop.textContent = STOP_LABEL;
+          showStopping("That turn had already ended \u2014 there was nothing left to stop.");
           return;
         }
         // A stop that did not arrive is not a stop: the turn is still spending, so the control
@@ -3605,7 +3698,7 @@
         stop.textContent = STOP_LABEL;
         say("The stop did not reach deepnest. Is it still running?", true);
       });
-  });
+  }
 
   allow.addEventListener("click", function () {
     answerTheQuestion(true);
