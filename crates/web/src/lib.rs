@@ -3197,6 +3197,73 @@ mod tests {
     }
 
     #[test]
+    fn a_stop_pressed_before_the_turn_was_registered_reaches_it_when_it_is() {
+        // Measured against the real binary and a stub model on 2026-11-20: a message and a stop
+        // posted back to back answer `{"stopping":0,"note":"no turn is running for `cold`"}` --
+        // the turn had not been registered yet -- and the model call then ran to its end, 25.51 s
+        // of spending after the press. The page read any 200 as a stop (it looked for `note` and
+        // nothing else), so it left the control disabled and reading `Stopping…` for a turn that
+        // was still on its way, and the press was gone.
+        //
+        // What the page has that the route does not is the request itself: the route begins the
+        // turn and only then writes the head of its answer (`crates/deepnest/src/router.rs::chat`),
+        // so an answer's head arriving is the exact moment that turn can be stopped. The count is
+        // read, an early zero arms a second ask, and the send handler makes it — no timer, and
+        // nothing guessed about how long a request takes to arrive.
+        let answer = &DIALOG_SCRIPT[DIALOG_SCRIPT
+            .find("fetch(stoppingRoute(),")
+            .expect("the stop is posted somewhere")..];
+        let answer = &answer[..answer
+            .find("allow.addEventListener")
+            .expect("the stop handler ends")];
+        assert!(
+            answer.contains("result.body.stopping"),
+            "the route's count is not read, so a stop that stopped nothing reads as a stop: {answer}"
+        );
+        let early = &answer[..answer
+            .find("had already ended")
+            .expect("a press that found nothing is answered")];
+        assert!(
+            early.contains("stopWhenItStarts = true"),
+            "a press that arrives before the turn is registered is dropped: {early}"
+        );
+        // And the same zero can arrive in the other order — the answer's head first — which is the
+        // order the first run of this page took: two round trips, and the page cannot choose which
+        // finishes first.
+        assert!(
+            early.contains("askedSinceRegistered"),
+            "a zero that arrives after the head is taken for a finished turn, so which reply lands \
+             first decides whether the press does: {early}"
+        );
+        // And it is made again where the turn is known to exist, because that is where the page
+        // knows it too: the head it is holding came after the registration.
+        let sent = &DIALOG_SCRIPT[DIALOG_SCRIPT
+            .find("ask(text, picturesReferredTo(text), filesReferredTo(text))")
+            .expect("the message is sent somewhere")..];
+        let sent = &sent[..sent
+            .find("readEvents(response")
+            .expect("the answer is read")];
+        assert!(
+            sent.contains("turnIsRegistered = true"),
+            "the page never records that its turn exists once the head arrives: {sent}"
+        );
+        assert!(
+            sent.contains("askToStop()"),
+            "the press is never made again, so the turn it meant runs to its end: {sent}"
+        );
+        // The arming leaves with the turn. A flag that outlived it would stop the next message
+        // before it started, which is a worse defect than the one this fixes.
+        let watching = &DIALOG_SCRIPT[DIALOG_SCRIPT
+            .find("function stopWatching()")
+            .expect("the turn is watched somewhere")..];
+        let watching = &watching[..watching.find("\n  }").expect("the function ends")];
+        assert!(
+            watching.contains("stopWhenItStarts = false"),
+            "an armed press outlives its turn and stops the next message: {watching}"
+        );
+    }
+
+    #[test]
     fn the_dialog_says_what_a_running_turn_is_doing_and_stops_when_it_ends() {
         // The measured defect: one turn ran 112 seconds and 24 rounds and the page said a single
         // word for all of it, so a turn that had rewritten the app read as a turn that never ran.

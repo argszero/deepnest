@@ -889,7 +889,12 @@ one a fact the person needs while a turn is running or after it ended:
   anything else until work they had just ended finished on its own. The reach is a watcher thread
   holding a clone of the socket (`crates/gateway/src/transport.rs::interruptible`) polling the flag
   every 50 ms; a blocked read cannot check anything itself, which is why the reader is not the
-  thread that notices.
+  thread that notices. **A press that lands before the turn exists reaches it anyway**
+  (`measured defect, 2026-11-20`): `/cancel` answers `stopping: 0`, which is the truth — nothing was
+  running yet — and the page, holding the request it just sent, asks again the moment that answer's
+  head arrives, because the route begins the turn and only then writes a byte. Measured against the
+  binary with a stub model: a press that found the registry empty was followed by 25.51 s of
+  spending, and the same press 40 ms later ended the turn in 0.04 s.
 - **`Conversations`** opens the app's conversations above the transcript rather than replacing it,
   so a person can see what they are leaving before they leave it; the row they are on is marked. The
   transcript is read back from `GET /history` rather than remembered in the page, so a reload shows
