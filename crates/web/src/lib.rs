@@ -3833,6 +3833,56 @@ mod tests {
     }
 
     #[test]
+    fn a_window_inside_the_frame_takes_the_corner_the_stage_does_not() {
+        // An app whose own markup asked for a window gets a second dialog, drawn inside the frame
+        // while the stage's own dialog stands over it. A nested document cannot paint over the
+        // stage's root — that root carries the largest `z-index` a page can name — so at the same
+        // offsets the framed window was invisible and a click there was the stage's. Measured in
+        // Chrome before this rule: one press at the shared pixel opened the stage's panel, titled
+        // with the slug, while the app's own stayed shut (#140).
+        //
+        // The marker comes from the one fact the dialog has without asking the page it is in: a
+        // document that is not its own top is inside a frame.
+        assert!(
+            DIALOG_SCRIPT.contains("if (window.top !== window) {"),
+            "the framed window does not know it is in a frame"
+        );
+        assert!(
+            DIALOG_SCRIPT.contains(r#"root.setAttribute("data-deepnest-in-frame", "")"#),
+            "the framed window carries no marker for the stylesheet"
+        );
+        // The corner, and then the panel: a panel left anchored to `right: 0` under a root that
+        // moved to the left would open across the ball it had just been moved away from.
+        let framed = &DIALOG_STYLE[DIALOG_STYLE
+            .find("#deepnest-dialog[data-deepnest-in-frame] {")
+            .expect("a window inside the frame has no corner of its own")..];
+        let framed = &framed[..framed.find('}').expect("the rule closes")];
+        assert!(framed.contains("right: auto"), "{framed}");
+        assert!(framed.contains("left: 1rem"), "{framed}");
+
+        let panel = &DIALOG_STYLE[DIALOG_STYLE
+            .find("#deepnest-dialog[data-deepnest-in-frame] #deepnest-dialog-panel {")
+            .expect("the framed window's panel opens the way its ball did not go")..];
+        let panel = &panel[..panel.find('}').expect("the rule closes")];
+        assert!(panel.contains("right: auto"), "{panel}");
+        assert!(panel.contains("left: 0"), "{panel}");
+
+        // And the corner the stage's own window has always had, unchanged: what moves is the window
+        // that had never been reachable, not the one people have been using.
+        assert!(
+            DIALOG_STYLE.contains(
+                "#deepnest-dialog {\n  position: fixed;\n  right: 1rem;\n  bottom: 1rem;"
+            ),
+            "the stage's own window no longer stands in its corner"
+        );
+        // Two balls on one page, so each one has to say which window it opens.
+        assert!(
+            DIALOG_SCRIPT.contains(r#"var ballName = (wanted && wanted.label) || "deepnest";"#),
+            "both balls announce themselves as deepnest"
+        );
+    }
+
+    #[test]
     fn the_panel_hands_its_own_type_to_every_node_the_reset_touches() {
         // `#deepnest-dialog *` starts with `all: initial`, which is what stops an app's stylesheet
         // from reaching in. It also put every descendant that relied on inheriting its type back to

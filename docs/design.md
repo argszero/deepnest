@@ -400,7 +400,7 @@ conversation on reload, and has no Stop. So deepnest ships the window: `/agent-c
 by one line of the app's own markup — and that line loads `/dialog.js`, the same dialog that stands
 beside the app's page.
 
-Six decisions came with it:
+Seven decisions came with it:
 
 - **One window, two channels.** `crates/web/src/agent-chat.js` is an initializer: it names the app's
   agent in `window.deepnestDialogTarget` and loads `crates/web/src/dialog.js`, which is the only
@@ -444,6 +444,14 @@ Six decisions came with it:
   in order to look at what it already said. The same path in the other verb answers a turn, so a
   `GET` is never one; `agent-result` under `GET` is a `405` naming the method, for the callers that
   can open it at all — the token or the app's ticket, since the page's cookie opens `agent` alone.
+- **One page holds two windows, so they take opposite corners.** On the stage, deepnest's own dialog
+  stands at the bottom right, and an app that declared an agent gets a second window inside the
+  frame. A nested document cannot paint over the stage's root, which carries the largest `z-index` a
+  page can name, so at the same offsets the app's window was drawn nowhere at all and the click
+  there opened the control conversation (`#140`). The framed window now takes the bottom left and
+  its panel opens the same way, which is what keeps either panel from covering the other's ball, and
+  each ball names the window it opens: `deepnest` for the control conversation, the app's
+  `data-label` for the agent's.
 
 One thing moves in the gateway for it: `connect-src` joins the directives the injected page's
 policy is widened with, beside `script-src` and `style-src`. The window is part of the app's page

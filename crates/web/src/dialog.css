@@ -188,6 +188,30 @@
   direction: ltr;
 }
 
+/* Two windows, two corners.
+ *
+ * Both documents load this stylesheet, so an app whose own markup asked for a window gets a second
+ * dialog drawn inside the frame while the stage's own dialog stands over it. The frame is a whole
+ * document under the stage's root, and the stage's root carries the largest `z-index` a page can
+ * name — so the two cannot be stacked. At the same offsets the framed window is not behind the
+ * stage's ball, it is nowhere to be seen, and a click at those pixels is the stage's.
+ *
+ * So they take opposite corners, and a panel takes the direction its own ball is on. The panel is
+ * why the pair matters: 22rem of it opens over the page, so a ball moved away from the other corner
+ * whose panel still opened across it would hide the ball it had just left alone.
+ *
+ * `window.top !== window` is the whole reading, and `dialog.js` writes it on the root: a page that is
+ * its own top has the corner to itself. */
+#deepnest-dialog[data-deepnest-in-frame] {
+  right: auto;
+  left: 1rem;
+}
+
+#deepnest-dialog[data-deepnest-in-frame] #deepnest-dialog-panel {
+  right: auto;
+  left: 0;
+}
+
 #deepnest-dialog-ball {
   display: grid;
   box-sizing: border-box;
