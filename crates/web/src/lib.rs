@@ -3869,12 +3869,30 @@ mod tests {
 
         // And the corner the stage's own window has always had, unchanged: what moves is the window
         // that had never been reachable, not the one people have been using.
-        assert!(
-            DIALOG_STYLE.contains(
-                "#deepnest-dialog {\n  position: fixed;\n  right: 1rem;\n  bottom: 1rem;"
-            ),
-            "the stage's own window no longer stands in its corner"
-        );
+        //
+        // Read off the rule that positions the root rather than matched as one literal spanning
+        // lines: a Windows checkout gives this file CRLF, so `include_str!` hands over `\r\n` and a
+        // literal with `\n` in it matches only where the checkout uses LF. Measured on the Windows
+        // runner, where exactly that assertion failed on this change (#141) while the same test was
+        // green here. `lines()` and single-line fragments read the same on both.
+        let mut root_rule = None;
+        let mut rest = DIALOG_STYLE;
+        while let Some(at) = rest.find("#deepnest-dialog {") {
+            let body = &rest[at..];
+            let body = &body[..body.find('}').expect("the rule closes")];
+            if body.contains("position: fixed") {
+                root_rule = Some(body);
+                break;
+            }
+            rest = &rest[at + "#deepnest-dialog {".len()..];
+        }
+        let corner = root_rule.expect("the stage's own window has no corner");
+        for needed in ["right: 1rem", "bottom: 1rem"] {
+            assert!(
+                corner.contains(needed),
+                "the stage's own window no longer stands in its corner: {corner}"
+            );
+        }
         // Two balls on one page, so each one has to say which window it opens.
         assert!(
             DIALOG_SCRIPT.contains(r#"var ballName = (wanted && wanted.label) || "deepnest";"#),
