@@ -97,10 +97,27 @@
   var root = document.createElement("div");
   root.id = "deepnest-dialog";
 
+  // A window inside a frame is not alone on the page it is on: the stage's own dialog stands in the
+  // bottom-right corner, and a nested document cannot be painted over it — the stage's root carries
+  // the largest `z-index` a page can name, and the frame is drawn under it whole. So this one says
+  // it is in a frame, and the stylesheet gives it the other corner.
+  //
+  // `window.top` is the whole reading, and nothing is asked of the page it is in: a document that is
+  // its own top has the corner to itself, which is an app's page opened on its own and every page
+  // deepnest serves directly.
+  if (window.top !== window) {
+    root.setAttribute("data-deepnest-in-frame", "");
+  }
+
   var ball = document.createElement("button");
   ball.type = "button";
   ball.id = "deepnest-dialog-ball";
-  ball.setAttribute("aria-label", "deepnest");
+  // Two balls can be reached on one page, and `deepnest` no longer picks out one of them: the
+  // control conversation is deepnest's own window, and the one in the frame is the app's, named by
+  // the markup that asked for it. The name goes where it has to be to tell them apart — this label,
+  // and the panel's title — and the tooltip stays what it was, because it is there for the shortcut.
+  var ballName = (wanted && wanted.label) || "deepnest";
+  ball.setAttribute("aria-label", ballName);
   ball.setAttribute("aria-expanded", "false");
   ball.textContent = "d";
 
