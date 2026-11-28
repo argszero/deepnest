@@ -15,7 +15,7 @@
 //! the icon out too long — a name written without being needed is a name every later reader has to
 //! keep in step for no reason.
 //!
-//! Four decisions:
+//! Five decisions:
 //!
 //! - **The keys are the machine's, and the name inside them is escaped.** The plist is written as
 //!   text rather than through a plist library, because what this project needs from XML is one
@@ -35,6 +35,16 @@
 //!   nothing, with no message, because the system's own refusal to `exec` a non-executable file
 //!   never reaches a person. [`fs::copy`] happens to carry the source's mode on unix, and this does
 //!   not rely on it: the mode is set to `0755` whatever arrived.
+//! - **The bundle is checked as it is written, and the check reads the file.** [`write`] reads the
+//!   `Info.plist` back off the disk it just wrote, takes the name `CFBundleIconFile` gives and looks
+//!   that up, refusing to finish when the key is absent, names nothing, or names something that is
+//!   not an `.icns` — and takes the directory away with the refusal rather than leaving a bundle
+//!   whose own plist promises a picture it lacks. It reads the written file rather than the
+//!   constants that wrote it, because a key and a picture that come from one constant agree with
+//!   each other even when that constant is wrong about where the picture went. `v0.1.2` is what a
+//!   half-checked bundle ships as, so the answer belongs where the writer runs. What this still
+//!   cannot see is a bundle altered after it was written — that is a pipeline's check, and the
+//!   artifact check belongs beside the step that mounts it.
 //!
 //! What this module deliberately does **not** do: sign anything, notarize anything, or build a disk
 //! image. A signature covers files that exist, so it comes after this; a `.dmg` is the product of
@@ -120,7 +130,9 @@ pub struct Bundle {
     pub executable: PathBuf,
     /// `Contents/Info.plist`.
     pub plist: PathBuf,
-    /// `Contents/Resources/AppIcon.icns`.
+    /// `Contents/Resources/AppIcon.icns` — the file `CFBundleIconFile` names, taken from the plist
+    /// as it was written rather than from this crate's intention, so a caller that signs this path
+    /// signs the picture the system will actually go looking for.
     pub icon: PathBuf,
 }
 
@@ -146,6 +158,25 @@ pub enum WriteError {
     Occupied {
         /// The path that is in the way.
         app: PathBuf,
+    },
+    /// The `Info.plist` that was just written names no icon at all.
+    NoIconKey {
+        /// The plist that was read back, inside the bundle being written.
+        plist: PathBuf,
+    },
+    /// `CFBundleIconFile` names a file the bundle does not hold.
+    MissingIcon {
+        /// The name the plist gives.
+        named: String,
+        /// Where the bundle looked for it.
+        icon: PathBuf,
+    },
+    /// `CFBundleIconFile` names a file that is not an `.icns`.
+    NotAnIcon {
+        /// The name the plist gives.
+        named: String,
+        /// The file that name points at.
+        icon: PathBuf,
     },
     /// A directory or file could not be created or written.
     Write {
@@ -175,6 +206,24 @@ impl std::fmt::Display for WriteError {
             Self::Write { entry, source } => {
                 write!(out, "cannot write {}: {source}", entry.display())
             }
+            Self::NoIconKey { plist } => write!(
+                out,
+                "{} carries no CFBundleIconFile: the system would draw the generic application \
+                 icon and say nothing about it",
+                plist.display()
+            ),
+            Self::MissingIcon { named, icon } => write!(
+                out,
+                "the plist names {named}, which is not at {}: a key with no picture is the generic \
+                 application icon",
+                icon.display()
+            ),
+            Self::NotAnIcon { named, icon } => write!(
+                out,
+                "{} is named {named} but does not start with \"icns\", so the Finder will not read \
+                 it as one",
+                icon.display()
+            ),
         }
     }
 }
@@ -183,7 +232,11 @@ impl std::error::Error for WriteError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Source { source, .. } | Self::Write { source, .. } => Some(source),
-            Self::Version { .. } | Self::Occupied { .. } => None,
+            Self::Version { .. }
+            | Self::Occupied { .. }
+            | Self::NoIconKey { .. }
+            | Self::MissingIcon { .. }
+            | Self::NotAnIcon { .. } => None,
         }
     }
 }
@@ -235,14 +288,21 @@ pub fn write(into: &Path, binary: &Path, version: &str) -> Result<Bundle, WriteE
     })?;
 
     let resources = contents.join("Resources");
-    let icon = resources.join(ICON_FILE);
+    let written = resources.join(ICON_FILE);
     fs::create_dir_all(&resources).map_err(|source| WriteError::Write {
         entry: resources.clone(),
         source,
     })?;
-    fs::write(&icon, ICON_BYTES).map_err(|source| WriteError::Write {
-        entry: icon.clone(),
+    fs::write(&written, ICON_BYTES).map_err(|source| WriteError::Write {
+        entry: written.clone(),
         source,
+    })?;
+
+    // Read back what landed instead of trusting the paths that produced it, and take the directory
+    // away when it disagrees: a bundle whose own plist promises a picture it does not hold is the
+    // artifact `v0.1.2` shipped, and leaving it in the release directory is how it ships twice.
+    let icon = the_icon_the_plist_names(&app, &plist).inspect_err(|_| {
+        let _ = fs::remove_dir_all(&app);
     })?;
 
     Ok(Bundle {
@@ -305,6 +365,45 @@ fn escaped(text: &str) -> String {
         }
     }
     out
+}
+
+/// The `<string>` that `<key>key</key>` names in the `Info.plist` text, if the key is there.
+///
+/// The plist is one `<dict>` of `<key>`/`<string>` pairs written by [`info_plist`], so this reads
+/// exactly that shape. A key that is absent and a value of some other type are both `None`, which
+/// the caller treats as nothing named at all.
+fn value_in(plist: &str, key: &str) -> Option<String> {
+    let marker = format!("<key>{key}</key>\n\t<string>");
+    plist
+        .split(marker.as_str())
+        .nth(1)?
+        .split("</string>")
+        .next()
+        .map(str::to_string)
+}
+
+/// Where the bundle's own `Info.plist` says its icon is, once that file is really there.
+///
+/// The plist on disk rather than the constants that wrote it: what the Finder reads is the file,
+/// and a key and a picture produced from one constant agree with each other even when that constant
+/// names a place the picture never reached.
+fn the_icon_the_plist_names(app: &Path, plist: &Path) -> Result<PathBuf, WriteError> {
+    let text = fs::read_to_string(plist).map_err(|source| WriteError::Write {
+        entry: plist.to_path_buf(),
+        source,
+    })?;
+    let named = value_in(&text, "CFBundleIconFile").ok_or_else(|| WriteError::NoIconKey {
+        plist: plist.to_path_buf(),
+    })?;
+    let icon = app.join("Contents").join("Resources").join(&named);
+    let bytes = fs::read(&icon).map_err(|_| WriteError::MissingIcon {
+        named: named.clone(),
+        icon: icon.clone(),
+    })?;
+    if !bytes.starts_with(b"icns") {
+        return Err(WriteError::NotAnIcon { named, icon });
+    }
+    Ok(icon)
 }
 
 /// Whether `version` is what `CFBundleVersion` accepts: one or more dot-separated numbers.
@@ -445,12 +544,9 @@ mod tests {
         // naming a file that is not in the bundle is the whole defect — the system finds no picture,
         // draws the generic icon, and reports nothing.
         let plist = fs::read_to_string(&bundle.plist).unwrap();
-        let named = plist
-            .split("<key>CFBundleIconFile</key>\n\t<string>")
-            .nth(1)
-            .and_then(|rest| rest.split("</string>").next())
+        let named = value_in(&plist, "CFBundleIconFile")
             .unwrap_or_else(|| panic!("no CFBundleIconFile in the plist:\n{plist}"));
-        let named_path = bundle.app.join("Contents").join("Resources").join(named);
+        let named_path = bundle.app.join("Contents").join("Resources").join(&named);
         assert!(
             named_path.is_file(),
             "the plist names {named}, which is not in the bundle"
@@ -461,6 +557,47 @@ mod tests {
         let bytes = fs::read(&named_path).unwrap();
         assert_eq!(bytes, ICON_BYTES);
         assert_eq!(&bytes[..4], b"icns", "not an .icns at all");
+    }
+
+    #[test]
+    fn a_plist_that_names_no_icon_is_refused() {
+        let scratch = Scratch::new("no-icon-key");
+        let bundle = write(&scratch.base.join("dist"), &scratch.binary(), "0.1.0").unwrap();
+
+        // The other face of the same defect: the picture is in the bundle and nothing points at it,
+        // which the Finder answers exactly as it answers a key with no picture.
+        let without = info_plist("0.1.0").replace(
+            &format!("\t<key>CFBundleIconFile</key>\n\t<string>{ICON_FILE}</string>\n"),
+            "",
+        );
+        assert!(!without.contains("CFBundleIconFile"), "{without}");
+        fs::write(&bundle.plist, without).unwrap();
+
+        let refused = the_icon_the_plist_names(&bundle.app, &bundle.plist).unwrap_err();
+        assert!(matches!(refused, WriteError::NoIconKey { .. }), "{refused}");
+    }
+
+    #[test]
+    fn an_icon_the_plist_names_and_the_bundle_lacks_is_refused() {
+        let scratch = Scratch::new("icon-removed");
+        let bundle = write(&scratch.base.join("dist"), &scratch.binary(), "0.1.0").unwrap();
+        fs::remove_file(&bundle.icon).unwrap();
+
+        let refused = the_icon_the_plist_names(&bundle.app, &bundle.plist).unwrap_err();
+        match refused {
+            WriteError::MissingIcon { named, .. } => assert_eq!(named, ICON_FILE),
+            other => panic!("expected a missing icon, got {other}"),
+        }
+    }
+
+    #[test]
+    fn a_file_that_is_not_an_icns_is_refused() {
+        let scratch = Scratch::new("not-an-icns");
+        let bundle = write(&scratch.base.join("dist"), &scratch.binary(), "0.1.0").unwrap();
+        fs::write(&bundle.icon, b"a PNG somebody renamed").unwrap();
+
+        let refused = the_icon_the_plist_names(&bundle.app, &bundle.plist).unwrap_err();
+        assert!(matches!(refused, WriteError::NotAnIcon { .. }), "{refused}");
     }
 
     #[test]
