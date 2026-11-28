@@ -9,12 +9,12 @@
 //! **The request is a seam, and this crate has no transport.** [`Releases`] is the seam, and what it
 //! returns is the answer's *body* — not a parsed release, not a version. That is the same shape
 //! [`crate::installer::Publisher`] has, and for the same reason: every way a body can be wrong is
-//! decided here, in code a test can drive with a string, and whatever eventually speaks HTTP stays
-//! dumb enough to be replaceable. What is missing is only the socket: GitHub answers over TLS, and
-//! while `crates/gateway::transport` speaks it, this crate has no dependency on it and nothing here
-//! is wired to that adapter.
-//! [crate::release::release_url] therefore states the URL as part of the contract, tested, while the
-//! call that would fetch it waits.
+//! decided here, in code a test can drive with a string, and whatever answers HTTP stays dumb enough
+//! to be replaceable. That answer comes from the binary, not from here: `crates/deepnest`'s
+//! `updates::Github` implements [`Releases`] over `crates/gateway::transport`, in the one crate
+//! depending on both sides — and this crate gains no dependency on that adapter, because the seam
+//! is what keeps every refusal decidable with a string. [`release_url`] consequently states the URL
+//! as part of the contract, tested, and `updates::Github::new` is the real answer built on it.
 //!
 //! # Four answers, four next steps
 //!

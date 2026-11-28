@@ -5,10 +5,10 @@
 //! the files and [`frontmatter`] reads their headers, [`catalog`] holds the list of optional skills
 //! that ship inside the binary, [`installer`] puts one of them in place, [`state`] records which
 //! installed skills deepnest may refresh, and [`release`] compares an installed version against the
-//! version the package last published. The check's request is a seam and the socket behind it is
-//! still missing — `crates/gateway::transport` speaks `https` now, but nothing here is wired to it
-//! — so what lands today is the decision and every way of reading an answer; [`release`] says
-//! exactly where that line is.
+//! version the package last published. The check's request is a seam and this crate has no
+//! transport: the socket is in the binary, `crates/deepnest`'s `updates::Github` over
+//! `crates/gateway::transport` — the one crate depending on both sides. So this crate asks and the
+//! binary answers; [`release`] says exactly where that line is.
 //!
 //! The rule the whole crate is shaped by is **progressive disclosure**: only a skill's name, its
 //! one-line description and the path to its file reach the prompt. The instructions are read by the
