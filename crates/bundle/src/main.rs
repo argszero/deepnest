@@ -6,7 +6,8 @@
 //! waiting for a release — and it is why this program takes a path to the binary instead of building
 //! one.
 //!
-//! What it prints is the two paths somebody signs: the executable inside the bundle, and the plist.
+//! What it prints is the paths worth naming: the executable and the plist somebody signs, and the
+//! icon under `Resources`, which is the one file in the bundle this run supplies rather than receives.
 //! A pipeline that had to reconstruct those paths from a directory listing would be a pipeline that
 //! breaks the first time a name changes, so the layout that decides them is also the thing that says
 //! where they landed.
@@ -91,6 +92,7 @@ fn run() -> Result<(), String> {
             println!("wrote {}", bundle.app.display());
             println!("  executable {}", bundle.executable.display());
             println!("  plist      {}", bundle.plist.display());
+            println!("  icon       {}", bundle.icon.display());
             Ok(())
         }
     }

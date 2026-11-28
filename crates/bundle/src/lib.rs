@@ -2,10 +2,17 @@
 //! one.
 //!
 //! A `.app` is not a format. It is a directory the Finder agreed to show as a single program, and of
-//! the names inside it only two are load-bearing: `Contents/Info.plist`, which the system reads to
-//! learn what to launch, and `Contents/MacOS/<CFBundleExecutable>`, the file it launches. Everything
-//! else — icons, localizations, embedded frameworks — is optional. This module writes those two and
-//! nothing else, because a name written without being needed is a name every later reader has to
+//! the names inside it three are load-bearing: `Contents/Info.plist`, which the system reads to learn
+//! what to launch, `Contents/MacOS/<CFBundleExecutable>`, the file it launches, and
+//! `Contents/Resources/<CFBundleIconFile>`, the picture the Finder and the Dock draw for it.
+//!
+//! The icon was left out of this writer at first, on the reasoning that the system opens a bundle
+//! without one. It does — onto the generic application icon, which is what makes an installed program
+//! look like a document somebody left on the desktop. That was a report against the first macOS
+//! release, so the icon is written here, and `CFBundleIconFile` names it in the same `Info.plist` that
+//! names the executable: a picture sitting in the bundle with no key pointing at it draws the generic
+//! icon just the same. Localizations and embedded frameworks are still out, for the reason that kept
+//! the icon out too long — a name written without being needed is a name every later reader has to
 //! keep in step for no reason.
 //!
 //! Four decisions:
@@ -66,6 +73,22 @@ pub const BUNDLE: &str = "Deepnest.app";
 /// either.
 pub const EXECUTABLE: &str = "deepnest";
 
+/// The icon inside the bundle, and the value of `CFBundleIconFile`.
+///
+/// One constant for both, on the same reasoning as [`EXECUTABLE`]: a key naming a file the bundle does
+/// not hold is a bundle that draws the generic icon and says nothing about why. The extension is
+/// spelled because the system accepts the name with or without it, and the spelling that matches the
+/// file on disk is the one that cannot be wrong.
+pub const ICON_FILE: &str = "AppIcon.icns";
+
+/// The icon's bytes, carried in this program rather than read from the source tree at run time.
+///
+/// Embedded because a `deepnest-bundle` run in a release pipeline has no source tree beside it when the
+/// question is what it put in the bundle: a path resolved at run time would leave the icon out exactly
+/// where it is the product. It is the same reason `deepnest` carries its toolchain payload inside
+/// itself instead of beside it.
+const ICON_BYTES: &[u8] = include_bytes!("../assets/AppIcon.icns");
+
 /// `CFBundleName` and `CFBundleDisplayName` — what the menu bar and the Finder call this.
 pub const NAME: &str = "Deepnest";
 
@@ -97,6 +120,8 @@ pub struct Bundle {
     pub executable: PathBuf,
     /// `Contents/Info.plist`.
     pub plist: PathBuf,
+    /// `Contents/Resources/AppIcon.icns`.
+    pub icon: PathBuf,
 }
 
 /// Why a bundle could not be laid out.
@@ -209,10 +234,22 @@ pub fn write(into: &Path, binary: &Path, version: &str) -> Result<Bundle, WriteE
         source,
     })?;
 
+    let resources = contents.join("Resources");
+    let icon = resources.join(ICON_FILE);
+    fs::create_dir_all(&resources).map_err(|source| WriteError::Write {
+        entry: resources.clone(),
+        source,
+    })?;
+    fs::write(&icon, ICON_BYTES).map_err(|source| WriteError::Write {
+        entry: icon.clone(),
+        source,
+    })?;
+
     Ok(Bundle {
         app,
         executable,
         plist,
+        icon,
     })
 }
 
@@ -231,6 +268,7 @@ pub fn info_plist(version: &str) -> String {
     for (key, value) in [
         ("CFBundleDevelopmentRegion", "en"),
         ("CFBundleExecutable", EXECUTABLE),
+        ("CFBundleIconFile", ICON_FILE),
         ("CFBundleIdentifier", IDENTIFIER),
         ("CFBundleInfoDictionaryVersion", "6.0"),
         ("CFBundleName", NAME),
@@ -335,7 +373,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bundle_is_the_two_files_the_system_looks_for() {
+    fn a_bundle_is_the_names_the_system_looks_for() {
         let scratch = Scratch::new("two-files");
         let bundle = write(&scratch.base.join("dist"), &scratch.binary(), "0.1.0").unwrap();
 
@@ -355,13 +393,14 @@ mod tests {
             fs::read(scratch.binary()).unwrap()
         );
 
-        // And nothing else: `Contents` holds one directory and one file.
+        // And nothing else: `Contents` holds the plist, the executable's directory and the resources
+        // directory. A name this writer did not have to add is a name it does not add.
         let mut names: Vec<String> = fs::read_dir(bundle.app.join("Contents"))
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         names.sort();
-        assert_eq!(names, ["Info.plist", "MacOS"]);
+        assert_eq!(names, ["Info.plist", "MacOS", "Resources"]);
     }
 
     #[test]
@@ -383,6 +422,45 @@ mod tests {
         assert!(!plist.contains("LSUIElement"));
         assert!(plist.starts_with("<?xml version=\"1.0\""));
         assert!(plist.trim_end().ends_with("</plist>"));
+    }
+
+    #[test]
+    fn the_bundle_holds_the_icon_the_plist_names() {
+        let scratch = Scratch::new("icon");
+        let bundle = write(&scratch.base.join("dist"), &scratch.binary(), "0.1.0").unwrap();
+
+        assert_eq!(
+            bundle.icon,
+            bundle
+                .app
+                .join("Contents")
+                .join("Resources")
+                .join(ICON_FILE)
+        );
+        assert!(bundle.icon.is_file());
+
+        // The name is read back out of the plist and then looked up, rather than both sides being
+        // asserted against the same constant: what has to agree is the key's value and the file on
+        // disk, and two assertions against one constant hold even when the two disagree. A key
+        // naming a file that is not in the bundle is the whole defect — the system finds no picture,
+        // draws the generic icon, and reports nothing.
+        let plist = fs::read_to_string(&bundle.plist).unwrap();
+        let named = plist
+            .split("<key>CFBundleIconFile</key>\n\t<string>")
+            .nth(1)
+            .and_then(|rest| rest.split("</string>").next())
+            .unwrap_or_else(|| panic!("no CFBundleIconFile in the plist:\n{plist}"));
+        let named_path = bundle.app.join("Contents").join("Resources").join(named);
+        assert!(
+            named_path.is_file(),
+            "the plist names {named}, which is not in the bundle"
+        );
+
+        // And it is an icon rather than a placeholder of the right size: `icns` is the first four
+        // bytes, and the Finder reads exactly that.
+        let bytes = fs::read(&named_path).unwrap();
+        assert_eq!(bytes, ICON_BYTES);
+        assert_eq!(&bytes[..4], b"icns", "not an .icns at all");
     }
 
     #[test]

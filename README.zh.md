@@ -4,7 +4,7 @@
 
 一个可执行文件，双击运行，打开浏览器里的一个页面。你说出想要的应用，agent 就在你自己的机器上把它写出来 —— React 前端、Rust 后端、SQLite 存储 —— 边写边刷新。
 
-> **状态：早期，但已经能跑。`v0.1.2` 已发布，覆盖 macOS arm64、Windows x64 与 Linux x64。** [这里下载](https://github.com/argszero/deepnest/releases/latest)，或从源码跑：`cargo run -p deepnest` 会在 `http://127.0.0.1:4270/` 上起服务，在桌面浏览器里打开这张页面，并把控制令牌写到 `~/.deepnest/deepnest.token`。`https` 的模型端点已经能用，证书按本机自己的证书库校验。**这份已发布的构建不是什么：** 它是 ad-hoc 签名而不是 Developer ID 签名，所以第一次打开那一份副本时 macOS 要你右键 → **打开**（[原因](#打开-macos-上的构建)）；Windows 的可执行文件完全没有签名，SmartScreen 会问一次；而且 agent 的 shell 工具在 Windows 上还跑不了（[原因](#下载)）。设计、沙箱、工具集、agent 循环、应用生成、控制面板与 skill 加载器都在仓库里，从源码在三个平台上今天都能跑。二进制里嵌着一份工具链载荷，第一次用到时解包；`crates/bundle` 铺出 `.app` 并逐个签里面每个 Mach-O，CI 再把它做成经 `hdiutil verify` 校验的 `.dmg`。
+> **状态：早期，但已经能跑。`v0.1.2` 已发布，覆盖 macOS arm64、Windows x64 与 Linux x64。** [这里下载](https://github.com/argszero/deepnest/releases/latest)，或从源码跑：`cargo run -p deepnest` 会在 `http://127.0.0.1:4270/` 上起服务，在桌面浏览器里打开这张页面，并把控制令牌写到 `~/.deepnest/deepnest.token`。`https` 的模型端点已经能用，证书按本机自己的证书库校验。**这份已发布的构建不是什么：** 它是 ad-hoc 签名而不是 Developer ID 签名，所以第一次打开那一份副本时 macOS 会拦下来，要你去 **系统设置 → 隐私与安全性** 里放行（[怎么做](#打开-macos-上的构建)）；Windows 的可执行文件完全没有签名，SmartScreen 会问一次；而且 agent 的 shell 工具在 Windows 上还跑不了（[原因](#下载)）。设计、沙箱、工具集、agent 循环、应用生成、控制面板与 skill 加载器都在仓库里，从源码在三个平台上今天都能跑。二进制里嵌着一份工具链载荷，第一次用到时解包；`crates/bundle` 铺出 `.app` 并逐个签里面每个 Mach-O，CI 再把它做成经 `hdiutil verify` 校验的 `.dmg`。
 
 ---
 
@@ -78,12 +78,13 @@ Linux 那份是 tar 包，里面只有一个文件 `deepnest`：解出来就能�
 
 从这里下载到的构建，在没有 Developer ID 的情况下是 **ad-hoc 签名**，而不是由 Apple 身份签名。所以 macOS 第一次双击会拒绝它，提示无法验证开发者。
 
-这是预期中的，也不是一句可以随手忽略的警告 —— 那正是签名能买到、而这个项目还没有的东西。要打开它：
+这是预期中的，也不是一句可以随手忽略的警告 —— 那正是签名能买到、而这个项目还没有的东西。要打开它，在现在的 macOS 上是这三步：
 
-1. 右键点击 `Deepnest.app`（或 `.dmg`），选 **打开**。
-2. 在弹出的对话框里再点一次 **打开**。
+1. 双击 `Deepnest.app`，出现拒绝提示，点 **完成** 把它关掉。
+2. 打开 **系统设置 → 隐私与安全性**，向下滚到 **安全性** 一节。
+3. 找到写着 `Deepnest.app` 被拦下的那一行，点旁边的 **仍要打开**，再用密码或触控 ID 确认。
 
-macOS 会记住这一份副本的这个决定。已经用 Developer ID 签名并公证过的构建不需要这些步骤，双击即可；发行说明会写明某次下载属于哪一种。
+右键点这个应用选 **打开** 曾是更短的一条路；现在的 macOS 菜单里已经没有这一项，剩下的是设置里的这一页。macOS 会记住这一份副本的这个决定。已经用 Developer ID 签名并公证过的构建不需要这些步骤，双击即可；发行说明会写明某次下载属于哪一种。
 
 ## 关于这个名字
 
