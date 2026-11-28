@@ -4,7 +4,7 @@
 
 One binary, one double-click, one page in your browser. You describe the app you want; an agent writes it on your own machine — React front end, Rust back end, SQLite storage — and the page reloads while it is being written.
 
-> **Status: early, and it runs. `v0.1.2` is published for macOS arm64, Windows x64 and Linux x64.** [Download it](https://github.com/argszero/deepnest/releases/latest), or run it from source: `cargo run -p deepnest` serves `http://127.0.0.1:4270/`, opens that page in your desktop's browser, and writes its control token to `~/.deepnest/deepnest.token`. A model endpoint over `https` works, verified against this machine's own certificate store. **What the published build is not:** it is ad-hoc signed rather than Developer-ID signed, so macOS blocks the first copy until you allow it in **System Settings → Privacy & Security** ([how](#opening-a-macos-build)); the Windows executable is signed not at all, so SmartScreen warns once; and the agent's shell tool does not run on Windows yet ([why](#download)). The design, the sandbox, the tool set, the agent loop, the app generator, the control panel and the skill loader are all in the repository, and a source checkout runs on all three platforms today. The binary embeds a toolchain payload and unpacks it on first use, and `crates/bundle` lays out the `.app` and signs every Mach-O in it, which CI turns into a `hdiutil`-verified `.dmg`.
+> **Status: early, and it runs. `v0.1.3` is published for macOS arm64, Windows x64 and Linux x64.** [Download it](https://github.com/argszero/deepnest/releases/latest), or run it from source: `cargo run -p deepnest` serves `http://127.0.0.1:4270/`, opens that page in your desktop's browser, and writes its control token to `~/.deepnest/deepnest.token`. A model endpoint over `https` works, verified against this machine's own certificate store. **What the published build is not:** it is ad-hoc signed rather than Developer-ID signed, so macOS blocks the first copy until you allow it in **System Settings → Privacy & Security** ([how](#opening-a-macos-build)); the Windows executable is signed not at all, so SmartScreen warns once; and the agent's shell tool does not run on Windows yet ([why](#download)). The design, the sandbox, the tool set, the agent loop, the app generator, the control panel and the skill loader are all in the repository, and a source checkout runs on all three platforms today. The binary embeds a toolchain payload and unpacks it on first use, and `crates/bundle` lays out the `.app` and signs every Mach-O in it, which CI turns into a `hdiutil`-verified `.dmg`.
 
 ---
 
@@ -58,13 +58,13 @@ deepnest checks for them before the first build and walks you through installing
 
 ## Download
 
-`v0.1.2` ships one file per platform, on the [releases page](https://github.com/argszero/deepnest/releases/latest):
+`v0.1.3` ships one file per platform, on the [releases page](https://github.com/argszero/deepnest/releases/latest):
 
 | Platform | File | What it is |
 |---|---|---|
-| macOS arm64 | `Deepnest-0.1.2-arm64-mac.dmg` | ad-hoc signed, not notarized — read the next section before opening it |
-| Windows x64 | `Deepnest-0.1.2-x64-windows.exe` | not signed at all — SmartScreen asks once; one file, nothing to install |
-| Linux x64 | `Deepnest-0.1.2-x64-linux.tar.gz` | not signed at all; a tarball because that is what carries the executable bit — glibc, not musl |
+| macOS arm64 | `Deepnest-0.1.3-arm64-mac.dmg` | ad-hoc signed, not notarized — read the next section before opening it |
+| Windows x64 | `Deepnest-0.1.3-x64-windows.exe` | not signed at all — SmartScreen asks once; one file, nothing to install |
+| Linux x64 | `Deepnest-0.1.3-x64-linux.tar.gz` | not signed at all; a tarball because that is what carries the executable bit — glibc, not musl |
 
 A `.sha256` sits beside each download. Each carries the Rust toolchain and the JavaScript runtime, so the first app can be built on a machine with nothing installed beyond the OS and its C toolchain (see [System requirements](#system-requirements)).
 

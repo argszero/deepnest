@@ -4,7 +4,7 @@
 
 一个可执行文件，双击运行，打开浏览器里的一个页面。你说出想要的应用，agent 就在你自己的机器上把它写出来 —— React 前端、Rust 后端、SQLite 存储 —— 边写边刷新。
 
-> **状态：早期，但已经能跑。`v0.1.2` 已发布，覆盖 macOS arm64、Windows x64 与 Linux x64。** [这里下载](https://github.com/argszero/deepnest/releases/latest)，或从源码跑：`cargo run -p deepnest` 会在 `http://127.0.0.1:4270/` 上起服务，在桌面浏览器里打开这张页面，并把控制令牌写到 `~/.deepnest/deepnest.token`。`https` 的模型端点已经能用，证书按本机自己的证书库校验。**这份已发布的构建不是什么：** 它是 ad-hoc 签名而不是 Developer ID 签名，所以第一次打开那一份副本时 macOS 会拦下来，要你去 **系统设置 → 隐私与安全性** 里放行（[怎么做](#打开-macos-上的构建)）；Windows 的可执行文件完全没有签名，SmartScreen 会问一次；而且 agent 的 shell 工具在 Windows 上还跑不了（[原因](#下载)）。设计、沙箱、工具集、agent 循环、应用生成、控制面板与 skill 加载器都在仓库里，从源码在三个平台上今天都能跑。二进制里嵌着一份工具链载荷，第一次用到时解包；`crates/bundle` 铺出 `.app` 并逐个签里面每个 Mach-O，CI 再把它做成经 `hdiutil verify` 校验的 `.dmg`。
+> **状态：早期，但已经能跑。`v0.1.3` 已发布，覆盖 macOS arm64、Windows x64 与 Linux x64。** [这里下载](https://github.com/argszero/deepnest/releases/latest)，或从源码跑：`cargo run -p deepnest` 会在 `http://127.0.0.1:4270/` 上起服务，在桌面浏览器里打开这张页面，并把控制令牌写到 `~/.deepnest/deepnest.token`。`https` 的模型端点已经能用，证书按本机自己的证书库校验。**这份已发布的构建不是什么：** 它是 ad-hoc 签名而不是 Developer ID 签名，所以第一次打开那一份副本时 macOS 会拦下来，要你去 **系统设置 → 隐私与安全性** 里放行（[怎么做](#打开-macos-上的构建)）；Windows 的可执行文件完全没有签名，SmartScreen 会问一次；而且 agent 的 shell 工具在 Windows 上还跑不了（[原因](#下载)）。设计、沙箱、工具集、agent 循环、应用生成、控制面板与 skill 加载器都在仓库里，从源码在三个平台上今天都能跑。二进制里嵌着一份工具链载荷，第一次用到时解包；`crates/bundle` 铺出 `.app` 并逐个签里面每个 Mach-O，CI 再把它做成经 `hdiutil verify` 校验的 `.dmg`。
 
 ---
 
@@ -58,13 +58,13 @@ deepnest 会在第一次编译前检查，缺什么就引导你装什么，而�
 
 ## 下载
 
-`v0.1.2` 每个平台一个文件，都在[发行页](https://github.com/argszero/deepnest/releases/latest)上：
+`v0.1.3` 每个平台一个文件，都在[发行页](https://github.com/argszero/deepnest/releases/latest)上：
 
 | 平台 | 文件 | 它是什么 |
 |---|---|---|
-| macOS arm64 | `Deepnest-0.1.2-arm64-mac.dmg` | ad-hoc 签名、未公证 —— 打开之前先读下一节 |
-| Windows x64 | `Deepnest-0.1.2-x64-windows.exe` | 完全没有签名 —— SmartScreen 会问一次；一个文件，不用安装 |
-| Linux x64 | `Deepnest-0.1.2-x64-linux.tar.gz` | 完全没有签名；用 tar 包是因为只有它能带上可执行位 —— 面向 glibc，不是 musl |
+| macOS arm64 | `Deepnest-0.1.3-arm64-mac.dmg` | ad-hoc 签名、未公证 —— 打开之前先读下一节 |
+| Windows x64 | `Deepnest-0.1.3-x64-windows.exe` | 完全没有签名 —— SmartScreen 会问一次；一个文件，不用安装 |
+| Linux x64 | `Deepnest-0.1.3-x64-linux.tar.gz` | 完全没有签名；用 tar 包是因为只有它能带上可执行位 —— 面向 glibc，不是 musl |
 
 每份下载旁边都有一份 `.sha256`。每份里面都带着 Rust 工具链与 JavaScript 运行时，所以第一个应用可以在一个除操作系统和 C 工具链之外什么都没装的机器上编出来（见[系统要求](#系统要求)）。
 
