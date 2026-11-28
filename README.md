@@ -4,7 +4,7 @@
 
 One binary, one double-click, one page in your browser. You describe the app you want; an agent writes it on your own machine — React front end, Rust back end, SQLite storage — and the page reloads while it is being written.
 
-> **Status: early, and it runs. `v0.1.2` is published for macOS arm64, Windows x64 and Linux x64.** [Download it](https://github.com/argszero/deepnest/releases/latest), or run it from source: `cargo run -p deepnest` serves `http://127.0.0.1:4270/`, opens that page in your desktop's browser, and writes its control token to `~/.deepnest/deepnest.token`. A model endpoint over `https` works, verified against this machine's own certificate store. **What the published build is not:** it is ad-hoc signed rather than Developer-ID signed, so macOS makes you open the first copy by right-click → **Open** ([why](#opening-a-macos-build)); the Windows executable is signed not at all, so SmartScreen warns once; and the agent's shell tool does not run on Windows yet ([why](#download)). The design, the sandbox, the tool set, the agent loop, the app generator, the control panel and the skill loader are all in the repository, and a source checkout runs on all three platforms today. The binary embeds a toolchain payload and unpacks it on first use, and `crates/bundle` lays out the `.app` and signs every Mach-O in it, which CI turns into a `hdiutil`-verified `.dmg`.
+> **Status: early, and it runs. `v0.1.2` is published for macOS arm64, Windows x64 and Linux x64.** [Download it](https://github.com/argszero/deepnest/releases/latest), or run it from source: `cargo run -p deepnest` serves `http://127.0.0.1:4270/`, opens that page in your desktop's browser, and writes its control token to `~/.deepnest/deepnest.token`. A model endpoint over `https` works, verified against this machine's own certificate store. **What the published build is not:** it is ad-hoc signed rather than Developer-ID signed, so macOS blocks the first copy until you allow it in **System Settings → Privacy & Security** ([how](#opening-a-macos-build)); the Windows executable is signed not at all, so SmartScreen warns once; and the agent's shell tool does not run on Windows yet ([why](#download)). The design, the sandbox, the tool set, the agent loop, the app generator, the control panel and the skill loader are all in the repository, and a source checkout runs on all three platforms today. The binary embeds a toolchain payload and unpacks it on first use, and `crates/bundle` lays out the `.app` and signs every Mach-O in it, which CI turns into a `hdiutil`-verified `.dmg`.
 
 ---
 
@@ -78,12 +78,13 @@ Every download is built by CI and never from a laptop, and a `v*` tag is what bu
 
 A build published here without a Developer ID is **ad-hoc signed**, not signed by an Apple identity. macOS will therefore refuse it on the first double-click, with a message that says the developer cannot be verified.
 
-That is expected, and it is not a warning to ignore lightly — it is the one thing a signature buys and this project does not have yet. To open one anyway:
+That is expected, and it is not a warning to ignore lightly — it is the one thing a signature buys and this project does not have yet. To open one anyway, on current macOS:
 
-1. Right-click `Deepnest.app` (or the `.dmg`) and choose **Open**.
-2. Choose **Open** again in the dialog that appears.
+1. Double-click `Deepnest.app`. The refusal appears — dismiss it with **Done**.
+2. Open **System Settings → Privacy & Security**, and scroll down to the **Security** section.
+3. Next to the line saying `Deepnest.app` was blocked, click **Open Anyway**, then confirm with your password or Touch ID.
 
-macOS remembers the decision for that copy. A build that has been signed with a Developer ID and notarized needs none of this and opens on a double-click; the release notes say which of the two a given download is.
+Right-clicking the app and choosing **Open** used to be the shorter path; current macOS no longer puts that item on the menu, and the settings page is what is left. macOS remembers the decision for that copy. A build that has been signed with a Developer ID and notarized needs none of this and opens on a double-click; the release notes say which of the two a given download is.
 
 ## The name
 
